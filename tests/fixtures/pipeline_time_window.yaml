@@ -1,0 +1,35 @@
+run_dir: tests/fixtures/pipeline_time_window_run
+
+dataset:
+  type: synthetic
+  n_cases: 12
+  height: 8
+  width: 8
+  cond_dim: 3
+  seed: 7
+  axis_mode: time
+
+preprocessing:
+  split:
+    seed: 0
+    ratios: [0.7, 0.15, 0.15]
+  axis_schema:
+    mode: time
+    harmonics: 1
+
+model:
+  name: global_mlp
+
+train:
+  epochs: 5
+  lr: 0.01
+
+inference:
+  single:
+    enabled: true
+    cond: {c0: 0.2, c1: 0.5, c2: 0.8}
+    axis:
+      mode: time
+      aggregation: window_mean
+      window: [0.0, 0.5]
+      n_points: 5

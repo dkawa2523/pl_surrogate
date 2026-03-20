@@ -1,0 +1,18 @@
+compare:
+  output_dir: runs/periodic_real_tuned_v83/compare_mainline_fno_deeponet_global
+  objective_metric: auto_primary
+  objective_mode: max
+  global_reference_mode: frozen
+  rows:
+    - name: global_v2_frozen_ref
+      target_family: allvars
+      leaderboard_csv: runs/periodic_real_tuned_v48/benchmark_m7_global_frozen_ref_v2/leaderboard.csv
+      model_id: global_mlp
+    - name: fno_mainline
+      target_family: allvars
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_fno_isolated_mainline/leaderboard.csv
+      model_id: fno
+    - name: deeponet_mainline
+      target_family: allvars
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_deeponet_isolated_mainline/leaderboard.csv
+      model_id: deeponet_plasma

@@ -1,0 +1,37 @@
+run_dir: tests/fixtures/pipeline_optimize_csv_run
+
+dataset:
+  type: synthetic
+  n_cases: 12
+  height: 8
+  width: 8
+  cond_dim: 3
+  seed: 7
+
+preprocessing:
+  split:
+    seed: 0
+    ratios: [0.7, 0.15, 0.15]
+  axis_schema:
+    mode: steady
+    harmonics: 1
+
+model:
+  name: global_mlp
+
+train:
+  epochs: 5
+  lr: 0.01
+
+inference:
+  optimize:
+    enabled: true
+    backend: csv
+    n_trials: 10
+    space:
+      c0: [0.0, 1.0]
+      c1: [0.0, 1.0]
+      c2: [0.0, 1.0]
+    backend_cfg:
+      csv_path: candidates.csv
+      deduplicate: true

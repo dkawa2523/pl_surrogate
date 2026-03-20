@@ -1,0 +1,107 @@
+benchmark:
+  output_dir: runs/periodic_real_tuned_v48/benchmark_m7_global_frozen_ref_v2
+  profile: m7_global_frozen_ref
+  seed: 411
+  phi_mode: direct
+  eval:
+    mask_metrics: plasma_only
+    interp_mode: overlap
+    protocol_variant: global_frozen_ref_v2
+    target_vars_for_score: [ne, ni, Te, phi]
+    primary_metric: test_r2_plasma_mean_dual
+    primary_mode: max
+    aggregate_score:
+      enabled: true
+      rmse_weight: 0.5
+      r2_weight: 0.4
+      boundary_penalty_weight: 0.1
+      use_plasma_metrics: true
+  eval_protocol:
+    mode: dual_axis
+    scope: global_frozen
+    primary_split: interp
+    interp_weight: 0.5
+    extrap_weight: 0.5
+    frozen_ref_tag: periodic_global_frozen_v2
+  dataset:
+    type: csv_npz
+    root: data/outputs_merged_td_csv_periodic
+    index_csv: index.csv
+    targets:
+      - {id: ne, source_key: log_ne, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: ni, source_key: log_ni, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: Te, source_key: Te, value_transform: identity, units: "eV", dtype: float32}
+      - {id: phi, source_key: phi, value_transform: identity, units: "V", dtype: float32}
+    cond_columns: [PP0, Td, gamma]
+    axis_column: axis
+    fields_npz_column: fields_npz
+    case_id_column: case_id
+    base_case_id_column: base_case_id
+    split_group_column: split_group
+    geometry_root: geometry
+  split:
+    seed: 7
+    ratios: [0.7, 0.15, 0.15]
+  preprocessing:
+    scalers:
+      enforce_target_transforms: true
+      y_fit_policy: plasma_only
+      target_transforms:
+        ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        phi: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+    distance_contract:
+      require_negative_outside: error
+    coord_grid_contract:
+      require_requested_source: warn
+    coord_grid_source: coord_grid
+  train:
+    global_mlp:
+      epochs: 80
+      lr: 0.0008
+      batch_size_cases: 6
+      shuffle_cases: true
+      grad_scale:
+        mode: auto
+        auto_ref: active_pixels
+        auto_power: 0.5
+      layer_lr_multiplier: {hidden: 1.0, output: 20.0}
+      grad_clip: {mode: per_sample, norm: 1.0, adaptive_by_dim: true}
+      output_head_refresh: {enabled: true, every_n_epochs: 5, ridge: 0.0001}
+      model_cfg:
+        hidden: [128, 128]
+        dropout: 0.0
+        weight_decay: 0.0
+    loss:
+      supervised:
+        type: huber
+        delta: 1.0
+        normalization: sample_mean
+        sample_mean_group_mode: batch
+        sample_mean_weight_denominator: count
+        mask: plasma_only
+        nan_region_policy: sdf_continuous
+        chamber_weight_by_var:
+          ne: 0.0
+          ni: 0.0
+          Te: 0.05
+          phi: 0.08
+        sdf_weighting:
+          tau_in: 2.0
+          tau_out: 1.5
+          w_boundary: 3.0
+          w_inner: 1.0
+          w_chamber_floor: 0.08
+      multitask:
+        weighting: uncertainty
+        sigma_init: {ne: 0.0, ni: 0.0, Te: 0.0, phi: 0.0}
+        sigma_clamp: [-3.0, 3.0]
+  boundary_operator:
+    primary_qoi_key: Gamma_i
+  physics:
+    enabled: false
+  inference:
+    axis:
+      mode: steady
+      value: 0.0
