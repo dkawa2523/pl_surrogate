@@ -1,0 +1,33 @@
+# Merge this fragment into an existing pipeline or benchmark YAML.
+model:
+  name: unetpp_attn
+
+train:
+  unetpp_attn:
+    target_family: allvars
+    target_vars: [<set-to-output_layout.vars>]
+    epochs: 80
+    optimizer:
+      type: adamw
+      schedule: cosine
+    input_features:
+      mode: geom_feature_pack
+      require_pack: error
+      features: [x, y, mask_plasma, distance_signed, distance_any]
+    model_cfg:
+      backend: torch
+      conv_cfg:
+        base_channels: 32
+        depth: 2
+        upsample_mode: bilinear
+        nested_skip: true
+        attention_cfg:
+          enabled: true
+          reduction: 2
+          gate_activation: sigmoid
+        deep_supervision:
+          enabled: false
+      output_heads:
+        mode: shared
+    selection:
+      mode: best_val_allvars_balance

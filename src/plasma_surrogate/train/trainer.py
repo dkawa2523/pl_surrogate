@@ -75,6 +75,15 @@ def _masked_r2(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> floa
     return masked_r2_score(y_true, y_pred, mask)
 
 
+def _normalize_unet_selection_mode(raw_mode: Any) -> str:
+    mode = str(raw_mode).strip().lower()
+    legacy_aliases = {
+        "best_val_allvars_boundary_balance": "best_val_allvars_balance",
+        "best_val_field_boundary_balance": "best_val_allvars_balance",
+    }
+    return legacy_aliases.get(mode, mode)
+
+
 def _unet_allvars_boundary_balance_score(
     *,
     pred: np.ndarray,
@@ -1043,7 +1052,7 @@ class Trainer:
         min_step_ratio = float(fail_fast_cfg.get("min_step_ratio", 1.0e-4))
         patience_epochs = int(max(int(fail_fast_cfg.get("patience_epochs", 10)), 1))
         selection_cfg = dict(selection_cfg or {})
-        selection_mode = str(selection_cfg.get("mode", "last")).strip().lower()
+        selection_mode = _normalize_unet_selection_mode(selection_cfg.get("mode", "last"))
         if selection_mode not in {"last", "best_val_allvars_balance"}:
             raise ValueError(
                 "train.unet.selection.mode must be one of: last, best_val_allvars_balance"

@@ -1,0 +1,24 @@
+# Example compare/benchmark planning fragment.
+# Merge into an existing benchmark/compare YAML after isolated model smoke tests are green.
+benchmark:
+  profile: m7_periodic_common
+  eval:
+    target_family_for_score: auto
+    target_vars_for_score: auto
+    primary_metric: auto_primary
+    primary_mode: min
+
+compare:
+  global_reference_mode: frozen
+  objective_metric: auto_primary
+  objective_mode: min
+  rows:
+    - name: global_mlp
+      model_id: global_mlp
+      leaderboard_csv: runs/benchmark_global/leaderboard.csv
+    - name: unetpp
+      model_id: unetpp
+      leaderboard_csv: runs/benchmark_unetpp/leaderboard.csv
+    - name: ffno
+      model_id: ffno
+      leaderboard_csv: runs/benchmark_ffno/leaderboard.csv

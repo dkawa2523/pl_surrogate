@@ -1,0 +1,26 @@
+# Merge this fragment into an existing pipeline or benchmark YAML.
+model:
+  name: coord_mlp_siren
+
+train:
+  coord_mlp_siren:
+    target_family: allvars
+    target_vars: [<set-to-output_layout.vars>]
+    epochs: 120
+    optimizer:
+      type: adamw
+      schedule: cosine
+    input_features:
+      mode: geom_feature_pack
+      require_pack: error
+      features: [x, y, mask_plasma, distance_signed, distance_any]
+      distance_transform:
+        mode: bounded_auto
+    model_cfg:
+      cond_hidden: [128, 128]
+      latent_dim: 128
+      decoder_hidden: [256, 256, 256]
+      siren:
+        enabled: true
+        w0_initial: 30.0
+        w0_hidden: 1.0

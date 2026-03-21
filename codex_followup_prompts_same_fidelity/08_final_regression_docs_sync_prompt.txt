@@ -1,0 +1,86 @@
+あなたは、この repository を直接編集する実装担当です。目的は、ここまで追加した same-fidelity / low-data 拡張の **最終整合確認** を行い、docs / tests / config / registry のズレを潰して、VS Code 上の別開発者がそのまま読める状態に仕上げることです。
+
+この prompt は、前段の model 実装と benchmark / compare 整備が保存済みである前提で使います。今回のタスクは **最終 regression / docs sync / cleanup** だけです。新モデルや新アルゴリズムの追加はしないでください。
+
+最初に必ず、次のファイルをこの順で読んでください。
+1. docs/09_same_fidelity_low_data_extensions.md
+2. docs/09_same_fidelity_low_data_extensions/README.md
+3. docs/09_same_fidelity_low_data_extensions/00_common_guardrails.md
+4. docs/09_same_fidelity_low_data_extensions/10_unetpp_and_attention.md
+5. docs/09_same_fidelity_low_data_extensions/20_ffno.md
+6. docs/09_same_fidelity_low_data_extensions/30_coord_mlp_family.md
+7. docs/09_same_fidelity_low_data_extensions/40_pod_deeponet.md
+8. docs/09_same_fidelity_low_data_extensions/90_benchmark_and_tests.md
+9. docs/04_training_models.md
+10. docs/07_extension_guide.md
+11. ここまでに変更した models / io / dispatch / benchmark / tests / configs 一式
+
+今回のタスク:
+- 実装済み model_id / YAML キー / docs 記述 / checkpoint meta / fixture 名のズレを洗い出して修正する
+- 追加モデルと既存 mainline の回帰テストをまとめて流し、壊していないことを確認する
+- docs の導線を整え、Codex や別開発者が repo 内ドキュメントだけで追える状態にする
+- 未実装 TODO を明示的に残す
+
+対象モデル:
+- unetpp
+- unetpp_attn
+- ffno
+- coord_mlp_fourier
+- coord_mlp_siren
+- deeponet_pod
+
+絶対条件:
+- 既存 `global_mlp`, `unet`, `fno`, `deeponet_plasma` の挙動を壊さない
+- target 名固定コードを増やさない
+- `dataset.targets[].id`, `output_layout.vars`, `preprocessing.scalers.target_transforms.<var>` を真実源とする前提を壊さない
+- benchmark / compare の dynamic target 前提を壊さない
+- docs と実装の齟齬を残したまま「完了」としない
+
+実装内容の要件:
+1. docs sync
+   - 必要なら `docs/04_training_models.md` に追加モデルの位置づけを追記する
+   - 必要なら `docs/07_extension_guide.md` に builder / dispatch / tests / fixture の接続点を追記する
+   - `docs/09_same_fidelity_low_data_extensions.md` から各個別仕様への導線を確認する
+   - docs 内の path, model_id, YAML key, fixture 名が実装と一致しているか確認する
+
+2. config / fixture / registry sync
+   - `configs/experimental/same_fidelity_low_data/*.yaml` の model 名や key が実装と一致しているか確認する
+   - `tests/fixtures/*.yaml` の model_id が実装と一致しているか確認する
+   - `models/mlp/io.py` の builder / load / save registry と docs が一致しているか確認する
+   - `train/model_dispatch.py` の分岐名と docs が一致しているか確認する
+
+3. regression tests
+   - 新規追加モデルの targeted tests を流す
+   - 加えて、影響を受ける既存モデルの軽量回帰も流す
+   - 目安:
+     - unit: unet / fno / global_mlp / deeponet_plasma に関係するもの
+     - integration smoke: 新規モデル一式 + 既存 `unet`, `fno` の少なくとも一部
+   - テストが重すぎる場合は、最小限の回帰セットを選び、その理由を明記する
+
+4. TODO / follow-up の明示
+   - 今回まだ入れていないものを `TODO` として docs に残してよい
+   - 例:
+     - unetpp deep supervision
+     - coord_mlp point sampling / chunked decode
+     - deeponet_pod の preprocess artifact 化
+     - mainline 昇格条件の再評価
+   - TODO は「今後の拡張」と「今回 intentionally omitted」を区別して書く
+
+実装方針:
+- まず repo を読んで、今回追加したモデル群の registry と docs が一致しているか観点を列挙する
+- その後で変更計画を箇条書きで示す
+- その計画に沿って docs / tests / config / registry を調整する
+- 変更は最小差分を優先し、大規模リファクタはしない
+- 既存テストが不安定なら、それを回避せず原因と範囲を明示する
+
+作業完了時の出力要件:
+- 変更したファイル一覧
+- docs / config / fixture / registry の同期内容の要約
+- 実行したテストと結果
+- 残した TODO と理由
+- 既知の制約や今後の follow-up を簡潔に列挙
+
+重要:
+- 今回は **最終 regression / docs sync / cleanup だけ**
+- 新しいモデルや physics-informed 機能は追加しない
+- docs と実装の一貫性を最優先にする
