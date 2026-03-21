@@ -72,6 +72,43 @@ def test_guardrail_error_mode_raises() -> None:
         )
 
 
+def test_aggregate_unet_contract_effective_uses_explicit_model_key() -> None:
+    runner = BenchmarkRunner({"benchmark": {}})
+    out = runner._aggregate_unet_contract_effective(
+        train_cfg={
+            "unetpp": {
+                "target_family": "allvars",
+                "input_features": {"mode": "geom_feature_pack", "features": ["x", "y"]},
+                "selection": {"mode": "best_val_allvars_balance"},
+                "model_cfg": {"conv_cfg": {"upsample_mode": "deconv"}, "output_heads": {"mode": "shared"}},
+            },
+            "unetpp_attn": {
+                "target_family": "allvars",
+                "input_features": {
+                    "mode": "geom_feature_pack",
+                    "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+                },
+                "selection": {"mode": "best_val_allvars_balance"},
+                "model_cfg": {
+                    "conv_cfg": {"upsample_mode": "bilinear", "attention_cfg": {"enabled": True}},
+                    "output_heads": {"mode": "shared"},
+                },
+            },
+        },
+        y_vars=["ne", "ni", "Te", "phi"],
+        model_key="unetpp_attn",
+        unet_contract_samples=[],
+    )
+    assert out["unet_feature_contract_effective"]["upsample_mode"] == "bilinear"
+    assert out["unet_feature_contract_effective"]["input_feature_channels"] == [
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+    ]
+
+
 def test_validate_eval_scope_train_sections_common_allows_mixed_train_cfg() -> None:
     BenchmarkRunner._validate_eval_scope_train_sections(
         scope="common",
@@ -88,7 +125,10 @@ def test_validate_eval_scope_train_sections_common_allows_mixed_train_cfg() -> N
     ("scope", "train_cfg"),
     [
         ("unet_isolated", {"global_mlp": {"epochs": 1}}),
+        ("unetpp_isolated", {"unet": {"epochs": 1}}),
+        ("unetpp_attn_isolated", {"unetpp": {"epochs": 1}}),
         ("fno_isolated", {"unet": {"epochs": 1}}),
+        ("ffno_isolated", {"fno": {"epochs": 1}}),
         ("deeponet_isolated", {"fno": {"epochs": 1}}),
         ("global_frozen", {"deeponet_plasma": {"epochs": 1}}),
     ],

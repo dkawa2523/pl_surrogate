@@ -6,12 +6,14 @@ from importlib import import_module
 
 __all__ = [
     "DeepONetPlasmaOperatorTorch",
+    "PODDeepONetTorch",
     "DeepONetPoissonHeadTorch",
     "BoundaryOperatorTorch",
 ]
 
 _EXPORT_MAP = {
     "DeepONetPlasmaOperatorTorch": "plasma_surrogate.models.deeponet.plasma_operator_torch",
+    "PODDeepONetTorch": "plasma_surrogate.models.deeponet.pod_deeponet_torch",
     "DeepONetPoissonHeadTorch": "plasma_surrogate.models.deeponet.poisson_head_torch",
     "BoundaryOperatorTorch": "plasma_surrogate.models.deeponet.boundary_operator_torch",
 }

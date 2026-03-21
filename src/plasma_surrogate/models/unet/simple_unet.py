@@ -6,13 +6,19 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.models.unet._torch_spatial_base import (
+    _TorchSpatialFieldMixin,
+    _build_unit_coord_grid,
+)
 
-class UNetBaseline:
+class UNetBaseline(_TorchSpatialFieldMixin):
     """
     UNet baseline with two backends:
     - numpy: legacy per-pixel head on [cond + spatial features]
     - torch: real 2D conv encoder-decoder with skip connection
     """
+
+    _spatial_label = "unet"
 
     def __init__(
         self,
@@ -59,11 +65,7 @@ class UNetBaseline:
         self._cache: dict[str, object] = {}
         self._static_spatial_features: np.ndarray | None = None
 
-        h, w = self.grid_shape
-        yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
-        xx = np.linspace(0.0, 1.0, w, dtype=np.float32)
-        yv, xv = np.meshgrid(yy, xx, indexing="ij")
-        self.coord = np.stack([xv, yv], axis=-1).astype(np.float32)  # [H,W,2]
+        self.coord = _build_unit_coord_grid(self.grid_shape)
 
         if self.backend == "numpy":
             if self.output_heads_mode != "shared":
@@ -329,77 +331,16 @@ class UNetBaseline:
         self.head_arch_version = "conv_unet_v1"
 
     def set_static_spatial_features(self, spatial_features: np.ndarray | None) -> None:
-        if spatial_features is None:
-            self._static_spatial_features = None
-            return
-        arr = np.asarray(spatial_features, dtype=np.float32)
-        if arr.ndim != 3:
-            raise ValueError(f"unet spatial features must be [H,W,C], got {arr.shape}")
-        h, w = self.grid_shape
-        if tuple(arr.shape[:2]) != (h, w):
-            raise ValueError(
-                f"unet spatial features shape mismatch: expected {(h, w, arr.shape[2])}, got {arr.shape}"
-            )
-        if int(arr.shape[2]) != int(self.spatial_feature_dim):
-            raise ValueError(
-                "unet spatial feature channels mismatch: "
-                f"expected {self.spatial_feature_dim}, got {int(arr.shape[2])}"
-            )
-        self._static_spatial_features = arr.astype(np.float32)
+        return _TorchSpatialFieldMixin.set_static_spatial_features(self, spatial_features)
 
     def _resolve_spatial_features(self, cond: np.ndarray, spatial_features: np.ndarray | None) -> np.ndarray:
-        x = np.asarray(cond, dtype=np.float32)
-        if x.ndim == 1:
-            x = x[None, :]
-        bsz = int(x.shape[0])
-        h, w = self.grid_shape
-        src = spatial_features if spatial_features is not None else self._static_spatial_features
-        if src is None:
-            if self.spatial_feature_dim != 2:
-                raise ValueError(
-                    "unet input_features requires explicit spatial features for channels "
-                    f"{self.input_feature_channels}"
-                )
-            return np.repeat(self.coord[None, ...], bsz, axis=0).astype(np.float32)
-        arr = np.asarray(src, dtype=np.float32)
-        if arr.ndim == 3:
-            if tuple(arr.shape[:2]) != (h, w):
-                raise ValueError(f"unet spatial features shape mismatch: expected {(h, w)}, got {arr.shape[:2]}")
-            if int(arr.shape[2]) != int(self.spatial_feature_dim):
-                raise ValueError(
-                    f"unet spatial feature channels mismatch: expected {self.spatial_feature_dim}, got {arr.shape[2]}"
-                )
-            return np.repeat(arr[None, ...], bsz, axis=0).astype(np.float32)
-        if arr.ndim == 4:
-            if tuple(arr.shape[1:3]) != (h, w):
-                raise ValueError(f"unet spatial features shape mismatch: expected {(h, w)}, got {arr.shape[1:3]}")
-            if int(arr.shape[3]) != int(self.spatial_feature_dim):
-                raise ValueError(
-                    f"unet spatial feature channels mismatch: expected {self.spatial_feature_dim}, got {arr.shape[3]}"
-                )
-            if int(arr.shape[0]) == bsz:
-                return arr.astype(np.float32)
-            if int(arr.shape[0]) == 1:
-                return np.repeat(arr, bsz, axis=0).astype(np.float32)
-            raise ValueError(
-                f"unet spatial features batch mismatch: cond batch={bsz}, features batch={arr.shape[0]}"
-            )
-        raise ValueError(f"unet spatial features must be [H,W,C] or [B,H,W,C], got {arr.shape}")
+        return _TorchSpatialFieldMixin._resolve_spatial_features(self, cond, spatial_features)
 
     def _feature_map(self, cond: np.ndarray, spatial_features: np.ndarray | None = None) -> np.ndarray:
-        x = np.asarray(cond, dtype=np.float32)
-        if x.ndim == 1:
-            x = x[None, :]
-        bsz = x.shape[0]
-        h, w = self.grid_shape
-        cond_map = np.repeat(x[:, None, None, :], h, axis=1)
-        cond_map = np.repeat(cond_map, w, axis=2)
-        spatial_map = self._resolve_spatial_features(x, spatial_features)
-        return np.concatenate([cond_map, spatial_map], axis=-1).astype(np.float32)  # [B,H,W,F]
+        return _TorchSpatialFieldMixin._feature_map(self, cond, spatial_features=spatial_features)
 
     def feature_matrix(self, cond: np.ndarray, spatial_features: np.ndarray | None = None) -> np.ndarray:
-        fmap = self._feature_map(cond, spatial_features=spatial_features)
-        return fmap.reshape(-1, self.feature_dim).astype(np.float32)
+        return _TorchSpatialFieldMixin.feature_matrix(self, cond, spatial_features=spatial_features)
 
     def _activate(self, z: np.ndarray) -> np.ndarray:
         if self.head_activation == "relu":
@@ -445,23 +386,16 @@ class UNetBaseline:
         self._cache = {"acts": acts, "zs": zs, "drops": drops}
         return np.moveaxis(a.reshape(bsz, *self.grid_shape, self.raw_out_channels), -1, 1).astype(np.float32)
 
+    def _torch_forward(self, xt):
+        return self.net(xt, output_keys=self.output_keys)
+
     def _forward_raw_torch(self, cond: np.ndarray, *, training: bool, spatial_features: np.ndarray | None) -> np.ndarray:
-        torch = self.torch
-        fmap = self._feature_map(cond, spatial_features=spatial_features)
-        x = np.moveaxis(fmap, -1, 1).astype(np.float32)  # [B,F,H,W]
-        xt = torch.from_numpy(x)
-        if training:
-            self.net.train()
-            yt = self.net(xt, output_keys=self.output_keys)
-            self._torch_last_in = xt
-            self._torch_last_out = yt
-        else:
-            self.net.eval()
-            with torch.no_grad():
-                yt = self.net(xt, output_keys=self.output_keys)
-            self._torch_last_in = None
-            self._torch_last_out = None
-        return yt.detach().cpu().numpy().astype(np.float32)
+        return _TorchSpatialFieldMixin._forward_raw_torch(
+            self,
+            cond,
+            training=bool(training),
+            spatial_features=spatial_features,
+        )
 
     def _forward_raw(self, cond: np.ndarray, *, training: bool = False, spatial_features: np.ndarray | None = None) -> np.ndarray:
         if self.backend == "torch":
@@ -477,6 +411,8 @@ class UNetBaseline:
         return self._forward_raw(cond, training=bool(training), spatial_features=spatial_features)
 
     def forward_features(self, cond: np.ndarray, spatial_features: np.ndarray | None = None) -> dict[str, np.ndarray]:
+        if self.backend == "torch":
+            return _TorchSpatialFieldMixin.forward_features(self, cond, spatial_features=spatial_features)
         y = self._forward_raw(cond, training=False, spatial_features=spatial_features)
         out = {name: y[:, i : i + 1] for i, name in enumerate(self.output_keys)}
         if self.with_rho_eff_head:
@@ -489,7 +425,7 @@ class UNetBaseline:
         )
 
     def predict_fields(self, cond: np.ndarray, spatial_features: np.ndarray | None = None) -> dict[str, np.ndarray]:
-        return self.forward_features(cond, spatial_features=spatial_features)
+        return _TorchSpatialFieldMixin.predict_fields(self, cond, spatial_features=spatial_features)
 
     def backward_raw(
         self,
@@ -514,38 +450,7 @@ class UNetBaseline:
         return hidden, out
 
     def _backward_raw_torch(self, grad_raw: np.ndarray, *, lr: float, apply_step: bool = True) -> dict[str, float]:
-        if self._torch_last_out is None:
-            raise RuntimeError("UNetBaseline.backward_raw called without torch forward cache")
-        torch = self.torch
-        grad_t = torch.as_tensor(np.asarray(grad_raw, dtype=np.float32))
-        params = [p for p in self.net.parameters() if p.requires_grad]
-        if not params:
-            return {"step_rel_hidden_mean": 0.0, "step_rel_output": 0.0}
-        hidden_w, out_w = self._torch_step_reference()
-        with torch.no_grad():
-            w_hidden_prev = hidden_w.detach().clone() if hidden_w is not None else None
-            w_out_prev = out_w.detach().clone() if out_w is not None else None
-        for p in params:
-            if p.grad is not None:
-                p.grad.zero_()
-        self._torch_last_out.backward(grad_t)
-        step_hidden = 0.0
-        step_out = 0.0
-        if apply_step:
-            with torch.no_grad():
-                for p in params:
-                    if p.grad is not None:
-                        p -= float(lr) * p.grad
-                hidden_w_cur, out_w_cur = self._torch_step_reference()
-                if hidden_w_cur is not None and w_hidden_prev is not None:
-                    dh = hidden_w_cur.detach() - w_hidden_prev
-                    step_hidden = float(torch.linalg.norm(dh) / max(float(torch.linalg.norm(w_hidden_prev)), 1e-12))
-                if out_w_cur is not None and w_out_prev is not None:
-                    do = out_w_cur.detach() - w_out_prev
-                    step_out = float(torch.linalg.norm(do) / max(float(torch.linalg.norm(w_out_prev)), 1e-12))
-        self._torch_last_out = None
-        self._torch_last_in = None
-        return {"step_rel_hidden_mean": step_hidden, "step_rel_output": step_out}
+        return _TorchSpatialFieldMixin._backward_raw_torch(self, grad_raw, lr=float(lr), apply_step=bool(apply_step))
 
     def _backward_raw_numpy(self, grad_raw: np.ndarray, *, lr: float, weight_decay: float = 0.0) -> dict[str, float]:
         grad_y = np.moveaxis(np.asarray(grad_raw, dtype=np.float32), 1, -1).reshape(-1, self.raw_out_channels)
@@ -600,9 +505,7 @@ class UNetBaseline:
     def state_dict_numpy(self) -> dict[str, np.ndarray]:
         out: dict[str, np.ndarray] = {}
         if self.backend == "torch":
-            for name, tensor in self.net.state_dict().items():
-                out[f"torch::{name}"] = tensor.detach().cpu().numpy().astype(np.float32)
-            return out
+            return self._state_dict_numpy_torch()
         if self.head_enabled:
             for i, (w, b) in enumerate(zip(self.weights, self.biases)):
                 out[f"layer{i}.W"] = np.asarray(w, dtype=np.float32)
@@ -614,15 +517,7 @@ class UNetBaseline:
 
     def load_state_dict_numpy(self, state: dict[str, np.ndarray]) -> None:
         if self.backend == "torch":
-            torch = self.torch
-            state_t = {
-                k.split("torch::", 1)[1]: torch.from_numpy(np.asarray(v, dtype=np.float32))
-                for k, v in state.items()
-                if str(k).startswith("torch::")
-            }
-            if not state_t:
-                raise ValueError("UNetBaseline(torch) state dict does not contain expected torch::* weights")
-            self.net.load_state_dict(state_t, strict=True)
+            self._load_state_dict_numpy_torch(state)
             return
 
         if "layer0.W" in state and "layer0.b" in state:

@@ -46,9 +46,9 @@ def main() -> int:
     compare_cfg = cfg.get("compare", cfg)
     out_dir = Path(str(compare_cfg.get("output_dir", "runs/compare_selected")))
     out_dir.mkdir(parents=True, exist_ok=True)
-    objective_metric_raw = str(compare_cfg.get("objective_metric", "test_rmse_phi"))
+    objective_metric_raw = str(compare_cfg.get("objective_metric", "auto_primary")).strip()
     objective_mode = str(compare_cfg.get("objective_mode", "min"))
-    primary_metric_cfg = str(compare_cfg.get("primary_metric", objective_metric_raw))
+    primary_metric_cfg = str(compare_cfg.get("primary_metric", "")).strip()
     global_reference_mode = str(compare_cfg.get("global_reference_mode", "off")).strip().lower()
     if global_reference_mode not in {"off", "frozen"}:
         raise ValueError("compare.global_reference_mode must be one of: off, frozen")
@@ -64,9 +64,9 @@ def main() -> int:
         row = next((r for r in data if str(r.get("model_id")) == model_id), None)
         if row is None:
             raise ValueError(f"model_id={model_id} not found in {lb}")
-        row_primary_metric = str(row.get("primary_metric", primary_metric_cfg))
+        row_primary_metric = str(row.get("primary_metric", "")).strip() or primary_metric_cfg
         if not row_primary_metric:
-            row_primary_metric = primary_metric_cfg
+            raise ValueError(f"row for model_id={model_id} does not expose primary_metric and compare.primary_metric is unset")
         out_row: dict[str, Any] = {
             "name": str(item.get("name", model_id)),
             "model_id": model_id,
@@ -104,7 +104,7 @@ def main() -> int:
     if objective_metric_raw == "auto_primary":
         metric_candidates = [str(r.get("primary_metric", "")) for r in rows_out if str(r.get("primary_metric", ""))]
         unique_metrics = {m for m in metric_candidates if m}
-        objective_metric = "primary_metric_value" if len(unique_metrics) > 1 else (metric_candidates[0] if metric_candidates else primary_metric_cfg)
+        objective_metric = "primary_metric_value" if len(unique_metrics) > 1 else (metric_candidates[0] if metric_candidates else "primary_metric_value")
     else:
         objective_metric = objective_metric_raw
 

@@ -21,12 +21,20 @@ train:
       spectral_cfg:
         width: 64
         n_layers: 4
-        dealias_ratio: 0.67
-        taper_alpha: 4.0
-        skip_filter: match_spectral
+        dealias_ratio: 0.85
+        taper_alpha: 1.5
+        skip_filter: none
         factorized_cfg:
           enabled: true
           mode: separable_1d
           share_weights: false
+        local_skip_cfg:
+          enabled: true
+          init_scale: 0.0
+        # Experimental only. Keep disabled for operational FFNO.
+        axis_mix_cfg:
+          enabled: false
+          init_h: 1.0
+          init_w: 1.0
     selection:
       mode: best_val_allvars_balance

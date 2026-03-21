@@ -15,6 +15,14 @@ from plasma_surrogate.core.density_contract import (
     resolve_allvars_order,
     resolve_family_vars,
 )
+from plasma_surrogate.core.model_families import (
+    COORD_MLP_FAMILY_MODELS,
+    GRID_TORCH_MODELS,
+    MAINLINE_GEOM_PACK_MODELS,
+    POD_DEEPONET_FAMILY_MODELS,
+    SPECTRAL_FAMILY_MODELS,
+    UNET_FAMILY_MODELS,
+)
 from plasma_surrogate.core.deeponet_contract import (
     load_supervised_boundary_targets,
     resolve_sample_idx_source,
@@ -23,11 +31,13 @@ from plasma_surrogate.core.deeponet_contract import (
 from plasma_surrogate.eval.metrics import r2_by_var, rmse_by_var
 from plasma_surrogate.models.deeponet.boundary_operator_torch import BoundaryOperatorTorch
 from plasma_surrogate.models.deeponet.plasma_operator_torch import DeepONetPlasmaOperatorTorch
+from plasma_surrogate.models.deeponet.pod_deeponet_torch import fit_pod_basis_from_targets, normalize_pod_deeponet_model_cfg
 from plasma_surrogate.models.deeponet.poisson_head_torch import DeepONetPoissonHeadTorch
 from plasma_surrogate.models.mlp.io import (
     build_model_from_name,
     resolve_deeponet_stages,
 )
+from plasma_surrogate.models.mlp.coord_mlp_torch import _normalize_coord_mlp_model_cfg
 from plasma_surrogate.preprocessing.scalers import ScalerFactory
 from plasma_surrogate.train.torch_trainer import TorchTrainer
 from plasma_surrogate.train.trainer import Trainer
@@ -196,7 +206,7 @@ def _validate_unet_like_mainline_contract(
     input_feature_channels: list[str] | None = None,
 ) -> None:
     model_key = str(model_name).strip().lower()
-    if model_key not in {"unet", "fno"}:
+    if model_key not in GRID_TORCH_MODELS:
         raise ValueError(f"unsupported unet-like model for mainline validation: {model_name}")
     cfg_prefix = f"train.{model_key}"
     family = str(target_family).strip().lower()
@@ -212,7 +222,7 @@ def _validate_unet_like_mainline_contract(
         head_mode = str(dict(dict(model_cfg or {}).get("output_heads", {})).get("mode", "shared")).strip().lower()
         if head_mode != "shared":
             raise ValueError(f"{cfg_prefix}.model_cfg.output_heads.mode must be shared for mainline")
-    if model_key == "fno":
+    if model_key in MAINLINE_GEOM_PACK_MODELS:
         mode = str(input_features_mode or "").strip().lower()
         if mode != "geom_feature_pack":
             raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack for mainline")
@@ -240,6 +250,75 @@ def _validate_unet_like_mainline_contract(
     for forbidden_key in ("density_positivity_penalty", "density_relative_weighting"):
         if forbidden_key in sup_cfg:
             raise ValueError(f"train.loss.supervised.{forbidden_key} is removed from {model_key} mainline")
+
+
+def _validate_coord_mlp_experimental_contract(
+    *,
+    model_name: str,
+    y_vars: list[str],
+    target_family: str,
+    target_vars: list[str],
+    input_features_cfg: dict[str, Any],
+    input_feature_channels: list[str],
+) -> None:
+    model_key = str(model_name).strip().lower()
+    if model_key not in COORD_MLP_FAMILY_MODELS:
+        raise ValueError(f"unsupported coord-mlp model: {model_name}")
+    cfg_prefix = f"train.{model_key}"
+    family = str(target_family).strip().lower()
+    if family != "allvars":
+        raise ValueError(f"{cfg_prefix}.target_family must be allvars for coord-mlp experimental")
+    expected = list(y_vars)
+    if list(target_vars) != expected:
+        raise ValueError(f"{cfg_prefix}.target_vars must match output_layout.vars order: expected={expected}, got={target_vars}")
+    mode = str(dict(input_features_cfg).get("mode", "")).strip().lower()
+    if mode != "geom_feature_pack":
+        raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack")
+    if len(set(str(v) for v in input_feature_channels)) != len(list(input_feature_channels)):
+        raise ValueError(f"{cfg_prefix}.input_features.features must not contain duplicates")
+
+
+def _validate_pod_deeponet_experimental_contract(
+    *,
+    y_vars: list[str],
+    target_family: str,
+    target_vars: list[str],
+    model_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    cfg_prefix = "train.deeponet_pod"
+    family = str(target_family).strip().lower()
+    if family != "allvars":
+        raise ValueError(f"{cfg_prefix}.target_family must be allvars for deeponet_pod experimental")
+    expected = list(y_vars)
+    if list(target_vars) != expected:
+        raise ValueError(f"{cfg_prefix}.target_vars must match output_layout.vars order: expected={expected}, got={target_vars}")
+    normalized_cfg = normalize_pod_deeponet_model_cfg(model_cfg, model_type="deeponet_pod")
+    basis_cfg = dict(normalized_cfg.get("basis", {}))
+    rank = int(basis_cfg.get("rank", 32))
+    if rank < 1:
+        raise ValueError(f"{cfg_prefix}.model_cfg.basis.rank must be >= 1")
+    fit_scope = str(basis_cfg.get("fit_scope", "train_only")).strip().lower()
+    if fit_scope != "train_only":
+        raise ValueError(f"{cfg_prefix}.model_cfg.basis.fit_scope must be train_only")
+    per_var = bool(basis_cfg.get("per_var", True))
+    if not per_var:
+        raise ValueError(f"{cfg_prefix}.model_cfg.basis.per_var must be true")
+    center = bool(basis_cfg.get("center", True))
+    return {
+        "rank": int(rank),
+        "fit_scope": fit_scope,
+        "per_var": per_var,
+        "center": center,
+    }
+
+
+def _grid_contract_warning_key(model_name: str) -> str:
+    model_key = str(model_name).strip().lower()
+    if model_key in COORD_MLP_FAMILY_MODELS:
+        return "coord_mlp_contract_warnings"
+    if model_key in SPECTRAL_FAMILY_MODELS:
+        return "grid_contract_warnings"
+    return "unet_contract_warnings"
 
 
 def _validate_deeponet_mainline_contract(
@@ -327,6 +406,72 @@ def _validate_deeponet_mainline_contract(
     for forbidden_key in ("density_positivity_penalty", "density_relative_weighting"):
         if forbidden_key in sup_cfg:
             raise ValueError(f"train.loss.supervised.{forbidden_key} is removed from deeponet mainline")
+
+
+def _build_spectral_contract_effective(
+    *,
+    prefix: str,
+    cfg: dict[str, Any],
+    selection_cfg: dict[str, Any],
+    optimizer_cfg: dict[str, Any],
+    input_features_mode: str,
+    input_feature_channels: list[str],
+    target_family: str,
+    target_vars: list[str],
+    loss_cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    spectral_cfg = dict(dict(cfg.get("model_cfg", {})).get("spectral_cfg", {}))
+    out = {
+        f"{prefix}_backend_effective": "torch",
+        f"{prefix}_input_channels_effective": list(input_feature_channels),
+        f"{prefix}_input_features_mode_effective": str(input_features_mode),
+        f"{prefix}_selection_mode_effective": str(selection_cfg.get("mode", "last")).strip().lower(),
+        "selection_weights_effective": dict(selection_cfg.get("weights", {})),
+        f"{prefix}_optimizer_effective": {
+            "type": str(optimizer_cfg.get("type", "adamw")).strip().lower(),
+            "lr": float(optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3)))),
+            "schedule": str(optimizer_cfg.get("schedule", "none")).strip().lower(),
+            "warmup_epochs": int(optimizer_cfg.get("warmup_epochs", 0)),
+        },
+        f"{prefix}_feature_contract_effective": {
+            "input_features_mode": str(input_features_mode),
+            "input_feature_channels": list(input_feature_channels),
+            "distance_transform_mode": str(
+                dict(dict(cfg.get("input_features", {})).get("distance_transform", {})).get("mode", "raw")
+            ).strip().lower(),
+        },
+        f"{prefix}_spectral_contract_effective": {
+            "n_modes": int(dict(cfg.get("model_cfg", {})).get("n_modes", dict(cfg.get("model_cfg", {})).get("fno_n_modes", 2))),
+            "dealias_ratio": float(spectral_cfg.get("dealias_ratio", 1.0)),
+            "taper_alpha": float(spectral_cfg.get("taper_alpha", 0.0)),
+            "skip_filter": str(spectral_cfg.get("skip_filter", "none")).strip().lower(),
+        },
+        "target_family_effective": str(target_family),
+        "target_vars_effective": list(target_vars),
+        f"{prefix}_spatial_consistency_effective": bool(
+            dict((loss_cfg or {}).get("supervised", {}).get("spatial_consistency", {})).get("enabled", False)
+        ),
+    }
+    factorized_cfg = dict(spectral_cfg.get("factorized_cfg", {}))
+    if prefix == "ffno":
+        out[f"{prefix}_spectral_contract_effective"]["factorized_cfg"] = {
+            "enabled": bool(factorized_cfg.get("enabled", True)),
+            "mode": str(factorized_cfg.get("mode", "separable_1d")).strip().lower(),
+            "share_weights": bool(factorized_cfg.get("share_weights", False)),
+        }
+        local_skip_cfg = dict(spectral_cfg.get("local_skip_cfg", {}))
+        out[f"{prefix}_spectral_contract_effective"]["local_skip_cfg"] = {
+            "enabled": bool(local_skip_cfg.get("enabled", False)),
+            "init_scale": float(local_skip_cfg.get("init_scale", 0.0)),
+        }
+        axis_mix_cfg = dict(spectral_cfg.get("axis_mix_cfg", {}))
+        out[f"{prefix}_spectral_contract_effective"]["axis_mix_cfg"] = {
+            "enabled": bool(axis_mix_cfg.get("enabled", False)),
+            "init_h": float(axis_mix_cfg.get("init_h", 1.0)),
+            "init_w": float(axis_mix_cfg.get("init_w", 1.0)),
+        }
+    return out
 
 
 def _coord_xy_rows_from_geom(geom_ctx: Any, *, h: int, w: int) -> tuple[np.ndarray, str]:
@@ -793,88 +938,189 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
         pred_eval = ctx.transforms.inverse_field_dict(model.predict_fields(ctx.cond_scaled[ctx.te]))
         true_eval = _to_true_eval(ctx.y, ctx.te, ctx.y_vars)
-    elif model_name in {"unet", "fno"}:
+    elif model_name in POD_DEEPONET_FAMILY_MODELS:
         cfg = dict(train_cfg.get(model_name, {}))
-        unet_like_cfg = dict(train_cfg.get("unet_like", {}))
-        unet_loss_cfg = copy.deepcopy(ctx.loss_cfg or {})
-        unet_batch_size_cases = int(unet_like_cfg.get("batch_size_cases", 0))
-        unet_shuffle_cases = bool(unet_like_cfg.get("shuffle_cases", True))
-        unet_feature_channels = ["x", "y"]
-        unet_input_features_mode = "legacy_xy"
-        unet_selection_cfg: dict[str, Any] = {}
-        unet_optimizer_cfg: dict[str, Any] = {}
-        unet_backend_effective = str(dict(cfg.get("model_cfg", cfg)).get("backend", "numpy")).strip().lower()
-        unet_target_family = "allvars"
-        unet_target_vars = list(ctx.y_vars)
-        unet_target_indices = list(range(len(ctx.y_vars)))
-        unet_supervised_distance_signed = None
-        unet_supervised_bc_dir_mask = None
-        unet_supervised_wafer_mask = None
-        if model_name in {"unet", "fno"}:
+        train_key = "train.deeponet_pod"
+        pod_target_family = _resolve_unet_target_family(
+            cfg.get("target_family", "allvars"),
+            cfg_key=f"{train_key}.target_family",
+        )
+        pod_target_vars = _resolve_unet_target_vars_for_family(
+            family=pod_target_family,
+            raw_target_vars=cfg.get("target_vars"),
+            available=ctx.y_vars,
+            cfg_key=f"{train_key}.target_vars",
+        )
+        basis_cfg_effective = _validate_pod_deeponet_experimental_contract(
+            y_vars=ctx.y_vars,
+            target_family=pod_target_family,
+            target_vars=pod_target_vars,
+            model_cfg=dict(cfg.get("model_cfg", {})),
+        )
+        pod_target_indices = [ctx.y_vars.index(v) for v in pod_target_vars]
+        pod_y_train = np.asarray(ctx.y_scaled[ctx.tr][:, pod_target_indices], dtype=np.float32)
+        pod_basis_bundle = fit_pod_basis_from_targets(
+            pod_y_train,
+            output_keys=list(pod_target_vars),
+            requested_rank=int(basis_cfg_effective["rank"]),
+            center=bool(basis_cfg_effective["center"]),
+            per_var=bool(basis_cfg_effective["per_var"]),
+        )
+        pod_model_cfg = normalize_pod_deeponet_model_cfg(
+            dict(cfg.get("model_cfg", {})),
+            model_type="deeponet_pod",
+        )
+        model = build_model_from_name(
+            model_name=model_name,
+            input_dim=ctx.cond_scaled.shape[1],
+            grid_shape=(h, w),
+            model_cfg=pod_model_cfg,
+            seed=ctx.global_seed + ctx.model_idx,
+            phi_mode=str(ctx.profile_lock.get("phi_mode", "direct")),
+            out_channels=len(pod_target_vars),
+            output_keys=pod_target_vars,
+            pod_basis_bundle=pod_basis_bundle,
+        )
+        pod_selection_cfg = dict(cfg.get("selection", {}))
+        pod_optimizer_cfg = dict(cfg.get("optimizer", {}))
+        grid_like_cfg = dict(train_cfg.get("unet_like", {}))
+        batch_size_cases = int(grid_like_cfg.get("batch_size_cases", 0))
+        shuffle_cases = bool(grid_like_cfg.get("shuffle_cases", True))
+        out = trainer.run_unet(
+            model,
+            ctx.cond_scaled[ctx.tr],
+            pod_y_train,
+            ctx.cond_scaled[ctx.va],
+            np.asarray(ctx.y_scaled[ctx.va][:, pod_target_indices], dtype=np.float32),
+            epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
+            lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
+            physics_cfg={"enabled": False},
+            loss_cfg=copy.deepcopy(ctx.loss_cfg or {}),
+            curriculum_cfg=ctx.curriculum_cfg,
+            supervised_mask=ctx.supervised_mask,
+            supervised_distance=ctx.supervised_distance,
+            optimizer_contract=optimizer_contract,
+            unet_optimizer_cfg=pod_optimizer_cfg,
+            batch_size_cases=batch_size_cases,
+            shuffle_cases=shuffle_cases,
+            seed=ctx.global_seed + ctx.model_idx,
+            selection_cfg=pod_selection_cfg,
+        )
+        history = out.history
+        steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
+        extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
+        extra_artifacts["deeponet_pod_contract_effective"] = {
+            "model_type_effective": "deeponet_pod",
+            "target_family_effective": str(pod_target_family),
+            "target_vars_effective": list(pod_target_vars),
+            "basis_rank_by_var": {str(k): int(v) for k, v in pod_basis_bundle.rank_by_var.items()},
+            "basis_fit_scope_effective": str(basis_cfg_effective["fit_scope"]),
+            "basis_center_effective": bool(basis_cfg_effective["center"]),
+            "basis_per_var_effective": bool(basis_cfg_effective["per_var"]),
+            "selection_mode_effective": str(pod_selection_cfg.get("mode", "last")).strip().lower(),
+            "selection_weights_effective": dict(pod_selection_cfg.get("weights", {})),
+            "model_cfg_effective": dict(pod_model_cfg),
+        }
+        pred_features = model.forward_features(ctx.cond_scaled[ctx.te])
+        pred_eval = ctx.transforms.inverse_field_dict(
+            {name: np.asarray(pred_features[name], dtype=np.float32) for name in pod_target_vars}
+        )
+        true_eval = _to_true_eval(ctx.y, ctx.te, pod_target_vars, source_y_vars=ctx.y_vars)
+        eval_vars = list(pod_target_vars)
+    elif model_name in GRID_TORCH_MODELS:
+        cfg = dict(train_cfg.get(model_name, {}))
+        grid_like_cfg = dict(train_cfg.get("unet_like", {}))
+        grid_loss_cfg = copy.deepcopy(ctx.loss_cfg or {})
+        grid_batch_size_cases = int(grid_like_cfg.get("batch_size_cases", 0))
+        grid_shuffle_cases = bool(grid_like_cfg.get("shuffle_cases", True))
+        grid_feature_channels = ["x", "y"]
+        grid_input_features_mode = "legacy_xy"
+        grid_selection_cfg: dict[str, Any] = {}
+        grid_optimizer_cfg: dict[str, Any] = {}
+        grid_backend_effective = str(dict(cfg.get("model_cfg", cfg)).get("backend", "numpy")).strip().lower()
+        grid_target_family = "allvars"
+        grid_target_vars = list(ctx.y_vars)
+        grid_target_indices = list(range(len(ctx.y_vars)))
+        grid_supervised_distance_signed = None
+        grid_supervised_bc_dir_mask = None
+        grid_supervised_wafer_mask = None
+        if model_name in GRID_TORCH_MODELS:
             train_key = f"train.{model_name}"
-            unet_target_family = _resolve_unet_target_family(
+            grid_target_family = _resolve_unet_target_family(
                 cfg.get("target_family", "allvars"),
                 cfg_key=f"{train_key}.target_family",
             )
-            unet_target_vars = _resolve_unet_target_vars_for_family(
-                family=unet_target_family,
+            grid_target_vars = _resolve_unet_target_vars_for_family(
+                family=grid_target_family,
                 raw_target_vars=cfg.get("target_vars"),
                 available=ctx.y_vars,
                 cfg_key=f"{train_key}.target_vars",
             )
-            unet_target_indices = [ctx.y_vars.index(v) for v in unet_target_vars]
+            grid_target_indices = [ctx.y_vars.index(v) for v in grid_target_vars]
             input_features_cfg = dict(cfg.get("input_features", {}))
             default_input_mode = "legacy_xy" if model_name == "unet" else "geom_feature_pack"
-            unet_input_features_mode = str(input_features_cfg.get("mode", default_input_mode)).strip().lower()
-            if unet_input_features_mode not in {"legacy_xy", "geom_feature_pack"}:
+            grid_input_features_mode = str(input_features_cfg.get("mode", default_input_mode)).strip().lower()
+            if grid_input_features_mode not in {"legacy_xy", "geom_feature_pack"}:
                 raise ValueError(f"{train_key}.input_features.mode must be one of: legacy_xy, geom_feature_pack")
-            unet_feature_channels = _resolve_coord_feature_channels(input_features_cfg.get("features"))
-            if unet_input_features_mode == "legacy_xy":
-                unet_feature_channels = ["x", "y"]
-            unet_selection_cfg = dict(cfg.get("selection", {}))
-            if model_name == "fno":
+            grid_feature_channels = _resolve_coord_feature_channels(input_features_cfg.get("features"))
+            if grid_input_features_mode == "legacy_xy":
+                grid_feature_channels = ["x", "y"]
+            grid_selection_cfg = dict(cfg.get("selection", {}))
+            if model_name in MAINLINE_GEOM_PACK_MODELS:
                 _validate_unet_like_mainline_contract(
                     model_name=model_name,
                     model_cfg=dict(cfg.get("model_cfg", {})),
-                    selection_cfg=unet_selection_cfg,
-                    loss_cfg=unet_loss_cfg,
+                    selection_cfg=grid_selection_cfg,
+                    loss_cfg=grid_loss_cfg,
                     y_vars=ctx.y_vars,
-                    target_family=unet_target_family,
-                    target_vars=unet_target_vars,
+                    target_family=grid_target_family,
+                    target_vars=grid_target_vars,
                     require_shared_output_head=True,
-                    input_features_mode=unet_input_features_mode,
-                    input_feature_channels=unet_feature_channels,
+                    input_features_mode=grid_input_features_mode,
+                    input_feature_channels=grid_feature_channels,
                 )
-            unet_optimizer_cfg = dict(cfg.get("optimizer", {}))
-            if model_name == "unet":
+            elif model_name in COORD_MLP_FAMILY_MODELS:
+                _validate_coord_mlp_experimental_contract(
+                    model_name=model_name,
+                    y_vars=ctx.y_vars,
+                    target_family=grid_target_family,
+                    target_vars=grid_target_vars,
+                    input_features_cfg=input_features_cfg,
+                    input_feature_channels=grid_feature_channels,
+                )
+            grid_optimizer_cfg = dict(cfg.get("optimizer", {}))
+            if model_name in UNET_FAMILY_MODELS:
                 field_contract_mode = str(dict(cfg.get("field_contract", {})).get("mode", "plain")).strip().lower()
                 if field_contract_mode != "plain":
-                    raise ValueError("train.unet.field_contract.mode=frozen_global_residual is removed in S2.45")
-                supervised_cfg = dict((unet_loss_cfg or {}).get("supervised", {}))
+                    raise ValueError(f"{train_key}.field_contract.mode=frozen_global_residual is removed in S2.45")
+                supervised_cfg = dict((grid_loss_cfg or {}).get("supervised", {}))
                 if bool(dict(supervised_cfg.get("chamber_aux", {})).get("enabled", False)):
                     raise ValueError(
-                        "train.loss.supervised.chamber_aux is not supported for unet mainline; use region_balance"
+                        f"train.loss.supervised.chamber_aux is not supported for {model_name} mainline; use region_balance"
                     )
                 _validate_unet_like_mainline_contract(
                     model_name=model_name,
                     model_cfg=dict(cfg.get("model_cfg", {})),
-                    selection_cfg=unet_selection_cfg,
-                    loss_cfg=unet_loss_cfg,
+                    selection_cfg=grid_selection_cfg,
+                    loss_cfg=grid_loss_cfg,
                     y_vars=ctx.y_vars,
-                    target_family=unet_target_family,
-                    target_vars=unet_target_vars,
+                    target_family=grid_target_family,
+                    target_vars=grid_target_vars,
                     require_shared_output_head=True,
+                    input_features_mode=grid_input_features_mode,
+                    input_feature_channels=grid_feature_channels,
                 )
-            unet_selection_cfg["weights"] = _resolve_mainline_selection_weights(
-                selection_cfg=unet_selection_cfg,
-                target_vars=unet_target_vars,
-                cfg_prefix=train_key,
-            )
+            if model_name not in COORD_MLP_FAMILY_MODELS:
+                grid_selection_cfg["weights"] = _resolve_mainline_selection_weights(
+                    selection_cfg=grid_selection_cfg,
+                    target_vars=grid_target_vars,
+                    cfg_prefix=train_key,
+                )
             # Spatial-consistency normalization uses train y-scaler stats when enabled.
-            sc_cfg = dict(dict(unet_loss_cfg.get("supervised", {})).get("spatial_consistency", {}))
+            sc_cfg = dict(dict(grid_loss_cfg.get("supervised", {})).get("spatial_consistency", {}))
             if bool(sc_cfg.get("enabled", False)):
                 scale_by_var = dict(sc_cfg.get("scale_by_var", {}))
-                for name in unet_target_vars:
+                for name in grid_target_vars:
                     scaler_obj = dict(getattr(ctx.transforms, "y_scalers", {}) or {}).get(name, None)
                     if scaler_obj is None:
                         continue
@@ -892,11 +1138,11 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
                     if np.isfinite(std_val) and std_val > 0.0:
                         scale_by_var[str(name)] = float(std_val)
                 sc_cfg["scale_by_var"] = scale_by_var
-                sup_cfg_mut = dict(unet_loss_cfg.get("supervised", {}))
+                sup_cfg_mut = dict(grid_loss_cfg.get("supervised", {}))
                 sup_cfg_mut["spatial_consistency"] = sc_cfg
-                unet_loss_cfg["supervised"] = sup_cfg_mut
-        if model_name == "fno":
-            unet_backend_effective = "torch"
+                grid_loss_cfg["supervised"] = sup_cfg_mut
+        if model_name in MAINLINE_GEOM_PACK_MODELS or model_name in COORD_MLP_FAMILY_MODELS:
+            grid_backend_effective = "torch"
         model = build_model_from_name(
             model_name=model_name,
             input_dim=ctx.cond_scaled.shape[1],
@@ -904,47 +1150,50 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             model_cfg=dict(cfg.get("model_cfg", cfg)),
             seed=ctx.global_seed + ctx.model_idx,
             phi_mode=str(ctx.profile_lock.get("phi_mode", "direct")),
-            out_channels=len(unet_target_vars),
-            output_keys=unet_target_vars,
-            unet_feature_channels=unet_feature_channels,
+            out_channels=len(grid_target_vars),
+            output_keys=grid_target_vars,
+            unet_feature_channels=grid_feature_channels,
         )
-        if model_name in {"unet", "fno"}:
+        if model_name in GRID_TORCH_MODELS:
             require_pack = str(dict(cfg.get("input_features", {})).get("require_pack", "warn")).strip().lower()
             if require_pack not in {"off", "warn", "error"}:
                 raise ValueError(f"train.{model_name}.input_features.require_pack must be one of: off, warn, error")
-            if unet_input_features_mode == "geom_feature_pack":
+            warning_bucket = extra_artifacts.setdefault(_grid_contract_warning_key(model_name), [])
+            grid_feature_source = "legacy_xy"
+            if grid_input_features_mode == "geom_feature_pack":
                 rows, source = _build_coord_feature_rows(
-                    channels=unet_feature_channels,
+                    channels=grid_feature_channels,
                     pack=ctx.coord_feature_pack,
                     geom_ctx=ctx.geom_ctx,
                     h=h,
                     w=w,
                 )
+                grid_feature_source = str(source)
                 if source != "preprocess_pack":
                     msg = (
                         f"{model_name} input-feature contract: preprocess coord_feature_pack was not used; "
                         f"effective_source={source}"
                     )
-                    if require_pack == "error":
+                    if model_name in COORD_MLP_FAMILY_MODELS or require_pack == "error":
                         raise ValueError(msg)
                     if require_pack == "warn":
-                        extra_artifacts.setdefault("unet_contract_warnings", []).append(msg)
+                        warning_bucket.append(msg)
                 distance_transform_cfg = _resolve_distance_transform_cfg(
                     dict(dict(cfg.get("input_features", {})).get("distance_transform") or {})
                 )
                 distance_transform_cfg_effective, _ = _resolve_distance_transform_effective(
                     distance_transform_cfg,
                     stats=ctx.coord_distance_transform_stats,
-                    warnings_out=extra_artifacts.setdefault("unet_contract_warnings", []),
+                    warnings_out=warning_bucket,
                 )
                 rows, _ = _apply_distance_transform(
                     rows.astype(np.float32),
-                    channels=unet_feature_channels,
+                    channels=grid_feature_channels,
                     cfg=distance_transform_cfg_effective,
                 )
                 rows, _, _ = _apply_coord_feature_scaling(
                     rows.astype(np.float32),
-                    channels=unet_feature_channels,
+                    channels=grid_feature_channels,
                     coord_feature_scaler_artifact=ctx.coord_feature_scaler,
                 )
             else:
@@ -952,21 +1201,21 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
                 xx = np.linspace(0.0, 1.0, w, dtype=np.float32)
                 yv, xv = np.meshgrid(yy, xx, indexing="ij")
                 rows = np.stack([xv.reshape(-1), yv.reshape(-1)], axis=1).astype(np.float32)
-            spatial = rows.reshape(h, w, len(unet_feature_channels)).astype(np.float32)
+            spatial = rows.reshape(h, w, len(grid_feature_channels)).astype(np.float32)
             if hasattr(model, "set_static_spatial_features"):
                 model.set_static_spatial_features(spatial)
             if ctx.geom_ctx is not None:
                 raw_signed = getattr(ctx.geom_ctx, "distance_signed", None)
                 if raw_signed is not None:
-                    unet_supervised_distance_signed = np.asarray(raw_signed, dtype=np.float32)
+                    grid_supervised_distance_signed = np.asarray(raw_signed, dtype=np.float32)
                 raw_bc_dir = getattr(ctx.geom_ctx, "bc_dir_mask", None)
                 if raw_bc_dir is not None:
-                    unet_supervised_bc_dir_mask = np.asarray(raw_bc_dir, dtype=np.float32)
+                    grid_supervised_bc_dir_mask = np.asarray(raw_bc_dir, dtype=np.float32)
                 raw_wafer = getattr(ctx.geom_ctx, "regions", {}).get("wafer_mask") if hasattr(ctx.geom_ctx, "regions") else None
                 if raw_wafer is not None:
-                    unet_supervised_wafer_mask = np.asarray(raw_wafer, dtype=np.float32)
-        unet_y_train = ctx.y_scaled[ctx.tr][:, unet_target_indices]
-        unet_y_val = ctx.y_scaled[ctx.va][:, unet_target_indices]
+                    grid_supervised_wafer_mask = np.asarray(raw_wafer, dtype=np.float32)
+        unet_y_train = ctx.y_scaled[ctx.tr][:, grid_target_indices]
+        unet_y_val = ctx.y_scaled[ctx.va][:, grid_target_indices]
         out = trainer.run_unet(
             model,
             ctx.cond_scaled[ctx.tr],
@@ -976,57 +1225,62 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
             lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
             physics_cfg=ctx.physics_cfg,
-            loss_cfg=unet_loss_cfg if model_name in {"unet", "fno"} else ctx.loss_cfg,
+            loss_cfg=grid_loss_cfg if model_name in GRID_TORCH_MODELS else ctx.loss_cfg,
             curriculum_cfg=ctx.curriculum_cfg,
             supervised_mask=ctx.supervised_mask,
             supervised_distance=ctx.supervised_distance,
-            supervised_distance_signed=unet_supervised_distance_signed if model_name in {"unet", "fno"} else None,
-            supervised_bc_dir_mask=unet_supervised_bc_dir_mask if model_name in {"unet", "fno"} else None,
-            supervised_wafer_mask=unet_supervised_wafer_mask if model_name in {"unet", "fno"} else None,
+            supervised_distance_signed=grid_supervised_distance_signed if model_name in GRID_TORCH_MODELS else None,
+            supervised_bc_dir_mask=grid_supervised_bc_dir_mask if model_name in GRID_TORCH_MODELS else None,
+            supervised_wafer_mask=grid_supervised_wafer_mask if model_name in GRID_TORCH_MODELS else None,
             optimizer_contract=optimizer_contract,
-            unet_optimizer_cfg=unet_optimizer_cfg if model_name in {"unet", "fno"} else None,
-            batch_size_cases=unet_batch_size_cases,
-            shuffle_cases=unet_shuffle_cases,
+            unet_optimizer_cfg=grid_optimizer_cfg if model_name in GRID_TORCH_MODELS else None,
+            batch_size_cases=grid_batch_size_cases,
+            shuffle_cases=grid_shuffle_cases,
             seed=ctx.global_seed + ctx.model_idx,
-            selection_cfg=unet_selection_cfg if model_name in {"unet", "fno"} else None,
+            selection_cfg=grid_selection_cfg if model_name in GRID_TORCH_MODELS else None,
             selection_target_override=None,
             selection_pred_additive=None,
         )
         history = out.history
-        steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, unet_batch_size_cases))) if unet_batch_size_cases > 0 else 1
+        steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, grid_batch_size_cases))) if grid_batch_size_cases > 0 else 1
         extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
-        if model_name == "unet":
-            supervised_cfg = dict((unet_loss_cfg or {}).get("supervised", {}))
+        if model_name in UNET_FAMILY_MODELS:
+            supervised_cfg = dict((grid_loss_cfg or {}).get("supervised", {}))
             bt_cfg = dict(supervised_cfg.get("boundary_type_weighting", {}))
             bp_cfg = dict(supervised_cfg.get("boundary_profile_weighting", {}))
             rb_cfg = dict(supervised_cfg.get("region_balance", {}))
             rb_schedule_cfg = dict(rb_cfg.get("schedule", {}))
             extra_artifacts["unet_contract_effective"] = {
-                "unet_backend_effective": unet_backend_effective,
-                "unet_input_channels_effective": list(unet_feature_channels),
-                "unet_selection_mode_effective": str(unet_selection_cfg.get("mode", "last")).strip().lower(),
-                "selection_weights_effective": dict(unet_selection_cfg.get("weights", {})),
-                "boundary_bonus_weight_effective": float(unet_selection_cfg.get("boundary_bonus_weight", 0.0)),
+                "unet_backend_effective": grid_backend_effective,
+                "unet_input_channels_effective": list(grid_feature_channels),
+                "unet_selection_mode_effective": str(grid_selection_cfg.get("mode", "last")).strip().lower(),
+                "selection_weights_effective": dict(grid_selection_cfg.get("weights", {})),
+                "boundary_bonus_weight_effective": float(grid_selection_cfg.get("boundary_bonus_weight", 0.0)),
                 "unet_optimizer_effective": {
-                    "type": str(unet_optimizer_cfg.get("type", "adamw")).strip().lower() if unet_backend_effective == "torch" else "none",
-                    "lr": float(unet_optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3)))) if unet_backend_effective == "torch" else float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
-                    "schedule": str(unet_optimizer_cfg.get("schedule", "none")).strip().lower() if unet_backend_effective == "torch" else "none",
-                    "warmup_epochs": int(unet_optimizer_cfg.get("warmup_epochs", 0)) if unet_backend_effective == "torch" else 0,
+                    "type": str(grid_optimizer_cfg.get("type", "adamw")).strip().lower() if grid_backend_effective == "torch" else "none",
+                    "lr": float(grid_optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3)))) if grid_backend_effective == "torch" else float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
+                    "schedule": str(grid_optimizer_cfg.get("schedule", "none")).strip().lower() if grid_backend_effective == "torch" else "none",
+                    "warmup_epochs": int(grid_optimizer_cfg.get("warmup_epochs", 0)) if grid_backend_effective == "torch" else 0,
                 },
                 "unet_output_heads_mode_effective": str(getattr(model, "output_heads_mode", "shared")).strip().lower(),
                 "unet_feature_contract_effective": {
-                    "input_features_mode": str(unet_input_features_mode),
-                    "input_feature_channels": list(unet_feature_channels),
-                    "upsample_mode": str(dict(cfg.get("model_cfg", {})).get("upsample_mode", "deconv")).strip().lower(),
+                    "input_features_mode": str(grid_input_features_mode),
+                    "input_feature_channels": list(grid_feature_channels),
+                    "upsample_mode": str(
+                        dict(dict(cfg.get("model_cfg", {})).get("conv_cfg", {})).get(
+                            "upsample_mode",
+                            dict(cfg.get("model_cfg", {})).get("upsample_mode", "deconv"),
+                        )
+                    ).strip().lower(),
                     "distance_transform_mode": str(
                         dict(dict(cfg.get("input_features", {})).get("distance_transform", {})).get("mode", "raw")
                     ).strip().lower(),
                 },
                 "merge_role": "single",
-                "target_family_effective": str(unet_target_family),
-                "target_vars_effective": list(unet_target_vars),
+                "target_family_effective": str(grid_target_family),
+                "target_vars_effective": list(grid_target_vars),
                 "unet_spatial_consistency_effective": bool(
-                    dict((unet_loss_cfg or {}).get("supervised", {}).get("spatial_consistency", {})).get("enabled", False)
+                    dict((grid_loss_cfg or {}).get("supervised", {}).get("spatial_consistency", {})).get("enabled", False)
                 ),
                 "boundary_type_weighting_effective": {
                     "enabled": bool(bt_cfg.get("enabled", False)),
@@ -1061,47 +1315,49 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
                     "ramp_epochs": int(max(int(rb_schedule_cfg.get("ramp_epochs", 0)), 0)),
                 },
             }
-            eval_vars = list(unet_target_vars)
-        elif model_name == "fno":
-            extra_artifacts["fno_contract_effective"] = {
-                "fno_backend_effective": str(unet_backend_effective),
-                "fno_input_channels_effective": list(unet_feature_channels),
-                "fno_input_features_mode_effective": str(unet_input_features_mode),
-                "fno_selection_mode_effective": str(unet_selection_cfg.get("mode", "last")).strip().lower(),
-                "selection_weights_effective": dict(unet_selection_cfg.get("weights", {})),
-                "fno_optimizer_effective": {
-                    "type": str(unet_optimizer_cfg.get("type", "adamw")).strip().lower(),
-                    "lr": float(unet_optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3)))),
-                    "schedule": str(unet_optimizer_cfg.get("schedule", "none")).strip().lower(),
-                    "warmup_epochs": int(unet_optimizer_cfg.get("warmup_epochs", 0)),
-                },
-                "fno_feature_contract_effective": {
-                    "input_features_mode": str(unet_input_features_mode),
-                    "input_feature_channels": list(unet_feature_channels),
-                    "distance_transform_mode": str(
-                        dict(dict(cfg.get("input_features", {})).get("distance_transform", {})).get("mode", "raw")
-                    ).strip().lower(),
-                },
-                "fno_spectral_contract_effective": {
-                    "n_modes": int(dict(cfg.get("model_cfg", {})).get("n_modes", dict(cfg.get("model_cfg", {})).get("fno_n_modes", 2))),
-                    "dealias_ratio": float(dict(dict(cfg.get("model_cfg", {})).get("spectral_cfg", {})).get("dealias_ratio", 1.0)),
-                    "taper_alpha": float(dict(dict(cfg.get("model_cfg", {})).get("spectral_cfg", {})).get("taper_alpha", 0.0)),
-                    "skip_filter": str(dict(dict(cfg.get("model_cfg", {})).get("spectral_cfg", {})).get("skip_filter", "none")).strip().lower(),
-                },
-                "target_family_effective": str(unet_target_family),
-                "target_vars_effective": list(unet_target_vars),
-                "fno_spatial_consistency_effective": bool(
-                    dict((unet_loss_cfg or {}).get("supervised", {}).get("spatial_consistency", {})).get("enabled", False)
-                ),
+            eval_vars = list(grid_target_vars)
+        elif model_name in SPECTRAL_FAMILY_MODELS:
+            prefix = "fno" if model_name == "fno" else "ffno"
+            extra_artifacts[f"{prefix}_contract_effective"] = _build_spectral_contract_effective(
+                prefix=prefix,
+                cfg=cfg,
+                selection_cfg=grid_selection_cfg,
+                optimizer_cfg=grid_optimizer_cfg,
+                input_features_mode=grid_input_features_mode,
+                input_feature_channels=grid_feature_channels,
+                target_family=grid_target_family,
+                target_vars=grid_target_vars,
+                loss_cfg=grid_loss_cfg,
+                train_cfg=train_cfg,
+            )
+            eval_vars = list(grid_target_vars)
+        elif model_name in COORD_MLP_FAMILY_MODELS:
+            _, coord_model_cfg = _normalize_coord_mlp_model_cfg(
+                model_name=str(model_name),
+                raw_cfg=dict(cfg.get("model_cfg", {})),
+            )
+            extra_artifacts["coord_mlp_contract_effective"] = {
+                "model_type_effective": str(model_name),
+                "backend_effective": str(grid_backend_effective),
+                "target_family_effective": str(grid_target_family),
+                "target_vars_effective": list(grid_target_vars),
+                "input_features_mode": str(grid_input_features_mode),
+                "input_feature_channels": list(grid_feature_channels),
+                "feature_source_effective": str(locals().get("grid_feature_source", "legacy_xy")),
+                "require_pack_effective": str(dict(cfg.get("input_features", {})).get("require_pack", "warn")).strip().lower(),
+                "selection_mode_effective": str(grid_selection_cfg.get("mode", "last")).strip().lower(),
+                "selection_weights_effective": dict(grid_selection_cfg.get("weights", {})),
+                "embedding": dict(coord_model_cfg.get("embedding", {})),
+                "siren": dict(coord_model_cfg.get("siren", {})),
             }
-            eval_vars = list(unet_target_vars)
+            eval_vars = list(grid_target_vars)
         pred_features = model.forward_features(ctx.cond_scaled[ctx.te])
         pred_eval = ctx.transforms.inverse_field_dict(
-            {name: np.asarray(pred_features[name], dtype=np.float32) for name in unet_target_vars}
+            {name: np.asarray(pred_features[name], dtype=np.float32) for name in grid_target_vars}
         )
         if "rho_eff" in pred_features:
             pred_eval["rho_eff"] = np.asarray(pred_features["rho_eff"], dtype=np.float32)
-        true_eval = _to_true_eval(ctx.y, ctx.te, unet_target_vars, source_y_vars=ctx.y_vars)
+        true_eval = _to_true_eval(ctx.y, ctx.te, grid_target_vars, source_y_vars=ctx.y_vars)
     elif model_name == "deeponet_plasma":
         cfg = dict(train_cfg.get("deeponet_plasma", {}))
         train_key = "train.deeponet_plasma"

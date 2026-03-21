@@ -26,6 +26,7 @@ def torch_runtime_available(*, refresh: bool = False) -> bool:
 
     flag = os.environ.get("PLASMA_SURROGATE_ENABLE_TORCH", "0").strip().lower()
     if flag not in {"1", "true", "yes", "on"}:
+        _TORCH_RUNTIME_CACHE[flag] = False
         return False
     if (not refresh) and (flag in _TORCH_RUNTIME_CACHE):
         return bool(_TORCH_RUNTIME_CACHE[flag])
@@ -38,12 +39,10 @@ def torch_runtime_available(*, refresh: bool = False) -> bool:
             timeout=8,
         )
     except (OSError, subprocess.SubprocessError):
-        if not refresh:
-            _TORCH_RUNTIME_CACHE[flag] = False
+        _TORCH_RUNTIME_CACHE[flag] = False
         return False
     ok = int(proc.returncode) == 0
-    if not refresh:
-        _TORCH_RUNTIME_CACHE[flag] = ok
+    _TORCH_RUNTIME_CACHE[flag] = ok
     return ok
 
 

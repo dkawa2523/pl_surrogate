@@ -56,6 +56,13 @@ def run_model_train_eval(ctx: BenchmarkModelContext) -> dict[str, Any]:
         fno_model_cfg["fno_n_modes"] = n_modes
         fno_cfg["model_cfg"] = fno_model_cfg
         train_cfg["fno"] = fno_cfg
+    if "ffno_n_modes" in ctx.benchmark_cfg:
+        n_modes = int(ctx.benchmark_cfg["ffno_n_modes"])
+        ffno_cfg = dict(train_cfg.get("ffno", {}))
+        ffno_model_cfg = dict(ffno_cfg.get("model_cfg", {}))
+        ffno_model_cfg["fno_n_modes"] = n_modes
+        ffno_cfg["model_cfg"] = ffno_model_cfg
+        train_cfg["ffno"] = ffno_cfg
 
     dispatch = run_model_train_predict(
         TrainDispatchContext(

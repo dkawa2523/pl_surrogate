@@ -12,6 +12,7 @@ import numpy as np
 import yaml
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
+from plasma_surrogate.core.model_families import COND_ONLY_TORCH_MODELS, GRID_TORCH_MODELS
 from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.data_cleaning_audit import run_data_audit
 from plasma_surrogate.core.physics_contract import build_physics_cfg
@@ -91,13 +92,17 @@ def _build_inference_engine_from_bundle(
         poisson_refine_iters=int(inf_cfg.get("poisson_refine", {}).get("iters", 0)),
         ood_cfg=inf_cfg.get("ood", {"poisson_residual_limit": 1e2}),
         feature_store=feature_store,
+        coord_scaler=bundle.transforms.get("coord_scaler", {}),
+        coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
+        coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
+        coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
         deeponet_head=(
             getattr(bundle.model, "poisson_head", None)
             if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson"
             else None
         )
         or (bundle.model if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson" else None),
-        unet_input_features_cfg=dict(cfg.get("train", {}).get("unet", {}).get("input_features", {})),
+        grid_input_features_cfg=dict(cfg.get("train", {}).get(str(model_cfg.get("name", "unet")), {}).get("input_features", {})),
     )
 
 
@@ -356,11 +361,15 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
             "lr": float(per_model_cfg.get("lr", lr)),
             "model_cfg": merged_model_cfg,
         }
-    elif model_name in {"unet", "fno"}:
+    elif model_name in GRID_TORCH_MODELS or model_name in COND_ONLY_TORCH_MODELS:
+        per_model_cfg = dict(train_cfg.get(model_name, {}))
+        merged_model_cfg = dict(per_model_cfg.get("model_cfg", {}))
+        merged_model_cfg.update(dict(model_cfg))
         train_dispatch_cfg["train"][model_name] = {
+            **per_model_cfg,
             "epochs": epochs,
             "lr": lr,
-            "model_cfg": dict(model_cfg),
+            "model_cfg": merged_model_cfg,
         }
     elif model_name == "deeponet_plasma":
         train_dispatch_cfg["train"]["deeponet_plasma"] = {
@@ -490,6 +499,7 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
     if model is None:
         raise FileNotFoundError(f"Missing model checkpoint metadata under {run_dir / 'checkpoints'}")
     model_cfg = cfg.get("model", {})
+    model_name = str(model_cfg.get("name", "global_mlp"))
     inf_cfg = cfg.get("inference", {})
     cond_schema = bundle.cond_schema_obj()
     axis_schema = bundle.axis_schema_obj()
@@ -508,13 +518,17 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
         poisson_refine_iters=int(inf_cfg.get("poisson_refine", {}).get("iters", 0)),
         ood_cfg=inf_cfg.get("ood", {"poisson_residual_limit": 1e2}),
         feature_store=feat_store,
+        coord_scaler=bundle.transforms.get("coord_scaler", {}),
+        coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
+        coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
+        coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
         deeponet_head=(
             getattr(model, "poisson_head", None)
             if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson"
             else None
         )
         or (model if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson" else None),
-        unet_input_features_cfg=dict(cfg.get("train", {}).get("unet", {}).get("input_features", {})),
+        grid_input_features_cfg=dict(cfg.get("train", {}).get(model_name, {}).get("input_features", {})),
     )
 
     results: dict[str, Any] = {}

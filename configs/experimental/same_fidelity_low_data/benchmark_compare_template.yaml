@@ -1,5 +1,8 @@
 # Example compare/benchmark planning fragment.
 # Merge into an existing benchmark/compare YAML after isolated model smoke tests are green.
+# compare is dynamic-target aware.
+# Do not assume a fixed key like test_rmse_phi; keep objective_metric=auto_primary unless you need a specific resolved metric.
+# global_reference_mode=frozen requires at least one row with model_id=global_mlp.
 benchmark:
   profile: m7_periodic_common
   eval:
@@ -19,6 +22,19 @@ compare:
     - name: unetpp
       model_id: unetpp
       leaderboard_csv: runs/benchmark_unetpp/leaderboard.csv
+    - name: unetpp_attn
+      model_id: unetpp_attn
+      leaderboard_csv: runs/benchmark_unetpp_attn/leaderboard.csv
     - name: ffno
       model_id: ffno
-      leaderboard_csv: runs/benchmark_ffno/leaderboard.csv
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_ffno_b3_local_skip_skip_none_relaxed_filter/leaderboard.csv
+    # Experimental rows are allowed in compare, but do not promote them into mainline profile locks.
+    - name: coord_mlp_fourier
+      model_id: coord_mlp_fourier
+      leaderboard_csv: runs/benchmark_coord_mlp_fourier/leaderboard.csv
+    - name: coord_mlp_siren
+      model_id: coord_mlp_siren
+      leaderboard_csv: runs/benchmark_coord_mlp_siren/leaderboard.csv
+    - name: deeponet_pod
+      model_id: deeponet_pod
+      leaderboard_csv: runs/benchmark_deeponet_pod/leaderboard.csv

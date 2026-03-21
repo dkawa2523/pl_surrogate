@@ -1,0 +1,27 @@
+benchmark:
+  output_dir: runs/benchmark_deeponet_pod_experimental
+  profile: m7_deeponet_pod_experimental
+  phi_mode: direct
+  eval_protocol:
+    mode: dual_axis
+    scope: common
+    primary_split: interp
+  train:
+    unet_like:
+      batch_size_cases: 4
+      shuffle_cases: true
+    deeponet_pod:
+      epochs: 2
+      lr: 0.001
+      target_family: allvars
+      target_vars: [ne, ni, Te, phi]
+      selection:
+        mode: best_val_allvars_balance
+      model_cfg:
+        hidden_dim: 128
+        latent_dim: 128
+        basis:
+          rank: 32
+          fit_scope: train_only
+          per_var: true
+          center: true

@@ -8,9 +8,18 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.core.model_families import COORD_MLP_FAMILY_MODELS, UNETPP_FAMILY_MODELS
+from plasma_surrogate.models.deeponet.pod_deeponet_torch import (
+    PODBasisBundle,
+    PODDeepONetTorch,
+    normalize_pod_deeponet_model_cfg,
+)
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
+from plasma_surrogate.models.mlp.coord_mlp_torch import CoordMLPTorch, _normalize_coord_mlp_model_cfg
+from plasma_surrogate.models.fno.factorized_fno import FFNOBaseline
 from plasma_surrogate.models.fno.simple_fno import FNOBaseline
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
+from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
 
 
 def _is_deeponet_plasma_torch_model(model: Any) -> bool:
@@ -19,6 +28,97 @@ def _is_deeponet_plasma_torch_model(model: Any) -> bool:
     except Exception:  # pragma: no cover - defensive for non-deeponet models.
         return False
     return isinstance(meta, dict) and str(meta.get("model_type", "")) == "deeponet_plasma_torch"
+
+
+def _build_unetpp_family_model(
+    *,
+    model_name: str,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    with_rho: bool,
+    unet_feature_channels: list[str] | None,
+    seed: int,
+) -> UNetPPBaseline:
+    conv_cfg = dict(cfg.get("conv_cfg", {}))
+    if "base_channels" in cfg and "base_channels" not in conv_cfg:
+        conv_cfg["base_channels"] = int(cfg.get("base_channels", 32))
+    if "upsample_mode" in cfg and "upsample_mode" not in conv_cfg:
+        conv_cfg["upsample_mode"] = str(cfg.get("upsample_mode"))
+    if str(model_name).strip().lower() == "unetpp_attn":
+        attention_cfg = dict(conv_cfg.get("attention_cfg", {}))
+        attention_cfg["enabled"] = True
+        attention_cfg.setdefault("reduction", 2)
+        attention_cfg.setdefault("gate_activation", "sigmoid")
+        conv_cfg["attention_cfg"] = attention_cfg
+    output_heads_cfg = dict(cfg.get("output_heads", {}))
+    return UNetPPBaseline(
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        with_rho_eff_head=with_rho,
+        head_mlp=dict(cfg.get("head_mlp", {})),
+        backend=str(cfg.get("backend", "torch")),
+        input_feature_channels=list(unet_feature_channels or ["x", "y"]),
+        conv_cfg=conv_cfg,
+        output_heads=output_heads_cfg,
+        seed=int(seed),
+    )
+
+
+def _build_coord_mlp_family_model(
+    *,
+    model_name: str,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    unet_feature_channels: list[str] | None,
+    seed: int,
+) -> CoordMLPTorch:
+    model_key = str(model_name).strip().lower()
+    if model_key not in COORD_MLP_FAMILY_MODELS:
+        raise ValueError(f"Unsupported coord-MLP model family member: {model_name}")
+    _, cfg_local = _normalize_coord_mlp_model_cfg(model_name=model_key, raw_cfg=dict(cfg))
+    return CoordMLPTorch(
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        input_feature_channels=list(
+            unet_feature_channels or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
+        ),
+        model_cfg=cfg_local,
+        seed=int(seed),
+        backend="torch",
+    )
+
+
+def _build_pod_deeponet_model(
+    *,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    seed: int,
+    pod_basis_bundle: PODBasisBundle | None = None,
+) -> PODDeepONetTorch:
+    cfg_local = normalize_pod_deeponet_model_cfg(cfg, model_type="deeponet_pod")
+    return PODDeepONetTorch(
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        pod_basis_bundle=pod_basis_bundle,
+        model_cfg=cfg_local,
+        seed=int(seed),
+        backend=str(dict(cfg).get("backend", "torch")),
+    )
 
 
 def build_model_from_name(
@@ -33,6 +133,7 @@ def build_model_from_name(
     output_keys: list[str] | None = None,
     coord_feature_dim: int = 2,
     unet_feature_channels: list[str] | None = None,
+    pod_basis_bundle: PODBasisBundle | None = None,
 ) -> Any:
     """Factory for non-DeepONet model branches shared by train/benchmark."""
 
@@ -70,6 +171,39 @@ def build_model_from_name(
             output_heads=output_heads_cfg,
             seed=int(seed),
         )
+    if name in UNETPP_FAMILY_MODELS:
+        return _build_unetpp_family_model(
+            model_name=name,
+            cfg=cfg,
+            input_dim=int(input_dim),
+            grid_shape=tuple(grid_shape),
+            out_channels=int(out_channels),
+            output_keys=output_keys,
+            with_rho=with_rho,
+            unet_feature_channels=unet_feature_channels,
+            seed=int(seed),
+        )
+    if name in COORD_MLP_FAMILY_MODELS:
+        return _build_coord_mlp_family_model(
+            model_name=name,
+            cfg=cfg,
+            input_dim=int(input_dim),
+            grid_shape=tuple(grid_shape),
+            out_channels=int(out_channels),
+            output_keys=output_keys,
+            unet_feature_channels=unet_feature_channels,
+            seed=int(seed),
+        )
+    if name == "deeponet_pod":
+        return _build_pod_deeponet_model(
+            cfg=cfg,
+            input_dim=int(input_dim),
+            grid_shape=tuple(grid_shape),
+            out_channels=int(out_channels),
+            output_keys=output_keys,
+            seed=int(seed),
+            pod_basis_bundle=pod_basis_bundle,
+        )
     if name == "fno":
         return FNOBaseline(
             input_dim=int(input_dim),
@@ -82,6 +216,21 @@ def build_model_from_name(
             input_feature_channels=list(unet_feature_channels or ["x", "y"]),
             spectral_cfg=dict(cfg.get("spectral_cfg", {})),
             seed=int(seed),
+            backend=str(cfg.get("backend", "torch")),
+        )
+    if name == "ffno":
+        return FFNOBaseline(
+            input_dim=int(input_dim),
+            grid_shape=tuple(grid_shape),
+            out_channels=int(out_channels),
+            output_keys=output_keys,
+            with_rho_eff_head=with_rho,
+            n_modes=int(cfg.get("fno_n_modes", cfg.get("n_modes", 2))),
+            head_mlp=dict(cfg.get("head_mlp", {})),
+            input_feature_channels=list(unet_feature_channels or ["x", "y"]),
+            spectral_cfg=dict(cfg.get("spectral_cfg", {})),
+            seed=int(seed),
+            backend=str(cfg.get("backend", "torch")),
         )
     raise ValueError(f"Unsupported model.name: {model_name}")
 
@@ -177,6 +326,66 @@ def save_mlp_checkpoint(model: Any, ckpt_dir: str | Path) -> Path:
             },
             "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
         }
+    elif isinstance(model, UNetPPBaseline):
+        model_type = str(getattr(model, "model_type", "unetpp")).strip().lower()
+        if model_type not in {"unetpp", "unetpp_attn"}:
+            raise TypeError(f"Unsupported UNetPPBaseline model_type for checkpoint: {model_type}")
+        meta = {
+            "model_type": model_type,
+            "input_dim": model.input_dim,
+            "grid_shape": list(model.grid_shape),
+            "out_channels": model.out_channels,
+            "output_keys": list(getattr(model, "output_keys", ["log_ne", "Te", "phi"])),
+            "backend": str(getattr(model, "backend", "torch")),
+            "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
+            "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
+            "head_mlp": {
+                "enabled": bool(getattr(model, "head_enabled", True)),
+                "hidden": list(getattr(model, "head_hidden", [])),
+                "activation": str(getattr(model, "head_activation", "relu")),
+                "dropout": float(getattr(model, "head_dropout", 0.0)),
+            },
+            "conv_cfg": dict(
+                getattr(
+                    model,
+                    "_torch_conv_cfg",
+                    {
+                        "base_channels": int(getattr(model, "_torch_base_channels", 32)),
+                        "depth": int(getattr(model, "_torch_depth", 2)),
+                        "upsample_mode": str(getattr(model, "_torch_upsample_mode", "bilinear")),
+                        "nested_skip": bool(getattr(model, "_torch_nested_skip", True)),
+                        "deep_supervision": {"enabled": False},
+                    },
+                )
+            ),
+            "output_heads": {
+                "mode": str(getattr(model, "output_heads_mode", "shared")),
+            },
+            "head_arch_version": str(getattr(model, "head_arch_version", "conv_unetpp_v1")),
+        }
+    elif isinstance(model, CoordMLPTorch):
+        meta = {
+            "model_type": str(getattr(model, "model_type", "coord_mlp_fourier")),
+            "input_dim": model.input_dim,
+            "grid_shape": list(model.grid_shape),
+            "out_channels": model.out_channels,
+            "output_keys": list(getattr(model, "output_keys", [])),
+            "backend": str(getattr(model, "backend", "torch")),
+            "input_feature_channels": list(getattr(model, "input_feature_channels", [])),
+            "model_cfg": dict(getattr(model, "model_cfg", {})),
+        }
+    elif isinstance(model, PODDeepONetTorch):
+        meta = {
+            "model_type": "deeponet_pod",
+            "input_dim": model.input_dim,
+            "grid_shape": list(model.grid_shape),
+            "out_channels": model.out_channels,
+            "output_keys": list(getattr(model, "output_keys", [])),
+            "backend": str(getattr(model, "backend", "torch")),
+            "model_cfg": dict(getattr(model, "model_cfg", {})),
+            "basis_keys": list(getattr(model, "basis_keys", [])),
+            "basis_rank_by_var": dict(getattr(model, "basis_rank_by_var", {})),
+        }
     elif isinstance(model, FNOBaseline):
         meta = {
             "model_type": "fno",
@@ -188,8 +397,27 @@ def save_mlp_checkpoint(model: Any, ckpt_dir: str | Path) -> Path:
             "backend": str(getattr(model, "backend", "torch")),
             "n_modes": int(getattr(model, "n_modes", 2)),
             "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
+            "head_mlp": dict(getattr(model, "head_mlp_cfg", {})),
             "spectral_cfg": dict(getattr(model, "spectral_cfg", {})),
-            "fno_impl_version": str(getattr(model, "head_arch_version", "spectral_v2")),
+            "fno_impl_version": str(getattr(model, "fno_impl_version", "spectral_v2")),
+            "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
+        }
+    elif isinstance(model, FFNOBaseline):
+        meta = {
+            "model_type": "ffno",
+            "input_dim": model.input_dim,
+            "grid_shape": list(model.grid_shape),
+            "out_channels": model.out_channels,
+            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
+            "backend": str(getattr(model, "backend", "torch")),
+            "n_modes": int(getattr(model, "n_modes", 2)),
+            "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
+            "head_mlp": dict(getattr(model, "head_mlp_cfg", {})),
+            "spectral_cfg": dict(getattr(model, "spectral_cfg", {})),
+            "fno_impl_version": str(
+                getattr(model, "fno_impl_version", "factorized_separable_1d_v1")
+            ),
             "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
         }
     elif _is_deeponet_plasma_torch_model(model):
@@ -239,6 +467,26 @@ def load_mlp_checkpoint(ckpt_dir: str | Path) -> Any:
             conv_cfg=dict(meta.get("conv_cfg", {})),
             output_heads=dict(meta.get("output_heads", {})),
         )
+    elif model_type in {"unetpp", "unetpp_attn"}:
+        conv_cfg = dict(meta.get("conv_cfg", {}))
+        if model_type == "unetpp_attn":
+            attention_cfg = dict(conv_cfg.get("attention_cfg", {}))
+            attention_cfg["enabled"] = True
+            attention_cfg.setdefault("reduction", 2)
+            attention_cfg.setdefault("gate_activation", "sigmoid")
+            conv_cfg["attention_cfg"] = attention_cfg
+        model = UNetPPBaseline(
+            input_dim=int(meta["input_dim"]),
+            grid_shape=tuple(meta["grid_shape"]),
+            out_channels=int(meta.get("out_channels", 3)),
+            output_keys=list(meta.get("output_keys", ["log_ne", "Te", "phi"])),
+            backend=str(meta.get("backend", "torch")),
+            input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
+            with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
+            head_mlp=dict(meta.get("head_mlp", {})),
+            conv_cfg=conv_cfg,
+            output_heads=dict(meta.get("output_heads", {})),
+        )
     elif model_type == "fno":
         backend = str(meta.get("backend", "numpy")).strip().lower()
         if backend != "torch":
@@ -256,6 +504,69 @@ def load_mlp_checkpoint(ckpt_dir: str | Path) -> Any:
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
             spectral_cfg=dict(meta.get("spectral_cfg", {})),
+            backend=backend,
+        )
+    elif model_type == "ffno":
+        backend = str(meta.get("backend", "torch")).strip().lower()
+        if backend != "torch":
+            raise ValueError("legacy numpy FFNO checkpoints are no longer supported")
+        impl = str(meta.get("fno_impl_version", "")).strip().lower()
+        if impl not in {"factorized_separable_1d_v1", "factorized_separable_1d_v2_local_skip"}:
+            raise ValueError("legacy FFNO checkpoint format is not supported")
+        model = FFNOBaseline(
+            input_dim=int(meta["input_dim"]),
+            grid_shape=tuple(meta["grid_shape"]),
+            out_channels=int(meta.get("out_channels", 3)),
+            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
+            n_modes=int(meta.get("n_modes", 2)),
+            head_mlp=dict(meta.get("head_mlp", {})),
+            input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
+            spectral_cfg=dict(meta.get("spectral_cfg", {})),
+            backend=backend,
+        )
+    elif model_type in {"coord_mlp_fourier", "coord_mlp_siren"}:
+        _, model_cfg = _normalize_coord_mlp_model_cfg(
+            model_name=str(model_type),
+            raw_cfg=dict(meta.get("model_cfg", {})),
+        )
+        model = CoordMLPTorch(
+            input_dim=int(meta["input_dim"]),
+            grid_shape=tuple(meta["grid_shape"]),
+            out_channels=int(meta.get("out_channels", 3)),
+            output_keys=list(meta.get("output_keys", [])),
+            input_feature_channels=list(
+                meta.get("input_feature_channels", ["x", "y", "mask_plasma", "distance_signed", "distance_any"])
+            ),
+            model_cfg=model_cfg,
+            backend=str(meta.get("backend", "torch")),
+        )
+    elif model_type == "deeponet_pod":
+        basis_keys = [str(v) for v in list(meta.get("basis_keys", meta.get("output_keys", [])))]
+        basis_bundle = PODBasisBundle.from_dicts(
+            basis_by_var={
+            str(name): np.asarray(weights[f"basis::{name}"], dtype=np.float32)
+            for name in basis_keys
+            if f"basis::{name}" in weights
+            },
+            mean_by_var={
+            str(name): np.asarray(weights[f"mean::{name}"], dtype=np.float32)
+            for name in basis_keys
+            if f"mean::{name}" in weights
+            },
+            rank_by_var=dict(meta.get("basis_rank_by_var", {})),
+        )
+        model = PODDeepONetTorch(
+            input_dim=int(meta["input_dim"]),
+            grid_shape=tuple(meta["grid_shape"]),
+            out_channels=int(meta.get("out_channels", len(meta.get("output_keys", [])))),
+            output_keys=list(meta.get("output_keys", [])),
+            pod_basis_bundle=basis_bundle,
+            model_cfg=normalize_pod_deeponet_model_cfg(
+                dict(meta.get("model_cfg", {})),
+                model_type="deeponet_pod",
+            ),
+            backend=str(meta.get("backend", "torch")),
         )
     elif model_type in {"hybrid_unet_fno", "hybrid_unet_fno_residual"}:
         raise ValueError(f"{model_type} checkpoints are no longer supported")
@@ -401,7 +712,9 @@ def load_mlp_checkpoint(ckpt_dir: str | Path) -> Any:
         else:
             state = {k: np.asarray(weights[k], dtype=np.float32) for k in weights.files}
             model.load_state_dict_numpy(state)
-    elif model_type in {"unet", "fno"} and hasattr(model, "load_state_dict_numpy"):
+    elif model_type in {"unet", "unetpp", "unetpp_attn", "fno", "ffno", "coord_mlp_fourier", "coord_mlp_siren", "deeponet_pod"} and hasattr(
+        model, "load_state_dict_numpy"
+    ):
         state = {k: np.asarray(weights[k], dtype=np.float32) for k in weights.files}
         model.load_state_dict_numpy(state)
     else:

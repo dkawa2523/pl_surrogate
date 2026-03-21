@@ -15,9 +15,14 @@ from plasma_surrogate.data.geometry_context import GeometryContext
 from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
 from plasma_surrogate.eval.metrics import bc_mae, boundary_band_mask, boundary_gamma_proxy, poisson_residual_norm, uniformity
 from plasma_surrogate.infer.optimize import OptimizeRunner
+from plasma_surrogate.models.fno.factorized_fno import FFNOBaseline
+from plasma_surrogate.models.fno.simple_fno import FNOBaseline
+from plasma_surrogate.models.deeponet.pod_deeponet_torch import PODDeepONetTorch
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
+from plasma_surrogate.models.mlp.coord_mlp_torch import CoordMLPTorch
 from plasma_surrogate.models.heads.plasma_head import PlasmaHead
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
+from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
 from plasma_surrogate.preprocessing.scalers import ScalerFactory, TransformBundle
 from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 from plasma_surrogate.train.losses import boundary_operator_loss, boundary_operator_target, poisson_residual
@@ -153,6 +158,7 @@ class InferenceEngine:
         coord_distance_transform_stats: dict[str, Any] | None = None,
         coord_input_scaling_cfg: dict[str, Any] | None = None,
         coord_input_features_cfg: dict[str, Any] | None = None,
+        grid_input_features_cfg: dict[str, Any] | None = None,
         unet_input_features_cfg: dict[str, Any] | None = None,
     ):
         self.model = model
@@ -174,7 +180,8 @@ class InferenceEngine:
         self.coord_distance_transform_stats = dict(coord_distance_transform_stats or {})
         self.coord_input_scaling_cfg = dict(coord_input_scaling_cfg or {})
         self.coord_input_features_cfg = dict(coord_input_features_cfg or {})
-        self.unet_input_features_cfg = dict(unet_input_features_cfg or {})
+        self.grid_input_features_cfg = dict(grid_input_features_cfg or unet_input_features_cfg or {})
+        self.unet_input_features_cfg = dict(self.grid_input_features_cfg)
 
     @staticmethod
     def _resolve_distance_transform_cfg(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -374,13 +381,13 @@ class InferenceEngine:
             out[:, i : i + 1] = scaler.transform(out[:, i : i + 1]).astype(np.float32)
         return out.astype(np.float32)
 
-    def _build_unet_feature_rows(self, geom: GeometryContext, channels: list[str]) -> np.ndarray:
+    def _build_grid_feature_rows(self, geom: GeometryContext, channels: list[str]) -> np.ndarray:
         h, w = geom.mask_plasma.shape
         pack = dict(self.coord_feature_pack or {})
-        cfg = dict(self.unet_input_features_cfg or {})
+        cfg = dict(self.grid_input_features_cfg or {})
         mode = str(cfg.get("mode", "legacy_xy")).strip().lower()
         if mode not in {"legacy_xy", "geom_feature_pack"}:
-            raise ValueError("train.unet.input_features.mode must be one of: legacy_xy, geom_feature_pack")
+            raise ValueError("train.<grid_model>.input_features.mode must be one of: legacy_xy, geom_feature_pack")
         if mode == "legacy_xy" and list(channels) == ["x", "y"]:
             yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
             xx = np.linspace(0.0, 1.0, w, dtype=np.float32)
@@ -388,8 +395,8 @@ class InferenceEngine:
             return np.stack([xv.reshape(-1), yv.reshape(-1)], axis=1).astype(np.float32)
         require_pack = str(cfg.get("require_pack", "off")).strip().lower()
         if require_pack not in {"off", "warn", "error"}:
-            raise ValueError("train.unet.input_features.require_pack must be one of: off, warn, error")
-        distance_transform_cfg = self._resolve_distance_transform_cfg(dict(cfg.get("distance_transform")))
+            raise ValueError("train.<grid_model>.input_features.require_pack must be one of: off, warn, error")
+        distance_transform_cfg = self._resolve_distance_transform_cfg(dict(cfg.get("distance_transform") or {}))
         distance_transform_cfg = self._resolve_distance_transform_effective(
             distance_transform_cfg,
             self.coord_distance_transform_stats,
@@ -415,6 +422,21 @@ class InferenceEngine:
         if require_pack == "error":
             raise ValueError("unet input-feature contract requires preprocess coord_feature_pack, but pack is missing")
         return self._build_coord_feature_rows(geom, channels)
+
+    def _predict_grid_spatial_fields(self, cond_vec: np.ndarray, geom: GeometryContext) -> dict[str, np.ndarray]:
+        channels = self._resolve_coord_feature_channels(self.model)
+        spatial_rows = self._build_grid_feature_rows(geom, channels)
+        h, w = geom.mask_plasma.shape
+        spatial_map = spatial_rows.reshape(h, w, len(channels))[None, ...].astype(np.float32)
+        if isinstance(self.model, (UNetBaseline, UNetPPBaseline)):
+            pred = self.model.forward_features(cond_vec[None, :], spatial_features=spatial_map)
+        else:
+            pred = self.model.predict_fields(cond_vec[None, :], spatial_features=spatial_map)
+        return {k: np.asarray(v[0], dtype=np.float32) for k, v in pred.items()}
+
+    def _predict_cond_only_fullfield_fields(self, cond_vec: np.ndarray) -> dict[str, np.ndarray]:
+        pred = self.model.predict_fields(cond_vec[None, :])
+        return {k: np.asarray(v[0], dtype=np.float32) for k, v in pred.items()}
 
     @staticmethod
     def _validate_geom_ref(geom: dict[str, Any]) -> dict[str, Any]:
@@ -443,13 +465,11 @@ class InferenceEngine:
             pred = self.model.predict_fields(cond_vec[None, :])
             return {k: v[0] for k, v in pred.items()}
 
-        if isinstance(self.model, UNetBaseline):
-            channels = self._resolve_coord_feature_channels(self.model)
-            spatial_rows = self._build_unet_feature_rows(geom, channels)
-            h, w = geom.mask_plasma.shape
-            spatial_map = spatial_rows.reshape(h, w, len(channels))[None, ...].astype(np.float32)
-            pred = self.model.forward_features(cond_vec[None, :], spatial_features=spatial_map)
-            return {k: v[0] for k, v in pred.items()}
+        if isinstance(self.model, (UNetBaseline, UNetPPBaseline, FNOBaseline, FFNOBaseline, CoordMLPTorch)):
+            return self._predict_grid_spatial_fields(cond_vec, geom)
+
+        if isinstance(self.model, PODDeepONetTorch):
+            return self._predict_cond_only_fullfield_fields(cond_vec)
 
         if hasattr(self.model, "predict_fields"):
             try:

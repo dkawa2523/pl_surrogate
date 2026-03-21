@@ -10,7 +10,13 @@ from plasma_surrogate.benchmark.profiles import resolve_profile_lock
     [
         "m7_global_frozen_ref",
         "m7_unet_isolated",
+        "m7_unetpp_isolated",
+        "m7_unetpp_attn_isolated",
         "m7_fno_isolated",
+        "m7_ffno_isolated",
+        "m7_coord_mlp_fourier_experimental",
+        "m7_coord_mlp_siren_experimental",
+        "m7_deeponet_pod_experimental",
         "m7_deeponet_isolated",
     ],
 )
@@ -27,6 +33,24 @@ def test_resolve_profile_lock_alias_and_copy():
     assert a["profile"] == "m7_fno_isolated"
     a["models"].append("x")
     assert "x" not in b["models"]
+
+
+def test_resolve_profile_lock_unetpp_alias():
+    profile = resolve_profile_lock("m7_unetpp")
+    assert profile["profile"] == "m7_unetpp_isolated"
+    assert profile["models"] == ["unetpp"]
+
+
+def test_resolve_profile_lock_unetpp_attn_alias():
+    profile = resolve_profile_lock("m7_unetpp_attn")
+    assert profile["profile"] == "m7_unetpp_attn_isolated"
+    assert profile["models"] == ["unetpp_attn"]
+
+
+def test_resolve_profile_lock_ffno_alias():
+    profile = resolve_profile_lock("m7_ffno")
+    assert profile["profile"] == "m7_ffno_isolated"
+    assert profile["models"] == ["ffno"]
 
 
 def test_resolve_profile_lock_unsupported_raises():

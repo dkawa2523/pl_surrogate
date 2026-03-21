@@ -20,6 +20,14 @@ from plasma_surrogate.core.density_contract import (
     resolve_density_key,
     resolve_family_vars,
 )
+from plasma_surrogate.core.model_families import (
+    COORD_MLP_FAMILY_MODELS,
+    GRID_TORCH_MODELS,
+    POD_DEEPONET_FAMILY_MODELS,
+    SPECTRAL_FAMILY_MODELS,
+    UNET_FAMILY_MODELS,
+    resolve_single_family_model,
+)
 from plasma_surrogate.core.physics_contract import build_physics_cfg
 from plasma_surrogate.eval.metrics import r2_masked, rmse_masked
 from plasma_surrogate.eval.metrics_builder import (
@@ -28,7 +36,9 @@ from plasma_surrogate.eval.metrics_builder import (
     build_spatial_error_summary_rows,
 )
 from plasma_surrogate.infer.engine import InferenceEngine
+from plasma_surrogate.models.deeponet.pod_deeponet_torch import normalize_pod_deeponet_model_cfg
 from plasma_surrogate.models.mlp.io import save_mlp_checkpoint
+from plasma_surrogate.models.mlp.coord_mlp_torch import _normalize_coord_mlp_model_cfg
 from plasma_surrogate.benchmark.model_dispatch import BenchmarkModelContext, run_model_train_eval
 from plasma_surrogate.preprocessing.split import build_group_kfold_splits
 from plasma_surrogate.train.losses import poisson_residual_loss
@@ -47,6 +57,27 @@ class SweepResult:
     best_trial: dict[str, Any]
     locked_config_path: Path
     locked_leaderboard_path: Path
+
+
+_ISOLATED_SCOPE_MODEL_NAMES: dict[str, list[str]] = {
+    "global_frozen": ["global_mlp"],
+    "unet_isolated": ["unet"],
+    "unetpp_isolated": ["unetpp"],
+    "unetpp_attn_isolated": ["unetpp_attn"],
+    "fno_isolated": ["fno"],
+    "ffno_isolated": ["ffno"],
+    "deeponet_isolated": ["deeponet_plasma"],
+}
+
+_ISOLATED_SCOPE_FORBIDDEN_SECTIONS: dict[str, list[str]] = {
+    "global_frozen": ["unet", "unetpp", "unetpp_attn", "fno", "ffno", "deeponet_plasma"],
+    "unet_isolated": ["global_mlp", "unetpp", "unetpp_attn", "fno", "ffno", "deeponet_plasma"],
+    "unetpp_isolated": ["unet", "unetpp_attn", "global_mlp", "fno", "ffno", "deeponet_plasma"],
+    "unetpp_attn_isolated": ["unet", "unetpp", "global_mlp", "fno", "ffno", "deeponet_plasma"],
+    "fno_isolated": ["unet", "unetpp", "unetpp_attn", "global_mlp", "ffno", "deeponet_plasma"],
+    "ffno_isolated": ["unet", "unetpp", "unetpp_attn", "global_mlp", "fno", "deeponet_plasma"],
+    "deeponet_isolated": ["unet", "unetpp", "unetpp_attn", "global_mlp", "fno", "ffno"],
+}
 
 
 class BenchmarkRunner:
@@ -112,9 +143,9 @@ class BenchmarkRunner:
         if eval_protocol_mode not in {"single", "dual_axis"}:
             raise ValueError("benchmark.eval_protocol.mode must be one of: single, dual_axis")
         eval_protocol_scope = str(eval_protocol_cfg.get("scope", "common")).strip().lower()
-        if eval_protocol_scope not in {"common", "global_frozen", "unet_isolated", "fno_isolated", "deeponet_isolated"}:
+        if eval_protocol_scope not in {"common", "global_frozen", "unet_isolated", "unetpp_isolated", "unetpp_attn_isolated", "fno_isolated", "ffno_isolated", "deeponet_isolated"}:
             raise ValueError(
-                "benchmark.eval_protocol.scope must be one of: common, global_frozen, unet_isolated, fno_isolated, deeponet_isolated"
+                "benchmark.eval_protocol.scope must be one of: common, global_frozen, unet_isolated, unetpp_isolated, unetpp_attn_isolated, fno_isolated, ffno_isolated, deeponet_isolated"
             )
         frozen_ref_tag = str(eval_protocol_cfg.get("frozen_ref_tag", "")).strip()
         self._validate_eval_scope_models(scope=eval_protocol_scope, model_names=profile_lock["models"])
@@ -321,13 +352,31 @@ class BenchmarkRunner:
         geom_ctx = geom_provider.get()
         train_cfg = dict(self.benchmark_cfg.get("train", {}))
         self._validate_eval_scope_train_sections(scope=eval_protocol_scope, train_cfg=train_cfg)
-        if "unet" in profile_lock["models"] and target_family_for_score_raw in {"allvars", "logpair", "field"}:
-            unet_cfg = dict(train_cfg.get("unet", {}))
+        active_unet_model = resolve_single_family_model(model_names=profile_lock["models"], family=UNET_FAMILY_MODELS)
+        active_spectral_model = resolve_single_family_model(
+            model_names=profile_lock["models"],
+            family=SPECTRAL_FAMILY_MODELS,
+        )
+        if active_unet_model is not None and target_family_for_score_raw in {"allvars", "logpair", "field"}:
+            unet_model_key = str(active_unet_model)
+            cfg_prefix = f"train.{unet_model_key}"
+            unet_cfg = dict(train_cfg.get(unet_model_key, {}))
             unet_family = str(unet_cfg.get("target_family", "allvars")).strip().lower()
             if unet_family != target_family_for_score_raw:
                 raise ValueError(
-                    "train.unet.target_family must match benchmark.eval.target_family_for_score for unet isolated runs: "
-                    f"train.unet.target_family={unet_family}, "
+                    f"{cfg_prefix}.target_family must match benchmark.eval.target_family_for_score for isolated runs: "
+                    f"{cfg_prefix}.target_family={unet_family}, "
+                    f"benchmark.eval.target_family_for_score={target_family_for_score_raw}"
+                )
+        if active_spectral_model is not None and target_family_for_score_raw in {"allvars", "logpair", "field"}:
+            spectral_model_key = str(active_spectral_model)
+            cfg_prefix = f"train.{spectral_model_key}"
+            spectral_cfg = dict(train_cfg.get(spectral_model_key, {}))
+            spectral_family = str(spectral_cfg.get("target_family", "allvars")).strip().lower()
+            if spectral_family != target_family_for_score_raw:
+                raise ValueError(
+                    f"{cfg_prefix}.target_family must match benchmark.eval.target_family_for_score for isolated runs: "
+                    f"{cfg_prefix}.target_family={spectral_family}, "
                     f"benchmark.eval.target_family_for_score={target_family_for_score_raw}"
                 )
         resolved["optimizer_contract"] = dict(train_cfg.get("optimizer_contract", {}))
@@ -368,7 +417,10 @@ class BenchmarkRunner:
         effective_steps_per_model: dict[str, Any] = {}
         unet_contract_samples: list[dict[str, Any]] = []
         fno_contract_samples: list[dict[str, Any]] = []
+        ffno_contract_samples: list[dict[str, Any]] = []
+        coord_mlp_contract_samples: list[dict[str, Any]] = []
         deeponet_contract_samples: list[dict[str, Any]] = []
+        deeponet_pod_contract_samples: list[dict[str, Any]] = []
         guardrail_warnings: list[str] = []
         if bool(interp_overlap_status.get("fallback_applied", False)):
             guardrail_warnings.append(
@@ -465,13 +517,17 @@ class BenchmarkRunner:
                     poisson_refine_iters=int(profile_lock["poisson_refine_iters"]),
                     ood_cfg=self.benchmark_cfg.get("inference", {}).get("ood", {"poisson_residual_limit": 1e2}),
                     feature_store=feature_store,
+                    coord_scaler=bundle.transforms.get("coord_scaler", {}),
+                    coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
+                    coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
+                    coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
                     deeponet_head=(
                         getattr(model, "poisson_head", None)
                         if model_name == "deeponet_plasma"
                         else None
                     )
                     or (model if model_name == "deeponet_plasma" else None),
-                    unet_input_features_cfg=dict(train_cfg.get("unet", {}).get("input_features", {})),
+                    grid_input_features_cfg=dict(train_cfg.get(model_name, {}).get("input_features", {})),
                 )
                 infer_axis = self.benchmark_cfg.get("inference", {}).get(
                     "axis",
@@ -628,7 +684,10 @@ class BenchmarkRunner:
                 "effective_steps": int(extra_artifacts.get("effective_steps", max(len(history), 0))),
                 "unet_contract_effective": dict(extra_artifacts.get("unet_contract_effective", {})),
                 "fno_contract_effective": dict(extra_artifacts.get("fno_contract_effective", {})),
+                "ffno_contract_effective": dict(extra_artifacts.get("ffno_contract_effective", {})),
+                "coord_mlp_contract_effective": dict(extra_artifacts.get("coord_mlp_contract_effective", {})),
                 "deeponet_contract_effective": dict(extra_artifacts.get("deeponet_contract_effective", {})),
+                "deeponet_pod_contract_effective": dict(extra_artifacts.get("deeponet_pod_contract_effective", {})),
             }
 
         for model_idx, model_name in enumerate(profile_lock["models"]):
@@ -648,8 +707,14 @@ class BenchmarkRunner:
                     unet_contract_samples.append(dict(out["unet_contract_effective"]))
                 if out.get("fno_contract_effective"):
                     fno_contract_samples.append(dict(out["fno_contract_effective"]))
+                if out.get("ffno_contract_effective"):
+                    ffno_contract_samples.append(dict(out["ffno_contract_effective"]))
+                if out.get("coord_mlp_contract_effective"):
+                    coord_mlp_contract_samples.append(dict(out["coord_mlp_contract_effective"]))
                 if out.get("deeponet_contract_effective"):
                     deeponet_contract_samples.append(dict(out["deeponet_contract_effective"]))
+                if out.get("deeponet_pod_contract_effective"):
+                    deeponet_pod_contract_samples.append(dict(out["deeponet_pod_contract_effective"]))
             else:
                 split_rows: dict[str, dict[str, Any]] = {}
                 split_steps: dict[str, int] = {}
@@ -669,8 +734,14 @@ class BenchmarkRunner:
                         unet_contract_samples.append(dict(split_out["unet_contract_effective"]))
                     if split_out.get("fno_contract_effective"):
                         fno_contract_samples.append(dict(split_out["fno_contract_effective"]))
+                    if split_out.get("ffno_contract_effective"):
+                        ffno_contract_samples.append(dict(split_out["ffno_contract_effective"]))
+                    if split_out.get("coord_mlp_contract_effective"):
+                        coord_mlp_contract_samples.append(dict(split_out["coord_mlp_contract_effective"]))
                     if split_out.get("deeponet_contract_effective"):
                         deeponet_contract_samples.append(dict(split_out["deeponet_contract_effective"]))
+                    if split_out.get("deeponet_pod_contract_effective"):
+                        deeponet_pod_contract_samples.append(dict(split_out["deeponet_pod_contract_effective"]))
                 row = dict(split_rows[primary_split])
                 for var_name in target_vars_for_score_effective:
                     row[f"test_r2_{var_name}_plasma_interp"] = float(
@@ -865,7 +936,7 @@ class BenchmarkRunner:
         resolved["effective_steps_per_model"] = effective_steps_per_model
         resolved["comparison_contract"] = {
             "global_reference_mode": "frozen"
-            if eval_protocol_scope in {"global_frozen", "unet_isolated", "fno_isolated", "deeponet_isolated"}
+            if eval_protocol_scope in {"global_frozen", "unet_isolated", "unetpp_isolated", "unetpp_attn_isolated", "fno_isolated", "ffno_isolated", "deeponet_isolated"}
             else "common",
             "active_model_scope": eval_protocol_scope,
             "target_family_mode": target_family_for_score_raw,
@@ -873,11 +944,12 @@ class BenchmarkRunner:
         guard_cfg = dict(self.benchmark_cfg.get("guardrails", {}))
         checks = dict(guard_cfg.get("checks", {}))
         guard_mode = str(guard_cfg.get("mode", "warn")).strip().lower()
-        emit_unet_contract = bool(unet_contract_samples) or eval_protocol_scope not in {"fno_isolated", "deeponet_isolated"}
+        emit_unet_contract = bool(unet_contract_samples) or eval_protocol_scope not in {"fno_isolated", "ffno_isolated", "deeponet_isolated"}
         if emit_unet_contract:
             unet_contract_effective = self._aggregate_unet_contract_effective(
                 train_cfg=train_cfg,
                 y_vars=y_vars,
+                model_key=str(active_unet_model or "unet"),
                 unet_contract_samples=unet_contract_samples,
             )
             resolved["unet_contract_effective"] = unet_contract_effective
@@ -909,26 +981,37 @@ class BenchmarkRunner:
                 y_vars=y_vars,
                 fno_contract_samples=fno_contract_samples,
             )
-            resolved["fno_contract_effective"] = fno_contract_effective
-            resolved["fno_target_family_effective"] = str(fno_contract_effective.get("target_family_effective", "allvars"))
-            resolved["fno_target_vars_effective"] = list(fno_contract_effective.get("target_vars_effective", y_vars))
-            resolved["fno_backend_effective"] = str(fno_contract_effective.get("fno_backend_effective", "torch"))
-            resolved["fno_input_channels_effective"] = list(
-                fno_contract_effective.get("fno_input_channels_effective", ["x", "y"])
+            self._emit_spectral_contract_resolved(
+                resolved=resolved,
+                prefix="fno",
+                contract_effective=fno_contract_effective,
+                default_target_vars=y_vars,
             )
-            resolved["fno_selection_mode_effective"] = str(
-                fno_contract_effective.get("fno_selection_mode_effective", "last")
+        if ffno_contract_samples:
+            ffno_contract_effective = self._aggregate_ffno_contract_effective(
+                train_cfg=train_cfg,
+                y_vars=y_vars,
+                ffno_contract_samples=ffno_contract_samples,
             )
-            resolved["fno_spatial_consistency_effective"] = bool(
-                fno_contract_effective.get("fno_spatial_consistency_effective", False)
+            self._emit_spectral_contract_resolved(
+                resolved=resolved,
+                prefix="ffno",
+                contract_effective=ffno_contract_effective,
+                default_target_vars=y_vars,
             )
-            resolved["fno_optimizer_effective"] = dict(fno_contract_effective.get("fno_optimizer_effective", {}))
-            resolved["fno_feature_contract_effective"] = dict(
-                fno_contract_effective.get("fno_feature_contract_effective", {})
+        if coord_mlp_contract_samples:
+            resolved["coord_mlp_contract_effective"] = self._aggregate_coord_mlp_contract_effective(
+                train_cfg=train_cfg,
+                y_vars=y_vars,
+                coord_mlp_contract_samples=coord_mlp_contract_samples,
             )
-            resolved["fno_spectral_contract_effective"] = dict(
-                fno_contract_effective.get("fno_spectral_contract_effective", {})
+        if deeponet_pod_contract_samples:
+            deeponet_pod_contract_effective = self._aggregate_deeponet_pod_contract_effective(
+                train_cfg=train_cfg,
+                y_vars=y_vars,
+                deeponet_pod_contract_samples=deeponet_pod_contract_samples,
             )
+            resolved["deeponet_pod_contract_effective"] = deeponet_pod_contract_effective
         if deeponet_contract_samples:
             deeponet_contract_effective = self._aggregate_deeponet_contract_effective(
                 train_cfg=train_cfg,
@@ -1029,7 +1112,7 @@ class BenchmarkRunner:
 
         objective_cfg = sweep_cfg.get("objective", {})
         objective_model = str(objective_cfg.get("model_id", "global_mlp"))
-        objective_metric = str(objective_cfg.get("metric", "test_rmse_phi"))
+        objective_metric = str(objective_cfg.get("metric", "auto_primary")).strip()
         objective_mode = str(objective_cfg.get("mode", "min"))
         if objective_mode not in {"min", "max"}:
             raise ValueError("benchmark.sweep.objective.mode must be 'min' or 'max'")
@@ -1069,14 +1152,15 @@ class BenchmarkRunner:
                 model_id=objective_model,
                 metric=objective_metric,
             )
-            score = float(trial_row[objective_metric])
+            score_key = "primary_metric_value" if objective_metric == "auto_primary" else objective_metric
+            score = float(trial_row[score_key])
             resolved = ArtifactStore(trial_output).load_json("resolved_benchmark.json")
             trials.append(
                 {
                     "trial_id": f"trial_{trial_idx:03d}",
                     "output_dir": str(trial_output),
                     "objective_model_id": objective_model,
-                    "objective_metric": objective_metric,
+                    "objective_metric": score_key,
                     "objective_score": score,
                     "lock_hash": resolved["artifact_hashes"]["lock_hash"],
                     **trial_values,
@@ -1134,6 +1218,8 @@ class BenchmarkRunner:
     def _select_trial_row(leaderboard: list[dict[str, Any]], model_id: str, metric: str) -> dict[str, Any]:
         for row in leaderboard:
             if str(row.get("model_id")) == model_id:
+                if metric == "auto_primary":
+                    return row
                 if metric not in row:
                     raise KeyError(f"Metric '{metric}' not found in leaderboard row for model '{model_id}'")
                 return row
@@ -1250,9 +1336,10 @@ class BenchmarkRunner:
         *,
         train_cfg: dict[str, Any],
         y_vars: list[str],
+        model_key: str,
         unet_contract_samples: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        unet_cfg = dict(train_cfg.get("unet", {}))
+        unet_cfg = dict(train_cfg.get(str(model_key), {}))
         unet_family = str(unet_cfg.get("target_family", "allvars")).strip().lower()
         if unet_family == "field":
             target_vars_default = [v for v in ["Te", "phi"] if v in set(y_vars)]
@@ -1287,7 +1374,12 @@ class BenchmarkRunner:
             "unet_feature_contract_effective": {
                 "input_features_mode": str(unet_input_cfg.get("mode", "legacy_xy")).strip().lower(),
                 "input_feature_channels": feat_list,
-                "upsample_mode": str(dict(unet_cfg.get("model_cfg", {})).get("upsample_mode", "deconv")).strip().lower(),
+                "upsample_mode": str(
+                    dict(dict(unet_cfg.get("model_cfg", {})).get("conv_cfg", {})).get(
+                        "upsample_mode",
+                        dict(unet_cfg.get("model_cfg", {})).get("upsample_mode", "deconv"),
+                    )
+                ).strip().lower(),
                 "distance_transform_mode": str(
                     dict(unet_input_cfg.get("distance_transform", {})).get("mode", "raw")
                 ).strip().lower(),
@@ -1394,18 +1486,20 @@ class BenchmarkRunner:
                 out.pop(key, None)
         return out
 
-    def _aggregate_fno_contract_effective(
+    def _aggregate_spectral_contract_effective(
         self,
         *,
         train_cfg: dict[str, Any],
         y_vars: list[str],
-        fno_contract_samples: list[dict[str, Any]],
+        model_key: str,
+        prefix: str,
+        contract_samples: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        fno_cfg = dict(train_cfg.get("fno", {}))
-        fno_family = str(fno_cfg.get("target_family", "allvars")).strip().lower()
-        if fno_family == "field":
+        spectral_cfg = dict(train_cfg.get(model_key, {}))
+        spectral_family = str(spectral_cfg.get("target_family", "allvars")).strip().lower()
+        if spectral_family == "field":
             target_vars_default = [v for v in ["Te", "phi"] if v in set(y_vars)]
-        elif fno_family == "logpair":
+        elif spectral_family == "logpair":
             target_vars_default = resolve_family_vars(
                 family="logpair",
                 available=y_vars,
@@ -1413,69 +1507,243 @@ class BenchmarkRunner:
             )
         else:
             target_vars_default = resolve_allvars_order(list(y_vars), prefer_linear=True)
-        fno_input_cfg = dict(fno_cfg.get("input_features", {}))
-        raw_feat = fno_input_cfg.get("features", ["x", "y"])
+        input_cfg = dict(spectral_cfg.get("input_features", {}))
+        raw_feat = input_cfg.get("features", ["x", "y"])
         feat_list = [str(v) for v in raw_feat] if isinstance(raw_feat, list) and raw_feat else ["x", "y"]
-        fno_model_cfg = dict(fno_cfg.get("model_cfg", {}))
-        fno_spectral_cfg = dict(fno_model_cfg.get("spectral_cfg", {}))
-        fno_selection_cfg = dict(fno_cfg.get("selection", {}))
+        model_cfg = dict(spectral_cfg.get("model_cfg", {}))
+        factorized_cfg = dict(dict(model_cfg.get("spectral_cfg", {})).get("factorized_cfg", {}))
+        spectral_model_cfg = dict(model_cfg.get("spectral_cfg", {}))
+        selection_cfg = dict(spectral_cfg.get("selection", {}))
         sup_cfg = dict(dict(train_cfg.get("loss", {})).get("supervised", {}))
         out = {
             "target_vars_effective": target_vars_default,
-            "target_family_effective": fno_family,
-            "fno_backend_effective": "torch",
-            "fno_input_channels_effective": feat_list,
-            "fno_input_features_mode_effective": str(fno_input_cfg.get("mode", "geom_feature_pack")).strip().lower(),
-            "fno_selection_mode_effective": str(fno_selection_cfg.get("mode", "last")).strip().lower(),
-            "fno_optimizer_effective": dict(fno_cfg.get("optimizer", {})),
-            "fno_feature_contract_effective": {
-                "input_features_mode": str(fno_input_cfg.get("mode", "geom_feature_pack")).strip().lower(),
+            "target_family_effective": spectral_family,
+            "input_features_mode": str(input_cfg.get("mode", "geom_feature_pack")).strip().lower(),
+            "input_feature_channels": feat_list,
+            f"{prefix}_backend_effective": "torch",
+            f"{prefix}_input_channels_effective": feat_list,
+            f"{prefix}_input_features_mode_effective": str(input_cfg.get("mode", "geom_feature_pack")).strip().lower(),
+            f"{prefix}_selection_mode_effective": str(selection_cfg.get("mode", "last")).strip().lower(),
+            f"{prefix}_optimizer_effective": dict(spectral_cfg.get("optimizer", {})),
+            f"{prefix}_feature_contract_effective": {
+                "input_features_mode": str(input_cfg.get("mode", "geom_feature_pack")).strip().lower(),
                 "input_feature_channels": feat_list,
                 "distance_transform_mode": str(
-                    dict(fno_input_cfg.get("distance_transform", {})).get("mode", "raw")
+                    dict(input_cfg.get("distance_transform", {})).get("mode", "raw")
                 ).strip().lower(),
             },
-            "fno_spectral_contract_effective": {
-                "n_modes": int(fno_model_cfg.get("n_modes", fno_model_cfg.get("fno_n_modes", 2))),
-                "dealias_ratio": float(fno_spectral_cfg.get("dealias_ratio", 1.0)),
-                "taper_alpha": float(fno_spectral_cfg.get("taper_alpha", 0.0)),
-                "skip_filter": str(fno_spectral_cfg.get("skip_filter", "none")).strip().lower(),
+            f"{prefix}_spectral_contract_effective": {
+                "n_modes": int(model_cfg.get("n_modes", model_cfg.get("fno_n_modes", 2))),
+                "dealias_ratio": float(spectral_model_cfg.get("dealias_ratio", 1.0)),
+                "taper_alpha": float(spectral_model_cfg.get("taper_alpha", 0.0)),
+                "skip_filter": str(spectral_model_cfg.get("skip_filter", "none")).strip().lower(),
             },
-            "fno_spatial_consistency_effective": bool(
+            f"{prefix}_spatial_consistency_effective": bool(
                 dict(sup_cfg.get("spatial_consistency", {})).get("enabled", False)
             ),
         }
-        l = self._first_list(fno_contract_samples, "target_vars_effective")
+        if prefix == "ffno":
+            out[f"{prefix}_spectral_contract_effective"]["factorized_cfg"] = {
+                "enabled": bool(factorized_cfg.get("enabled", True)),
+                "mode": str(factorized_cfg.get("mode", "separable_1d")).strip().lower(),
+                "share_weights": bool(factorized_cfg.get("share_weights", False)),
+            }
+            local_skip_cfg = dict(spectral_model_cfg.get("local_skip_cfg", {}))
+            out[f"{prefix}_spectral_contract_effective"]["local_skip_cfg"] = {
+                "enabled": bool(local_skip_cfg.get("enabled", False)),
+                "init_scale": float(local_skip_cfg.get("init_scale", 0.0)),
+            }
+            axis_mix_cfg = dict(spectral_model_cfg.get("axis_mix_cfg", {}))
+            out[f"{prefix}_spectral_contract_effective"]["axis_mix_cfg"] = {
+                "enabled": bool(axis_mix_cfg.get("enabled", False)),
+                "init_h": float(axis_mix_cfg.get("init_h", 1.0)),
+                "init_w": float(axis_mix_cfg.get("init_w", 1.0)),
+            }
+        l = self._first_list(contract_samples, "target_vars_effective")
         if l is not None:
             out["target_vars_effective"] = [str(x) for x in l]
-        v = self._first_str(fno_contract_samples, "target_family_effective")
+        v = self._first_str(contract_samples, "target_family_effective")
         if v is not None:
             out["target_family_effective"] = v
-        v = self._first_str(fno_contract_samples, "fno_backend_effective")
+        v = self._first_str(contract_samples, "input_features_mode")
         if v is not None:
-            out["fno_backend_effective"] = v
-        l = self._first_list(fno_contract_samples, "fno_input_channels_effective")
+            out["input_features_mode"] = v
+        l = self._first_list(contract_samples, "input_feature_channels")
         if l is not None:
-            out["fno_input_channels_effective"] = [str(x) for x in l]
-        v = self._first_str(fno_contract_samples, "fno_input_features_mode_effective")
+            out["input_feature_channels"] = [str(x) for x in l]
+        v = self._first_str(contract_samples, f"{prefix}_backend_effective")
         if v is not None:
-            out["fno_input_features_mode_effective"] = v
-        v = self._first_str(fno_contract_samples, "fno_selection_mode_effective")
+            out[f"{prefix}_backend_effective"] = v
+        l = self._first_list(contract_samples, f"{prefix}_input_channels_effective")
+        if l is not None:
+            out[f"{prefix}_input_channels_effective"] = [str(x) for x in l]
+        v = self._first_str(contract_samples, f"{prefix}_input_features_mode_effective")
         if v is not None:
-            out["fno_selection_mode_effective"] = v
-        d = self._first_dict(fno_contract_samples, "fno_optimizer_effective")
+            out[f"{prefix}_input_features_mode_effective"] = v
+        v = self._first_str(contract_samples, f"{prefix}_selection_mode_effective")
+        if v is not None:
+            out[f"{prefix}_selection_mode_effective"] = v
+        d = self._first_dict(contract_samples, f"{prefix}_optimizer_effective")
         if d is not None:
-            out["fno_optimizer_effective"] = d
-        d = self._first_dict(fno_contract_samples, "fno_feature_contract_effective")
+            out[f"{prefix}_optimizer_effective"] = d
+        d = self._first_dict(contract_samples, f"{prefix}_feature_contract_effective")
         if d is not None:
-            out["fno_feature_contract_effective"] = d
-        d = self._first_dict(fno_contract_samples, "fno_spectral_contract_effective")
+            out[f"{prefix}_feature_contract_effective"] = d
+        d = self._first_dict(contract_samples, f"{prefix}_spectral_contract_effective")
         if d is not None:
-            out["fno_spectral_contract_effective"] = d
-        for sample in fno_contract_samples:
-            if isinstance(sample, dict) and "fno_spatial_consistency_effective" in sample:
-                out["fno_spatial_consistency_effective"] = bool(sample.get("fno_spatial_consistency_effective", False))
+            out[f"{prefix}_spectral_contract_effective"] = d
+        for sample in contract_samples:
+            if isinstance(sample, dict) and f"{prefix}_spatial_consistency_effective" in sample:
+                out[f"{prefix}_spatial_consistency_effective"] = bool(sample.get(f"{prefix}_spatial_consistency_effective", False))
                 break
+        return out
+
+    def _aggregate_fno_contract_effective(
+        self,
+        *,
+        train_cfg: dict[str, Any],
+        y_vars: list[str],
+        fno_contract_samples: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._aggregate_spectral_contract_effective(
+            train_cfg=train_cfg,
+            y_vars=y_vars,
+            model_key="fno",
+            prefix="fno",
+            contract_samples=fno_contract_samples,
+        )
+
+    def _aggregate_ffno_contract_effective(
+        self,
+        *,
+        train_cfg: dict[str, Any],
+        y_vars: list[str],
+        ffno_contract_samples: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return self._aggregate_spectral_contract_effective(
+            train_cfg=train_cfg,
+            y_vars=y_vars,
+            model_key="ffno",
+            prefix="ffno",
+            contract_samples=ffno_contract_samples,
+        )
+
+    @staticmethod
+    def _emit_spectral_contract_resolved(
+        *,
+        resolved: dict[str, Any],
+        prefix: str,
+        contract_effective: dict[str, Any],
+        default_target_vars: list[str],
+    ) -> None:
+        resolved[f"{prefix}_contract_effective"] = dict(contract_effective)
+        resolved[f"{prefix}_target_family_effective"] = str(contract_effective.get("target_family_effective", "allvars"))
+        resolved[f"{prefix}_target_vars_effective"] = list(contract_effective.get("target_vars_effective", default_target_vars))
+        resolved[f"{prefix}_backend_effective"] = str(contract_effective.get(f"{prefix}_backend_effective", "torch"))
+        resolved[f"{prefix}_input_channels_effective"] = list(contract_effective.get(f"{prefix}_input_channels_effective", ["x", "y"]))
+        resolved[f"{prefix}_selection_mode_effective"] = str(contract_effective.get(f"{prefix}_selection_mode_effective", "last"))
+        resolved[f"{prefix}_spatial_consistency_effective"] = bool(
+            contract_effective.get(f"{prefix}_spatial_consistency_effective", False)
+        )
+        resolved[f"{prefix}_optimizer_effective"] = dict(contract_effective.get(f"{prefix}_optimizer_effective", {}))
+        resolved[f"{prefix}_feature_contract_effective"] = dict(
+            contract_effective.get(f"{prefix}_feature_contract_effective", {})
+        )
+        resolved[f"{prefix}_spectral_contract_effective"] = dict(
+            contract_effective.get(f"{prefix}_spectral_contract_effective", {})
+        )
+
+    def _aggregate_coord_mlp_contract_effective(
+        self,
+        *,
+        train_cfg: dict[str, Any],
+        y_vars: list[str],
+        coord_mlp_contract_samples: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        coord_model_key = resolve_single_family_model(
+            model_names=[name for name in COORD_MLP_FAMILY_MODELS if bool(dict(train_cfg.get(name, {})))],
+            family=COORD_MLP_FAMILY_MODELS,
+        ) or "coord_mlp_fourier"
+        cfg = dict(train_cfg.get(coord_model_key, {}))
+        input_features_cfg = dict(cfg.get("input_features", {}))
+        _, model_cfg = _normalize_coord_mlp_model_cfg(
+            model_name=str(coord_model_key),
+            raw_cfg=dict(cfg.get("model_cfg", {})),
+        )
+        out = {
+            "model_type_effective": str(coord_model_key),
+            "backend_effective": "torch",
+            "target_family_effective": str(cfg.get("target_family", "allvars")).strip().lower(),
+            "target_vars_effective": list(cfg.get("target_vars", y_vars)),
+            "input_features_mode": str(input_features_cfg.get("mode", "geom_feature_pack")).strip().lower(),
+            "input_feature_channels": list(
+                input_features_cfg.get("features", ["x", "y", "mask_plasma", "distance_signed", "distance_any"])
+            ),
+            "require_pack_effective": str(input_features_cfg.get("require_pack", "warn")).strip().lower(),
+            "selection_mode_effective": str(dict(cfg.get("selection", {})).get("mode", "last")).strip().lower(),
+            "selection_weights_effective": dict(dict(cfg.get("selection", {})).get("weights", {})),
+            "embedding": dict(model_cfg.get("embedding", {})),
+            "siren": dict(model_cfg.get("siren", {})),
+        }
+        sample = coord_mlp_contract_samples[0] if coord_mlp_contract_samples else {}
+        for key in (
+            "model_type_effective",
+            "backend_effective",
+            "target_family_effective",
+            "target_vars_effective",
+            "input_features_mode",
+            "input_feature_channels",
+            "feature_source_effective",
+            "require_pack_effective",
+            "selection_mode_effective",
+            "selection_weights_effective",
+            "embedding",
+            "siren",
+        ):
+            if key in sample:
+                out[key] = sample[key]
+        return out
+
+    def _aggregate_deeponet_pod_contract_effective(
+        self,
+        *,
+        train_cfg: dict[str, Any],
+        y_vars: list[str],
+        deeponet_pod_contract_samples: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        cfg = dict(train_cfg.get("deeponet_pod", {}))
+        model_cfg = normalize_pod_deeponet_model_cfg(
+            dict(cfg.get("model_cfg", {})),
+            model_type="deeponet_pod",
+        )
+        basis_cfg = dict(model_cfg.get("basis", {}))
+        out = {
+            "model_type_effective": "deeponet_pod",
+            "target_family_effective": str(cfg.get("target_family", "allvars")).strip().lower(),
+            "target_vars_effective": list(cfg.get("target_vars", y_vars)),
+            "basis_rank_by_var": {str(v): int(basis_cfg.get("rank", 32)) for v in list(cfg.get("target_vars", y_vars))},
+            "basis_fit_scope_effective": str(basis_cfg.get("fit_scope", "train_only")).strip().lower(),
+            "basis_center_effective": bool(basis_cfg.get("center", True)),
+            "basis_per_var_effective": bool(basis_cfg.get("per_var", True)),
+            "selection_mode_effective": str(dict(cfg.get("selection", {})).get("mode", "last")).strip().lower(),
+            "selection_weights_effective": dict(dict(cfg.get("selection", {})).get("weights", {})),
+            "model_cfg_effective": dict(model_cfg),
+        }
+        sample = deeponet_pod_contract_samples[0] if deeponet_pod_contract_samples else {}
+        for key in (
+            "model_type_effective",
+            "target_family_effective",
+            "target_vars_effective",
+            "basis_rank_by_var",
+            "basis_fit_scope_effective",
+            "basis_center_effective",
+            "basis_per_var_effective",
+            "selection_mode_effective",
+            "selection_weights_effective",
+            "model_cfg_effective",
+        ):
+            if key in sample:
+                out[key] = sample[key]
         return out
 
     def _aggregate_deeponet_contract_effective(
@@ -1680,21 +1948,10 @@ class BenchmarkRunner:
     @staticmethod
     def _validate_eval_scope_models(*, scope: str, model_names: list[str]) -> None:
         names = [str(v) for v in list(model_names)]
-        if scope == "global_frozen" and names != ["global_mlp"]:
+        expected = _ISOLATED_SCOPE_MODEL_NAMES.get(scope)
+        if expected is not None and names != expected:
             raise ValueError(
-                "benchmark.eval_protocol.scope=global_frozen requires profile models exactly ['global_mlp']"
-            )
-        if scope == "unet_isolated" and names != ["unet"]:
-            raise ValueError(
-                "benchmark.eval_protocol.scope=unet_isolated requires profile models exactly ['unet']"
-            )
-        if scope == "fno_isolated" and names != ["fno"]:
-            raise ValueError(
-                "benchmark.eval_protocol.scope=fno_isolated requires profile models exactly ['fno']"
-            )
-        if scope == "deeponet_isolated" and names != ["deeponet_plasma"]:
-            raise ValueError(
-                "benchmark.eval_protocol.scope=deeponet_isolated requires profile models exactly ['deeponet_plasma']"
+                f"benchmark.eval_protocol.scope={scope} requires profile models exactly {expected}"
             )
 
     @staticmethod
@@ -1705,35 +1962,11 @@ class BenchmarkRunner:
         def _is_nonempty(section: str) -> bool:
             return bool(dict(train_cfg.get(section, {})))
 
-        violations: list[str] = []
-        if scope == "unet_isolated":
-            if _is_nonempty("global_mlp"):
-                violations.append("train.global_mlp")
-            if _is_nonempty("fno"):
-                violations.append("train.fno")
-            if _is_nonempty("deeponet_plasma"):
-                violations.append("train.deeponet_plasma")
-        elif scope == "global_frozen":
-            if _is_nonempty("unet"):
-                violations.append("train.unet")
-            if _is_nonempty("fno"):
-                violations.append("train.fno")
-            if _is_nonempty("deeponet_plasma"):
-                violations.append("train.deeponet_plasma")
-        elif scope == "fno_isolated":
-            if _is_nonempty("unet"):
-                violations.append("train.unet")
-            if _is_nonempty("global_mlp"):
-                violations.append("train.global_mlp")
-            if _is_nonempty("deeponet_plasma"):
-                violations.append("train.deeponet_plasma")
-        elif scope == "deeponet_isolated":
-            if _is_nonempty("unet"):
-                violations.append("train.unet")
-            if _is_nonempty("global_mlp"):
-                violations.append("train.global_mlp")
-            if _is_nonempty("fno"):
-                violations.append("train.fno")
+        violations = [
+            f"train.{section}"
+            for section in _ISOLATED_SCOPE_FORBIDDEN_SECTIONS.get(scope, [])
+            if _is_nonempty(section)
+        ]
 
         if violations:
             raise ValueError(
@@ -1763,7 +1996,10 @@ class BenchmarkRunner:
                 head_refresh = bool(dict(cfg.get("output_head_refresh", {})).get("enabled", False))
                 item["output_head_refresh_enabled"] = head_refresh
                 item["batch_size_cases"] = int(cfg.get("batch_size_cases", 0))
-            elif model_name in {"unet", "fno"}:
+            elif model_name in GRID_TORCH_MODELS:
+                item["batch_size_cases"] = int(unet_like_cfg.get("batch_size_cases", 0))
+                item["shuffle_cases"] = bool(unet_like_cfg.get("shuffle_cases", True))
+            elif model_name in POD_DEEPONET_FAMILY_MODELS:
                 item["batch_size_cases"] = int(unet_like_cfg.get("batch_size_cases", 0))
                 item["shuffle_cases"] = bool(unet_like_cfg.get("shuffle_cases", True))
             elif model_name == "deeponet_plasma":

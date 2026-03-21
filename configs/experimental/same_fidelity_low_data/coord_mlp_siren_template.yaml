@@ -20,6 +20,8 @@ train:
       cond_hidden: [128, 128]
       latent_dim: 128
       decoder_hidden: [256, 256, 256]
+      embedding:
+        type: none
       siren:
         enabled: true
         w0_initial: 30.0
