@@ -1,0 +1,58 @@
+あなたは、この repository を直接編集する実装担当です。今回は **Phase 5: descriptor / latent lane の受け口** を実装します。
+
+
+最初に必ず、次のファイルをこの順で読んでください。
+1. docs/11_dual_input_mode_runtime.md
+2. docs/11_dual_input_mode_runtime/README.md
+3. docs/11_dual_input_mode_runtime/CODEX_HANDOFF_START.txt
+4. docs/11_dual_input_mode_runtime/00_user_view.md
+5. docs/11_dual_input_mode_runtime/10_architecture_and_contract.md
+6. docs/11_dual_input_mode_runtime/20_geometry_core_and_feature_lanes.md
+7. docs/11_dual_input_mode_runtime/30_preprocess_train_infer_runtime.md
+8. docs/11_dual_input_mode_runtime/40_model_policy_and_adapters.md
+9. docs/11_dual_input_mode_runtime/50_geom_space_and_optimization.md
+10. docs/11_dual_input_mode_runtime/60_yaml_templates_and_examples.md
+11. docs/11_dual_input_mode_runtime/70_benchmark_tests_and_rollout.md
+12. docs/11_dual_input_mode_runtime/80_migration_notes.md
+
+次に少なくとも以下の既存コードを読むこと。
+- src/plasma_surrogate/core/model_families.py
+- src/plasma_surrogate/train/model_dispatch.py
+- src/plasma_surrogate/preprocessing/runner.py
+- src/plasma_surrogate/infer/engine.py
+- src/plasma_surrogate/infer/optimize.py
+- src/plasma_surrogate/data/geometry_provider.py
+- src/plasma_surrogate/models/mlp/io.py
+- src/plasma_surrogate/cli/workflows.py
+
+
+今回のタスク:
+- descriptor profile を artifact として扱う
+- `deeponet_pod` を dual-mode reduced-order model として整える
+- latent profile は v1 では metadata と hook だけを入れる
+
+実装目標:
+1. `features/structure_descriptors.py` を追加
+   - `struct_desc_v1` の deterministic builder
+2. preprocess
+   - descriptor profile が有効なら descriptor artifact を保存
+3. `deeponet_pod`
+   - `table_only`: cond-only branch
+   - `table_plus_structure`: descriptor_branch を通せる
+   - latent profile が有効でも、v1 は external latent artifact 読み込み hook のみ
+4. infer / io
+   - descriptor / latent metadata を checkpoint と summary に保存
+5. tests
+   - table_only deeponet_pod smoke
+   - table_plus_structure deeponet_pod descriptor smoke
+
+絶対条件:
+- descriptor は fixed length vector
+- pairwise O(P^2) 全展開はしない
+- latent encoder 学習自体は今回入れない
+- `global_mlp` を shape-aware 本命にしない
+
+作業完了時:
+- descriptor artifact 形式
+- deeponet_pod の dual-mode 差分
+- 残した future work

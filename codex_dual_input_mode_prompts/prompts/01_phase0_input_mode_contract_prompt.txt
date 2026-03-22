@@ -1,0 +1,69 @@
+あなたは、この repository を直接編集する実装担当です。目的は、train / infer / benchmark の入口で `table_only` と `table_plus_structure` を明確に分けることです。
+
+
+最初に必ず、次のファイルをこの順で読んでください。
+1. docs/11_dual_input_mode_runtime.md
+2. docs/11_dual_input_mode_runtime/README.md
+3. docs/11_dual_input_mode_runtime/CODEX_HANDOFF_START.txt
+4. docs/11_dual_input_mode_runtime/00_user_view.md
+5. docs/11_dual_input_mode_runtime/10_architecture_and_contract.md
+6. docs/11_dual_input_mode_runtime/20_geometry_core_and_feature_lanes.md
+7. docs/11_dual_input_mode_runtime/30_preprocess_train_infer_runtime.md
+8. docs/11_dual_input_mode_runtime/40_model_policy_and_adapters.md
+9. docs/11_dual_input_mode_runtime/50_geom_space_and_optimization.md
+10. docs/11_dual_input_mode_runtime/60_yaml_templates_and_examples.md
+11. docs/11_dual_input_mode_runtime/70_benchmark_tests_and_rollout.md
+12. docs/11_dual_input_mode_runtime/80_migration_notes.md
+
+次に少なくとも以下の既存コードを読むこと。
+- src/plasma_surrogate/core/model_families.py
+- src/plasma_surrogate/train/model_dispatch.py
+- src/plasma_surrogate/preprocessing/runner.py
+- src/plasma_surrogate/infer/engine.py
+- src/plasma_surrogate/infer/optimize.py
+- src/plasma_surrogate/data/geometry_provider.py
+- src/plasma_surrogate/models/mlp/io.py
+- src/plasma_surrogate/cli/workflows.py
+
+
+今回のタスクは **Phase 0: input mode contract の追加** だけです。
+まだ preprocess の大改造、geom_space、future model 追加には着手しないでください。
+
+実装目標:
+- 新規 `runtime.input_mode` 契約を追加する
+- mode 定数と正規化 helper を追加する
+- checkpoint / benchmark / infer summary で使う metadata key を定義する
+- 現時点では既存挙動を変えず、registry と validation の土台だけ入れる
+
+追加するもの:
+1. `src/plasma_surrogate/core/input_modes.py`
+   - `TABLE_ONLY`, `TABLE_PLUS_STRUCTURE`
+   - `normalize_input_mode_cfg(...)`
+   - `validate_input_mode_cfg(...)`
+   - metadata key helper
+2. `src/plasma_surrogate/core/model_input_policy.py`
+   - まずは最小版でよい
+   - model ごとの supported input modes を定義する
+   - adapter mode の定数を定義する
+3. docs で参照される import path を壊さないよう必要最小限の `__init__` export を加える
+
+絶対条件:
+- target 名を固定しない
+- target / output / transform の truth source を変えない
+- silent fallback を入れない
+- 既存 mainline config が読み込めなくなる変更はしない
+- legacy config は migration helper で既定解決してよいが、effective metadata には最終 mode を必ず保存できるようにする
+
+今回まだやらないこと:
+- preprocess runner の structure profile 解決
+- geometry provider の parametric parts
+- optimize の geom_space
+- benchmark の mode 分離
+- model dispatch の full gating
+
+作業完了時の出力要件:
+- 変更ファイル一覧
+- 追加ファイル一覧
+- `table_only` / `table_plus_structure` の解決ルール
+- 実行したテスト
+- 次フェーズに残した TODO

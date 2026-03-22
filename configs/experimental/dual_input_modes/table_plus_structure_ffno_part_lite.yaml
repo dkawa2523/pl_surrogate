@@ -1,0 +1,30 @@
+runtime:
+  input_mode: table_plus_structure
+  strict_input_mode: error
+  allow_mode_fallback: false
+  structure:
+    feature_profile: part_lite_v1
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: grid_pack
+    provider_mode: parametric_parts
+
+dataset:
+  type: csv_npz
+  root: data/m7
+  cond_columns: [pressure, power, flow]
+  geometry_root: data/m7/geometry
+
+preprocessing:
+  coord_features:
+    channels_from_profile: part_lite_v1
+
+train:
+  models: [ffno]
+  ffno:
+    target_family: allvars
+    target_vars: [log_ne, Te, phi]
+    input_features:
+      mode: geom_feature_pack
+      profile: part_lite_v1
+      require_pack: error

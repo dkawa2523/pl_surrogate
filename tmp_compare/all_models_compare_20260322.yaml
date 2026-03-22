@@ -1,0 +1,36 @@
+compare:
+  output_dir: runs/periodic_real_tuned_v83/compare_all_models_20260322
+  global_reference_mode: frozen
+  objective_metric: auto_primary
+  objective_mode: max
+  rows:
+    - name: global_mlp
+      model_id: global_mlp
+      leaderboard_csv: runs/periodic_real_tuned_v48/benchmark_m7_global_frozen_ref_v2/leaderboard.csv
+    - name: unet
+      model_id: unet
+      leaderboard_csv: runs/periodic_real_tuned_v59/benchmark_m7_unet_isolated_mainline/leaderboard.csv
+    - name: unetpp
+      model_id: unetpp
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_unetpp_isolated_mainline/leaderboard.csv
+    - name: unetpp_attn
+      model_id: unetpp_attn
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_unetpp_attn_isolated_mainline/leaderboard.csv
+    - name: fno
+      model_id: fno
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_fno_isolated_mainline/leaderboard.csv
+    - name: ffno
+      model_id: ffno
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_ffno_isolated_mainline/leaderboard.csv
+    - name: deeponet_plasma
+      model_id: deeponet_plasma
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_deeponet_isolated_mainline/leaderboard.csv
+    - name: coord_mlp_fourier
+      model_id: coord_mlp_fourier
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_coord_mlp_fourier_experimental/leaderboard.csv
+    - name: coord_mlp_siren
+      model_id: coord_mlp_siren
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_coord_mlp_siren_experimental/leaderboard.csv
+    - name: deeponet_pod
+      model_id: deeponet_pod
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_deeponet_pod_experimental/leaderboard.csv

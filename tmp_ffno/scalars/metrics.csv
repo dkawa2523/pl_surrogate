@@ -1,0 +1,2 @@
+epoch,train_loss,train_data_loss,train_phys_loss,train_rho_loss,train_poisson_loss,train_boundary_loss,train_boundary_operator_loss,train_physics_scale,val_loss,val_data_loss,val_phys_loss,val_balance_score,selection_score_Te,selection_score_phi,selection_valid_flag,train_lr,selected_epoch_flag,selected_epoch_score,selection_mode_effective,unet_optimizer_effective
+0.0,1.546356052160263,1.546356052160263,0.0,0.0,0.0,0.0,0.0,1.0,1.797748327255249,1.797748327255249,0.0,nan,0.0,0.0,1.0,0.001,1.0,0.0,last,adamw

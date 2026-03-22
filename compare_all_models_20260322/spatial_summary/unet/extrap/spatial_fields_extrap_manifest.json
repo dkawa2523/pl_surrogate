@@ -1,0 +1,23 @@
+{
+  "compare_csv": "runs\\periodic_real_tuned_v83\\compare_all_models_20260322\\selected_models_comparison.csv",
+  "protocol": "extrap",
+  "vars": [
+    "ne",
+    "ni",
+    "Te",
+    "phi"
+  ],
+  "model_names": [
+    "unet"
+  ],
+  "reference_name": "global_v2_frozen_ref",
+  "selected_case_hash": "372210bdb490f29fcfde3518f895d75561039566",
+  "mean_case_hashes": [
+    "372210bdb490f29fcfde3518f895d75561039566",
+    "ad9089e5cfbcf4b29e9a12d0fc11fdabbbc8d0ed",
+    "f84e9173c8acab0c8f808e2ab8ca9d937d67c144"
+  ],
+  "q_low": 2.0,
+  "q_high": 98.0,
+  "include_ground_truth": true
+}

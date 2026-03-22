@@ -1,0 +1,23 @@
+{
+  "compare_csv": "runs\\periodic_real_tuned_v83\\compare_all_models_20260322\\selected_models_comparison.csv",
+  "protocol": "interp",
+  "vars": [
+    "ne",
+    "ni",
+    "Te",
+    "phi"
+  ],
+  "model_names": [
+    "coord_mlp_fourier"
+  ],
+  "reference_name": "global_v2_frozen_ref",
+  "selected_case_hash": "2af41699094e2bc9f414ce48fea03f9ceee03d6f",
+  "mean_case_hashes": [
+    "2af41699094e2bc9f414ce48fea03f9ceee03d6f",
+    "436360fc9f4a30360ba85cd7a4aad5c39963d97b",
+    "a2b3aeb21a17b50a2b5812652510bb32b1ff5678"
+  ],
+  "q_low": 2.0,
+  "q_high": 98.0,
+  "include_ground_truth": true
+}

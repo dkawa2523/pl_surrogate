@@ -1,0 +1,333 @@
+{
+  "summary": {
+    "baseline_ffno": {
+      "dual": 0.9166581589739111,
+      "interp": 0.9827275114143847,
+      "extrap": 0.8505888065334375,
+      "vars_extrap": {
+        "ne": 0.7779832412165026,
+        "ni": 0.7813116429482546,
+        "Te": 0.9251395532774607,
+        "phi": 0.9179207886915319
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 1338332747399168.0,
+          "plasma_mid": 965418386718720.0,
+          "plasma_deep": 1200184721670144.0,
+          "all_plasma": 1162662545195008.0
+        },
+        "ni": {
+          "boundary_in": 1177789017358336.0,
+          "plasma_mid": 979021085016064.0,
+          "plasma_deep": 1186283120492544.0,
+          "all_plasma": 1138828563709952.0
+        },
+        "Te": {
+          "boundary_in": 4.787142753601074,
+          "plasma_mid": 3.957858085632324,
+          "plasma_deep": 0.49001216888427734,
+          "all_plasma": 2.48429274559021
+        },
+        "phi": {
+          "boundary_in": 27.31737518310547,
+          "plasma_mid": 7.915991306304932,
+          "plasma_deep": 2.7278475761413574,
+          "all_plasma": 9.626282691955566
+        }
+      }
+    },
+    "b3": {
+      "dual": 0.9442475536588629,
+      "interp": 0.9899037592480266,
+      "extrap": 0.8985913480696992,
+      "vars_extrap": {
+        "ne": 0.8255670602992677,
+        "ni": 0.855424906896124,
+        "Te": 0.9534298500417463,
+        "phi": 0.9599435750416586
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 1309719272620032.0,
+          "plasma_mid": 1003367778222080.0,
+          "plasma_deep": 993037845004288.0,
+          "all_plasma": 1030564249337856.0
+        },
+        "ni": {
+          "boundary_in": 1114946398060544.0,
+          "plasma_mid": 879890823905280.0,
+          "plasma_deep": 911607077011456.0,
+          "all_plasma": 925960119517184.0
+        },
+        "Te": {
+          "boundary_in": 4.122191905975342,
+          "plasma_mid": 2.673171043395996,
+          "plasma_deep": 0.8342744708061218,
+          "all_plasma": 1.9594329595565796
+        },
+        "phi": {
+          "boundary_in": 18.96300506591797,
+          "plasma_mid": 4.5517258644104,
+          "plasma_deep": 2.812221050262451,
+          "all_plasma": 6.724780559539795
+        }
+      }
+    },
+    "c1": {
+      "dual": 0.9440853764598602,
+      "interp": 0.9892683188761611,
+      "extrap": 0.8989024340435595,
+      "vars_extrap": {
+        "ne": 0.8241377656241743,
+        "ni": 0.8575118569623117,
+        "Te": 0.9540270114257,
+        "phi": 0.9599331021620521
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 1307239063224320.0,
+          "plasma_mid": 1025995947638784.0,
+          "plasma_deep": 991699761364992.0,
+          "all_plasma": 1034777679364096.0
+        },
+        "ni": {
+          "boundary_in": 1104363867078656.0,
+          "plasma_mid": 888741677760512.0,
+          "plasma_deep": 900026234568704.0,
+          "all_plasma": 919252655669248.0
+        },
+        "Te": {
+          "boundary_in": 4.11721134185791,
+          "plasma_mid": 2.6702308654785156,
+          "plasma_deep": 0.7958221435546875,
+          "all_plasma": 1.9468297958374023
+        },
+        "phi": {
+          "boundary_in": 19.129446029663086,
+          "plasma_mid": 4.212554931640625,
+          "plasma_deep": 2.842388868331909,
+          "all_plasma": 6.725659370422363
+        }
+      },
+      "acceptance": {
+        "dual_gt_b3": false,
+        "extrap_ge_0_890": true,
+        "ne_or_ni_rmse_all_plasma_better_than_b3": true,
+        "te_drop_within_0_03": true,
+        "phi_drop_within_0_03": true
+      },
+      "accepted": false
+    },
+    "c2": {
+      "dual": 0.9440853764598602,
+      "interp": 0.9892683188761611,
+      "extrap": 0.8989024340435595,
+      "vars_extrap": {
+        "ne": 0.8241377656241743,
+        "ni": 0.8575118569623117,
+        "Te": 0.9540270114257,
+        "phi": 0.9599331021620521
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 1307239063224320.0,
+          "plasma_mid": 1025995947638784.0,
+          "plasma_deep": 991699761364992.0,
+          "all_plasma": 1034777679364096.0
+        },
+        "ni": {
+          "boundary_in": 1104363867078656.0,
+          "plasma_mid": 888741677760512.0,
+          "plasma_deep": 900026234568704.0,
+          "all_plasma": 919252655669248.0
+        },
+        "Te": {
+          "boundary_in": 4.11721134185791,
+          "plasma_mid": 2.6702308654785156,
+          "plasma_deep": 0.7958221435546875,
+          "all_plasma": 1.9468297958374023
+        },
+        "phi": {
+          "boundary_in": 19.129446029663086,
+          "plasma_mid": 4.212554931640625,
+          "plasma_deep": 2.842388868331909,
+          "all_plasma": 6.725659370422363
+        }
+      },
+      "acceptance": {
+        "dual_gt_b3": false,
+        "extrap_ge_0_890": true,
+        "ne_or_ni_rmse_all_plasma_better_than_b3": true,
+        "te_drop_within_0_03": true,
+        "phi_drop_within_0_03": true
+      },
+      "accepted": false
+    },
+    "c3": {
+      "dual": 0.935104039326234,
+      "interp": 0.9893262046525153,
+      "extrap": 0.8808818739999528,
+      "vars_extrap": {
+        "ne": 0.7880257791817853,
+        "ni": 0.8369401653213966,
+        "Te": 0.9539469039998995,
+        "phi": 0.9446146474967296
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 1381285104713728.0,
+          "plasma_mid": 1100484370759680.0,
+          "plasma_deep": 1108538239746048.0,
+          "all_plasma": 1136062738989056.0
+        },
+        "ni": {
+          "boundary_in": 1140325091377152.0,
+          "plasma_mid": 940940562792448.0,
+          "plasma_deep": 973549766443008.0,
+          "all_plasma": 983374638350336.0
+        },
+        "Te": {
+          "boundary_in": 4.195175647735596,
+          "plasma_mid": 2.716055393218994,
+          "plasma_deep": 0.6766048669815063,
+          "all_plasma": 1.948525071144104
+        },
+        "phi": {
+          "boundary_in": 22.566287994384766,
+          "plasma_mid": 5.944504261016846,
+          "plasma_deep": 2.5924689769744873,
+          "all_plasma": 7.907505035400391
+        }
+      },
+      "acceptance": {
+        "dual_gt_b3": false,
+        "extrap_ge_0_890": false,
+        "ne_or_ni_rmse_all_plasma_better_than_b3": false,
+        "te_drop_within_0_03": true,
+        "phi_drop_within_0_03": true
+      },
+      "accepted": false
+    },
+    "d1": {
+      "dual": 0.9434514098240433,
+      "interp": 0.9899127760680875,
+      "extrap": 0.8969900435799991,
+      "vars_extrap": {
+        "ne": 0.8221020837217523,
+        "ni": 0.8513679209462235,
+        "Te": 0.9549041121660915,
+        "phi": 0.959586057485929
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 1312383897174016.0,
+          "plasma_mid": 1017164219809792.0,
+          "plasma_deep": 1003405090750464.0,
+          "all_plasma": 1040749562953728.0
+        },
+        "ni": {
+          "boundary_in": 1125609124134912.0,
+          "plasma_mid": 906785909112832.0,
+          "plasma_deep": 919972129800192.0,
+          "all_plasma": 938862067056640.0
+        },
+        "Te": {
+          "boundary_in": 4.0746612548828125,
+          "plasma_mid": 2.6101300716400146,
+          "plasma_deep": 0.8313719034194946,
+          "all_plasma": 1.928168773651123
+        },
+        "phi": {
+          "boundary_in": 19.119712829589844,
+          "plasma_mid": 4.421833038330078,
+          "plasma_deep": 2.8401615619659424,
+          "all_plasma": 6.754724502563477
+        }
+      },
+      "acceptance": {
+        "dual_gt_b3": false,
+        "extrap_ge_0_890": true,
+        "ne_or_ni_rmse_all_plasma_better_than_b3": false,
+        "te_drop_within_0_03": true,
+        "phi_drop_within_0_03": true
+      },
+      "accepted": false
+    },
+    "fno": {
+      "dual": 0.9521632418166461,
+      "interp": 0.9806326963881415,
+      "extrap": 0.9236937872451507,
+      "vars_extrap": {
+        "ne": 0.9004152020239623,
+        "ni": 0.897257062575944,
+        "Te": 0.9481209189114056,
+        "phi": 0.9489819654692909
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 830187180654592.0,
+          "plasma_mid": 611614214586368.0,
+          "plasma_deep": 824001219788800.0,
+          "all_plasma": 778676899676160.0
+        },
+        "ni": {
+          "boundary_in": 716380747857920.0,
+          "plasma_mid": 655961496748032.0,
+          "plasma_deep": 829971828310016.0,
+          "all_plasma": 780587354816512.0
+        },
+        "Te": {
+          "boundary_in": 4.750689506530762,
+          "plasma_mid": 2.8222405910491943,
+          "plasma_deep": 0.48794078826904297,
+          "all_plasma": 2.068105697631836
+        },
+        "phi": {
+          "boundary_in": 22.441787719726562,
+          "plasma_mid": 4.765960216522217,
+          "plasma_deep": 2.1677019596099854,
+          "all_plasma": 7.589338302612305
+        }
+      }
+    },
+    "global": {
+      "dual": 0.8940259307432874,
+      "interp": 0.8170417087863866,
+      "extrap": 0.9710101527001883,
+      "vars_extrap": {
+        "ne": NaN,
+        "ni": NaN,
+        "Te": NaN,
+        "phi": 0.9694316683891439
+      },
+      "regions_extrap_rmse": {
+        "ne": {
+          "boundary_in": 163394246148096.0,
+          "plasma_mid": 248910668890112.0,
+          "plasma_deep": 397858591211520.0,
+          "all_plasma": 349602117058560.0
+        },
+        "ni": {
+          "boundary_in": 170829706952704.0,
+          "plasma_mid": 237908187414528.0,
+          "plasma_deep": 396818236047360.0,
+          "all_plasma": 347308638076928.0
+        },
+        "Te": {
+          "boundary_in": 4.109806060791016,
+          "plasma_mid": 2.920633554458618,
+          "plasma_deep": 0.08293963968753815,
+          "all_plasma": 1.925644874572754
+        },
+        "phi": {
+          "boundary_in": 15.643671035766602,
+          "plasma_mid": 6.350784778594971,
+          "plasma_deep": 1.2035669088363647,
+          "all_plasma": 5.874594688415527
+        }
+      }
+    }
+  },
+  "best_by_dual": "b3"
+}

@@ -1,0 +1,2 @@
+epoch,train_phys_loss,train_poisson_loss,train_boundary_loss,train_boundary_operator_loss,train_rho_loss
+0.0,0.0,0.0,0.0,0.0,0.0

@@ -1,0 +1,71 @@
+{
+  "unetpp": {
+    "run_dir": "c:\\Users\\user\\Desktop\\pl_surrogate\\runs\\periodic_real_tuned_v83\\benchmark_m7_unetpp_isolated_mainline",
+    "primary_metric": "test_r2_plasma_mean_dual",
+    "primary_metric_value": 0.7363575318160895,
+    "test_r2_plasma_mean_dual": 0.7363575318160895,
+    "test_r2_plasma_mean_interp": 0.797066845230046,
+    "test_r2_plasma_mean_extrap": 0.675648218402133,
+    "test_r2_by_var_extrap": {
+      "ne": 0.585926523452093,
+      "ni": 0.5712688162954875,
+      "Te": 0.7955828812294656,
+      "phi": 0.7498146526314856
+    },
+    "extrap_rmse_all_plasma": {
+      "ne": 1587813573197824.0,
+      "ni": 1594549692530688.0,
+      "Te": 4.105208396911621,
+      "phi": 16.806331634521484
+    },
+    "extrap_rmse_boundary_in": {
+      "ne": 1252565337505792.0,
+      "ni": 1187208149073920.0,
+      "Te": 9.873727798461914,
+      "phi": 46.81775665283203
+    },
+    "guardrail_warnings": [
+      "interp_overlap_fallback: requested overlap split is not feasible for this dataset; fallback to marginal interpolation split was applied"
+    ]
+  },
+  "unetpp_attn": {
+    "run_dir": "c:\\Users\\user\\Desktop\\pl_surrogate\\runs\\periodic_real_tuned_v83\\benchmark_m7_unetpp_attn_isolated_mainline",
+    "primary_metric": "test_r2_plasma_mean_dual",
+    "primary_metric_value": 0.7428995898215789,
+    "test_r2_plasma_mean_dual": 0.7428995898215789,
+    "test_r2_plasma_mean_interp": 0.844731195336514,
+    "test_r2_plasma_mean_extrap": 0.6410679843066439,
+    "test_r2_by_var_extrap": {
+      "ne": 0.5471262741337155,
+      "ni": 0.509728214466485,
+      "Te": 0.783107300003629,
+      "phi": 0.724310148622746
+    },
+    "extrap_rmse_all_plasma": {
+      "ne": 1660540254420992.0,
+      "ni": 1705155435167744.0,
+      "Te": 4.228623867034912,
+      "phi": 17.642187118530273
+    },
+    "extrap_rmse_boundary_in": {
+      "ne": 910511591915520.0,
+      "ni": 895253653487616.0,
+      "Te": 8.422292709350586,
+      "phi": 47.53261184692383
+    },
+    "guardrail_warnings": [
+      "interp_overlap_fallback: requested overlap split is not feasible for this dataset; fallback to marginal interpolation split was applied"
+    ]
+  },
+  "delta_attn_minus_base": {
+    "dual": 0.0065420580054893485,
+    "interp": 0.04766435010646797,
+    "extrap": -0.03458023409548905,
+    "by_var_extrap": {
+      "ne": -0.038800249318377444,
+      "ni": -0.06154060182900256,
+      "Te": -0.012475581225836585,
+      "phi": -0.025504504008739604
+    }
+  }
+}

@@ -1,0 +1,61 @@
+あなたは、この repository を直接編集する実装担当です。今回は **Phase 3: benchmark / compare を input_mode aware にする** 作業です。
+
+
+最初に必ず、次のファイルをこの順で読んでください。
+1. docs/11_dual_input_mode_runtime.md
+2. docs/11_dual_input_mode_runtime/README.md
+3. docs/11_dual_input_mode_runtime/CODEX_HANDOFF_START.txt
+4. docs/11_dual_input_mode_runtime/00_user_view.md
+5. docs/11_dual_input_mode_runtime/10_architecture_and_contract.md
+6. docs/11_dual_input_mode_runtime/20_geometry_core_and_feature_lanes.md
+7. docs/11_dual_input_mode_runtime/30_preprocess_train_infer_runtime.md
+8. docs/11_dual_input_mode_runtime/40_model_policy_and_adapters.md
+9. docs/11_dual_input_mode_runtime/50_geom_space_and_optimization.md
+10. docs/11_dual_input_mode_runtime/60_yaml_templates_and_examples.md
+11. docs/11_dual_input_mode_runtime/70_benchmark_tests_and_rollout.md
+12. docs/11_dual_input_mode_runtime/80_migration_notes.md
+
+次に少なくとも以下の既存コードを読むこと。
+- src/plasma_surrogate/core/model_families.py
+- src/plasma_surrogate/train/model_dispatch.py
+- src/plasma_surrogate/preprocessing/runner.py
+- src/plasma_surrogate/infer/engine.py
+- src/plasma_surrogate/infer/optimize.py
+- src/plasma_surrogate/data/geometry_provider.py
+- src/plasma_surrogate/models/mlp/io.py
+- src/plasma_surrogate/cli/workflows.py
+
+
+今回のタスク:
+- benchmark row に input_mode / structure profile metadata を出す
+- compare で異なる input_mode を既定で混ぜない
+- fixtures と smoke benchmark を dual-mode 用に整える
+
+実装目標:
+1. `benchmark/runner.py`
+   - row に以下を追加:
+     - `input_mode_effective`
+     - `structure_feature_profile_effective`
+     - `structure_descriptor_profile_effective`
+     - `structure_latent_profile_effective`
+     - `structure_adapter_mode_effective`
+     - `geometry_provider_mode_effective`
+2. `scripts/compare_selected_models.py`
+   - 既定では `require_same_input_mode=true`
+   - mode が違う行は compare 対象外にするか、明示 warning を出す
+3. fixtures
+   - table_only と table_plus_structure の最小 fixture を追加
+4. tests
+   - benchmark row が mode-aware かを確認
+   - compare が mode mismatch を拒否することを確認
+
+絶対条件:
+- dynamic target metrics を壊さない
+- global reference も mode-aware に扱う
+- fixed columns を増やしすぎない
+- table_only と table_plus_structure の leaderboards を暗黙に混ぜない
+
+作業完了時:
+- 追加した leaderboard columns
+- mode-aware compare のルール
+- 実行した benchmark smoke

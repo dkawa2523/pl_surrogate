@@ -1,0 +1,11 @@
+﻿compare:
+  output_dir: runs/periodic_real_tuned_v83/compare_coord_mlp_fourier_vs_siren_main
+  objective_metric: auto_primary
+  objective_mode: max
+  rows:
+    - name: coord_mlp_fourier_main
+      model_id: coord_mlp_fourier
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_coord_mlp_fourier_experimental/leaderboard.csv
+    - name: coord_mlp_siren_main
+      model_id: coord_mlp_siren
+      leaderboard_csv: runs/periodic_real_tuned_v83/benchmark_m7_coord_mlp_siren_experimental_r3_te_phi_weighted/leaderboard.csv

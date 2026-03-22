@@ -1,0 +1,53 @@
+あなたは、この repository を直接編集する実装担当です。今回は **Optional Phase: U-NO を dual-mode 基盤へ追加** します。
+
+前提:
+- 01〜08 が完了していること
+- `table_plus_structure` の grid_pack path が安定していること
+
+
+最初に必ず、次のファイルをこの順で読んでください。
+1. docs/11_dual_input_mode_runtime.md
+2. docs/11_dual_input_mode_runtime/README.md
+3. docs/11_dual_input_mode_runtime/CODEX_HANDOFF_START.txt
+4. docs/11_dual_input_mode_runtime/00_user_view.md
+5. docs/11_dual_input_mode_runtime/10_architecture_and_contract.md
+6. docs/11_dual_input_mode_runtime/20_geometry_core_and_feature_lanes.md
+7. docs/11_dual_input_mode_runtime/30_preprocess_train_infer_runtime.md
+8. docs/11_dual_input_mode_runtime/40_model_policy_and_adapters.md
+9. docs/11_dual_input_mode_runtime/50_geom_space_and_optimization.md
+10. docs/11_dual_input_mode_runtime/60_yaml_templates_and_examples.md
+11. docs/11_dual_input_mode_runtime/70_benchmark_tests_and_rollout.md
+12. docs/11_dual_input_mode_runtime/80_migration_notes.md
+
+次に少なくとも以下の既存コードを読むこと。
+- src/plasma_surrogate/core/model_families.py
+- src/plasma_surrogate/train/model_dispatch.py
+- src/plasma_surrogate/preprocessing/runner.py
+- src/plasma_surrogate/infer/engine.py
+- src/plasma_surrogate/infer/optimize.py
+- src/plasma_surrogate/data/geometry_provider.py
+- src/plasma_surrogate/models/mlp/io.py
+- src/plasma_surrogate/cli/workflows.py
+
+
+今回のタスク:
+- `u_no` を structure mode 専用の grid model として追加する
+- `ffno` / `unetpp` と同じ feature profile / adapter 契約を使う
+- benchmark に mode-aware に載せる
+
+実装目標:
+1. `src/plasma_surrogate/models/uno/...`
+2. `models/mlp/io.py` build/load/save 追加
+3. `train/model_dispatch.py` へ `u_no` integration
+4. fixture / smoke test / benchmark profile 追加
+
+絶対条件:
+- `table_only` では使えない
+- `adapter_mode=grid_pack`
+- feature profile は registry から解決
+- dynamic target 契約を壊さない
+
+作業完了時:
+- 変更ファイル一覧
+- validator 追加点
+- 実行テスト
