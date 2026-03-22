@@ -48,7 +48,13 @@ from plasma_surrogate.models.mlp.io import load_mlp_checkpoint
                     "latent_dim": 12,
                     "decoder_hidden": [24, 24],
                     "embedding": {"type": "none"},
-                    "siren": {"enabled": True, "w0_initial": 30.0, "w0_hidden": 1.0},
+                    "siren": {
+                        "enabled": True,
+                        "fusion": "split_add",
+                        "w0_initial": 10.0,
+                        "w0_hidden": 1.0,
+                        "fusion_cfg": {"cond_gain_init": 0.7, "point_gain_init": 1.3, "branch_norm": True},
+                    },
                 },
             },
         ),
@@ -76,6 +82,7 @@ def test_infer_coord_mlp_smoke(tmp_path: Path, model_name: str, per_model_cfg: d
             "coord_features": {
                 "enabled": True,
                 "channels": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+                "scaling": {"enabled": True, "mode": "zscore", "fit_scope": "train_split", "mask_scope": "plasma_plus_band"},
                 "distance_transform_stats": {"enabled": True, "fit_scope": "train_split", "mask_scope": "plasma_plus_band"},
             },
         },

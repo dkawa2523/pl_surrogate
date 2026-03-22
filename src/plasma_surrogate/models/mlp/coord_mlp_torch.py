@@ -48,6 +48,28 @@ def _resolve_hidden_list(raw: Any, *, default: list[int], cfg_key: str) -> list[
     return out
 
 
+def _resolve_positive_float(raw: Any, *, default: float, cfg_key: str) -> float:
+    value = float(default if raw is None else raw)
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{cfg_key} must be > 0")
+    return float(value)
+
+
+def _resolve_strict_bool(raw: Any, *, default: bool, cfg_key: str) -> bool:
+    value = default if raw is None else raw
+    if isinstance(value, bool):
+        return bool(value)
+    raise ValueError(f"{cfg_key} must be a boolean")
+
+
+def _softplus_inverse(value: float) -> float:
+    x = float(value)
+    # Stable inverse of softplus for strictly positive targets.
+    if x > 20.0:
+        return x
+    return float(np.log(np.expm1(x)))
+
+
 def _siren_init_linear(*, torch: Any, linear: Any, w0: float, is_first: bool) -> None:
     fan_in = int(linear.in_features)
     if fan_in <= 0:
@@ -101,17 +123,46 @@ def _resolve_coord_mlp_config(cfg: dict[str, Any], *, model_type: str | None = N
             raise ValueError(f"{cfg_prefix}.model_cfg.siren.enabled must be true")
         if "decoder_activation" in cfg_local:
             raise ValueError(f"{cfg_prefix}.model_cfg.decoder_activation is not used for SIREN; remove it")
-        w0_initial = float(siren_cfg.get("w0_initial", 30.0))
-        w0_hidden = float(siren_cfg.get("w0_hidden", 1.0))
-        if not np.isfinite(w0_initial) or w0_initial <= 0.0:
-            raise ValueError(f"{cfg_prefix}.model_cfg.siren.w0_initial must be > 0")
-        if not np.isfinite(w0_hidden) or w0_hidden <= 0.0:
-            raise ValueError(f"{cfg_prefix}.model_cfg.siren.w0_hidden must be > 0")
+        fusion = str(siren_cfg.get("fusion", "split_add")).strip().lower()
+        if fusion != "split_add":
+            raise ValueError(f"{cfg_prefix}.model_cfg.siren.fusion must be split_add")
+        w0_initial = _resolve_positive_float(
+            siren_cfg.get("w0_initial"),
+            default=10.0,
+            cfg_key=f"{cfg_prefix}.model_cfg.siren.w0_initial",
+        )
+        w0_hidden = _resolve_positive_float(
+            siren_cfg.get("w0_hidden"),
+            default=1.0,
+            cfg_key=f"{cfg_prefix}.model_cfg.siren.w0_hidden",
+        )
+        fusion_cfg_raw = dict(siren_cfg.get("fusion_cfg", {}))
+        cond_gain_init = _resolve_positive_float(
+            fusion_cfg_raw.get("cond_gain_init"),
+            default=0.7,
+            cfg_key=f"{cfg_prefix}.model_cfg.siren.fusion_cfg.cond_gain_init",
+        )
+        point_gain_init = _resolve_positive_float(
+            fusion_cfg_raw.get("point_gain_init"),
+            default=1.3,
+            cfg_key=f"{cfg_prefix}.model_cfg.siren.fusion_cfg.point_gain_init",
+        )
+        branch_norm = _resolve_strict_bool(
+            fusion_cfg_raw.get("branch_norm"),
+            default=True,
+            cfg_key=f"{cfg_prefix}.model_cfg.siren.fusion_cfg.branch_norm",
+        )
         embedding_cfg = {"type": "none"}
         siren_cfg = {
             "enabled": True,
+            "fusion": "split_add",
             "w0_initial": float(w0_initial),
             "w0_hidden": float(w0_hidden),
+            "fusion_cfg": {
+                "cond_gain_init": float(cond_gain_init),
+                "point_gain_init": float(point_gain_init),
+                "branch_norm": bool(branch_norm),
+            },
         }
     else:
         if raw_embedding_type != "fourier":
@@ -128,8 +179,14 @@ def _resolve_coord_mlp_config(cfg: dict[str, Any], *, model_type: str | None = N
             raise ValueError(f"{cfg_prefix}.model_cfg.embedding.frequency_scale must be > 0")
         siren_cfg = {
             "enabled": False,
-            "w0_initial": float(siren_cfg.get("w0_initial", 30.0)),
+            "fusion": "split_add",
+            "w0_initial": float(siren_cfg.get("w0_initial", 10.0)),
             "w0_hidden": float(siren_cfg.get("w0_hidden", 1.0)),
+            "fusion_cfg": {
+                "cond_gain_init": 0.7,
+                "point_gain_init": 1.3,
+                "branch_norm": True,
+            },
         }
 
     out = {
@@ -146,11 +203,20 @@ def _resolve_coord_mlp_config(cfg: dict[str, Any], *, model_type: str | None = N
         ),
         "embedding": embedding_cfg,
         "siren": siren_cfg,
+        "decoder_input_norm": {
+            "enabled": bool(dict(cfg_local.get("decoder_input_norm", {})).get("enabled", True)),
+        },
+        "residual_head": {
+            "enabled": bool(dict(cfg_local.get("residual_head", {})).get("enabled", True)),
+            "init_scale": float(dict(cfg_local.get("residual_head", {})).get("init_scale", 0.0)),
+        },
     }
     if resolved_type == "coord_mlp_fourier":
         out["decoder_activation"] = str(cfg_local.get("decoder_activation", "gelu")).strip().lower()
     if out["latent_dim"] <= 0:
         raise ValueError(f"{cfg_prefix}.model_cfg.latent_dim must be > 0")
+    if not np.isfinite(float(out["residual_head"]["init_scale"])):
+        raise ValueError(f"{cfg_prefix}.model_cfg.residual_head.init_scale must be finite")
     return resolved_type, out
 
 
@@ -225,7 +291,7 @@ def _build_sequential_mlp(
             input_dim=int(input_dim),
             hidden_dims=list(hidden_dims),
             output_dim=int(output_dim),
-            w0_initial=float(dict(siren_cfg).get("w0_initial", 30.0)),
+            w0_initial=float(dict(siren_cfg).get("w0_initial", 10.0)),
             w0_hidden=float(dict(siren_cfg).get("w0_hidden", 1.0)),
         )
     return _standard_hidden_mlp(
@@ -324,6 +390,9 @@ if _torch_nn is not None and _torch_mod is not None:  # pragma: no branch - defi
             point_encoder: _torch_nn.Module,
             cond_encoder: _torch_nn.Module,
             point_decoder: _torch_nn.Module,
+            decoder_input_norm: _torch_nn.Module | None,
+            residual_head: _torch_nn.Module | None,
+            residual_scale: Any | None,
             embedding_type: str,
             siren_enabled: bool,
         ) -> None:
@@ -336,6 +405,9 @@ if _torch_nn is not None and _torch_mod is not None:  # pragma: no branch - defi
             self.point_encoder = point_encoder
             self.cond_encoder = cond_encoder
             self.point_decoder = point_decoder
+            self.decoder_input_norm = decoder_input_norm
+            self.residual_head = residual_head
+            self.residual_scale = residual_scale
 
         def forward(self, cond_t, spatial_t):
             bsz, h, w, _ = spatial_t.shape
@@ -344,8 +416,99 @@ if _torch_nn is not None and _torch_mod is not None:  # pragma: no branch - defi
             z_cond_expanded = z_cond[:, None, None, :].expand(bsz, h, w, self.latent_dim)
             dec_in = _torch_mod.cat([z_cond_expanded, z_point], dim=-1)
             flat = dec_in.reshape(bsz * h * w, dec_in.shape[-1])
+            if self.decoder_input_norm is not None:
+                flat = self.decoder_input_norm(flat)
             flat_out = self.point_decoder(flat)
-            return flat_out.reshape(bsz, h, w, self.out_channels).permute(0, 3, 1, 2).contiguous()
+            out = flat_out.reshape(bsz, h, w, self.out_channels)
+            if self.residual_head is not None:
+                res = self.residual_head(z_cond).reshape(bsz, 1, 1, self.out_channels).expand(bsz, h, w, self.out_channels)
+                scale = self.residual_scale if self.residual_scale is not None else out.new_tensor(0.0)
+                out = out + scale * res
+            return out.permute(0, 3, 1, 2).contiguous()
+
+
+    class _SirenSplitAddPointDecoder(_torch_nn.Module):
+        def __init__(
+            self,
+            *,
+            cond_dim: int,
+            point_dim: int,
+            hidden_dims: list[int],
+            out_dim: int,
+            w0_initial: float,
+            w0_hidden: float,
+            cond_gain_init: float,
+            point_gain_init: float,
+            branch_norm: bool,
+        ) -> None:
+            super().__init__()
+            if len(hidden_dims) == 0:
+                raise ValueError("train.coord_mlp_siren.model_cfg.decoder_hidden must be non-empty")
+            self.cond_dim = int(cond_dim)
+            self.point_dim = int(point_dim)
+            self.w0_initial = float(w0_initial)
+            self.w0_hidden = float(w0_hidden)
+            self.branch_norm = bool(branch_norm)
+            self.cond_norm = _torch_nn.LayerNorm(self.cond_dim) if self.branch_norm else _torch_nn.Identity()
+            self.point_norm = _torch_nn.LayerNorm(self.point_dim) if self.branch_norm else _torch_nn.Identity()
+            first_dim = int(hidden_dims[0])
+            self.first_cond = _torch_nn.Linear(self.cond_dim, first_dim, bias=False)
+            self.first_point = _torch_nn.Linear(self.point_dim, first_dim, bias=False)
+            self.first_bias = _torch_nn.Parameter(_torch_mod.zeros((first_dim,), dtype=_torch_mod.float32))
+            # Positive-constrained branch gains keep cond/point contribution balancing stable.
+            self._cond_gain_raw = _torch_nn.Parameter(
+                _torch_mod.tensor([_softplus_inverse(float(cond_gain_init))], dtype=_torch_mod.float32)
+            )
+            self._point_gain_raw = _torch_nn.Parameter(
+                _torch_mod.tensor([_softplus_inverse(float(point_gain_init))], dtype=_torch_mod.float32)
+            )
+            _siren_init_linear(
+                torch=_torch_mod,
+                linear=self.first_cond,
+                w0=self.w0_initial,
+                is_first=True,
+            )
+            _siren_init_linear(
+                torch=_torch_mod,
+                linear=self.first_point,
+                w0=self.w0_initial,
+                is_first=True,
+            )
+
+            self.hidden_layers = _torch_nn.ModuleList()
+            prev = first_dim
+            for nxt in [int(v) for v in hidden_dims[1:]]:
+                linear = _torch_nn.Linear(prev, nxt)
+                _siren_init_linear(
+                    torch=_torch_mod,
+                    linear=linear,
+                    w0=self.w0_hidden,
+                    is_first=False,
+                )
+                self.hidden_layers.append(linear)
+                prev = nxt
+            self.out_layer = _torch_nn.Linear(prev, int(out_dim))
+            _siren_init_linear(
+                torch=_torch_mod,
+                linear=self.out_layer,
+                w0=self.w0_hidden,
+                is_first=False,
+            )
+
+        def forward(self, flat):
+            cond = flat[..., : self.cond_dim]
+            point = flat[..., self.cond_dim : self.cond_dim + self.point_dim]
+            cond = self.cond_norm(cond)
+            point = self.point_norm(point)
+            cond_gain = _torch_nn.functional.softplus(self._cond_gain_raw)
+            point_gain = _torch_nn.functional.softplus(self._point_gain_raw)
+            h = _torch_mod.sin(
+                float(self.w0_initial)
+                * (cond_gain * self.first_cond(cond) + point_gain * self.first_point(point) + self.first_bias)
+            )
+            for linear in self.hidden_layers:
+                h = _torch_mod.sin(float(self.w0_hidden) * linear(h))
+            return self.out_layer(h)
 
 
 else:  # pragma: no cover - only used when torch is unavailable at import time.
@@ -353,6 +516,7 @@ else:  # pragma: no cover - only used when torch is unavailable at import time.
     _IdentityPointEncoder = None
     _FourierPointEncoder = None
     _CoordMLPNet = None
+    _SirenSplitAddPointDecoder = None
 
 
 def _build_coord_mlp_net(
@@ -368,6 +532,8 @@ def _build_coord_mlp_net(
     decoder_activation: str,
     embedding_cfg: dict[str, Any],
     siren_cfg: dict[str, Any],
+    decoder_input_norm_cfg: dict[str, Any],
+    residual_head_cfg: dict[str, Any],
 ):
     emb_type = str(embedding_cfg.get("type", "fourier")).strip().lower()
     embedding_include_raw = bool(embedding_cfg.get("include_raw", True))
@@ -375,6 +541,7 @@ def _build_coord_mlp_net(
     embedding_frequency_scale = float(embedding_cfg.get("frequency_scale", 10.0))
     cfg_prefix = _cfg_prefix(model_type)
     nn = torch.nn
+    siren_enabled = bool(dict(siren_cfg).get("enabled", False))
     cond_encoder = _build_sequential_mlp(
         torch=torch,
         input_dim=int(input_dim),
@@ -397,15 +564,43 @@ def _build_coord_mlp_net(
             n_frequencies=int(embedding_n_frequencies),
             frequency_scale=float(embedding_frequency_scale),
         )
-    point_decoder = _build_sequential_mlp(
-        torch=torch,
-        input_dim=int(latent_dim) + int(point_encoder.output_dim()),
-        hidden_dims=list(decoder_hidden),
-        output_dim=int(out_channels),
-        activation_name=str(decoder_activation),
-        siren_cfg=dict(siren_cfg),
-        cfg_prefix=cfg_prefix,
-    )
+    if siren_enabled:
+        fusion = str(dict(siren_cfg).get("fusion", "split_add")).strip().lower()
+        if fusion != "split_add":
+            raise ValueError(f"{cfg_prefix}.model_cfg.siren.fusion must be split_add")
+        if _SirenSplitAddPointDecoder is None:
+            raise RuntimeError("CoordMLPTorch requires torch SIREN decoder modules to be available")
+        point_decoder = _SirenSplitAddPointDecoder(
+            cond_dim=int(latent_dim),
+            point_dim=int(point_encoder.output_dim()),
+            hidden_dims=list(decoder_hidden),
+            out_dim=int(out_channels),
+            w0_initial=float(dict(siren_cfg).get("w0_initial", 10.0)),
+            w0_hidden=float(dict(siren_cfg).get("w0_hidden", 1.0)),
+            cond_gain_init=float(dict(dict(siren_cfg).get("fusion_cfg", {})).get("cond_gain_init", 0.7)),
+            point_gain_init=float(dict(dict(siren_cfg).get("fusion_cfg", {})).get("point_gain_init", 1.3)),
+            branch_norm=bool(dict(dict(siren_cfg).get("fusion_cfg", {})).get("branch_norm", True)),
+        )
+    else:
+        point_decoder = _build_sequential_mlp(
+            torch=torch,
+            input_dim=int(latent_dim) + int(point_encoder.output_dim()),
+            hidden_dims=list(decoder_hidden),
+            output_dim=int(out_channels),
+            activation_name=str(decoder_activation),
+            siren_cfg=dict(siren_cfg),
+            cfg_prefix=cfg_prefix,
+        )
+    decoder_input_norm = nn.LayerNorm(int(latent_dim) + int(point_encoder.output_dim())) if bool(
+        dict(decoder_input_norm_cfg).get("enabled", True)
+    ) else None
+    residual_head = None
+    residual_scale = None
+    if bool(dict(residual_head_cfg).get("enabled", True)):
+        residual_head = nn.Linear(int(latent_dim), int(out_channels))
+        residual_scale = nn.Parameter(
+            torch.full((1,), float(dict(residual_head_cfg).get("init_scale", 0.0)), dtype=torch.float32)
+        )
     if _CoordMLPNet is None:
         raise RuntimeError("CoordMLPTorch requires torch modules to be available")
     return _CoordMLPNet(
@@ -415,8 +610,11 @@ def _build_coord_mlp_net(
         point_encoder=point_encoder,
         cond_encoder=cond_encoder,
         point_decoder=point_decoder,
+        decoder_input_norm=decoder_input_norm,
+        residual_head=residual_head,
+        residual_scale=residual_scale,
         embedding_type=str(emb_type),
-        siren_enabled=bool(dict(siren_cfg).get("enabled", False)),
+        siren_enabled=bool(siren_enabled),
     )
 
 
@@ -461,6 +659,7 @@ class CoordMLPTorch:
         self.input_feature_channels = [str(v) for v in channels]
         self.spatial_feature_dim = int(len(self.input_feature_channels))
         self.raw_out_channels = int(self.out_channels)
+        self.coord_mlp_impl_version = "v4_siren_branch_balanced"
         self.coord = _build_unit_coord_grid(self.grid_shape)
         self._static_spatial_features: np.ndarray | None = None
         self._torch_last_out = None
@@ -483,7 +682,11 @@ class CoordMLPTorch:
             decoder_activation=str(self.model_cfg.get("decoder_activation", "gelu")),
             embedding_cfg=dict(self.model_cfg["embedding"]),
             siren_cfg=dict(self.model_cfg["siren"]),
+            decoder_input_norm_cfg=dict(self.model_cfg.get("decoder_input_norm", {})),
+            residual_head_cfg=dict(self.model_cfg.get("residual_head", {})),
         )
+        self.device = torch.device("cuda" if bool(torch.cuda.is_available()) else "cpu")
+        self.net.to(self.device)
 
     def set_static_spatial_features(self, spatial_features: np.ndarray | None) -> None:
         if spatial_features is None:
@@ -530,8 +733,8 @@ class CoordMLPTorch:
     ) -> np.ndarray:
         torch = self.torch
         cond_arr, spatial_arr = self._build_decoder_input(cond, spatial_features=spatial_features)
-        cond_t = torch.from_numpy(cond_arr)
-        spatial_t = torch.from_numpy(spatial_arr)
+        cond_t = torch.as_tensor(cond_arr, dtype=torch.float32, device=self.device)
+        spatial_t = torch.as_tensor(spatial_arr, dtype=torch.float32, device=self.device)
         if bool(training):
             self.net.train()
             yt = self.net(cond_t, spatial_t)
@@ -577,10 +780,16 @@ class CoordMLPTorch:
             if hasattr(module, "weight"):
                 cond_first = module.weight
                 break
-        for module in reversed(list(self.net.point_decoder)):
-            if hasattr(module, "weight"):
-                decoder_last = module.weight
-                break
+        point_decoder = self.net.point_decoder
+        if hasattr(point_decoder, "out_layer") and hasattr(point_decoder.out_layer, "weight"):
+            decoder_last = point_decoder.out_layer.weight
+        elif hasattr(point_decoder, "__iter__"):
+            for module in reversed(list(point_decoder)):
+                if hasattr(module, "weight"):
+                    decoder_last = module.weight
+                    break
+        elif hasattr(point_decoder, "weight"):
+            decoder_last = point_decoder.weight
         return cond_first, decoder_last
 
     def backward_raw(

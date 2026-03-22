@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from types import SimpleNamespace
+import json
 
 import numpy as np
 import pytest
@@ -11,6 +12,7 @@ from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.infer.engine import InferenceEngine
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import (
     PODDeepONetTorch,
+    POD_DEEPONET_IMPL_VERSION,
     fit_pod_basis_from_targets,
     normalize_pod_deeponet_model_cfg,
 )
@@ -45,6 +47,8 @@ def test_fit_pod_basis_helper_clamps_rank() -> None:
     assert bundle.basis_by_var["density"].shape == (3, 4, 4)
     assert bundle.mean_by_var["temperature"].shape == (4, 4)
     assert bundle.rank_by_var == {"density": 3, "temperature": 3}
+    assert bundle.coeff_std_by_var["density"].shape == (3,)
+    assert np.all(bundle.coeff_std_by_var["density"] > 0.0)
 
 
 def test_normalize_pod_model_cfg_canonicalizes_hidden() -> None:
@@ -89,6 +93,39 @@ def test_pod_deeponet_forward_and_checkpoint_roundtrip(tmp_path: Path) -> None:
     assert pred_loaded.shape == pred.shape
     assert loaded.to_meta()["basis_rank_by_var"] == {"density": bundle.rank_by_var["density"], "temperature": bundle.rank_by_var["temperature"]}
     assert np.allclose(loaded.basis_bundle_numpy().basis_by_var["density"], bundle.basis_by_var["density"])
+    assert loaded.to_meta()["impl_version"] == POD_DEEPONET_IMPL_VERSION
+    assert "coeff_std_by_var" in loaded.to_meta()
+
+
+def test_pod_deeponet_rejects_legacy_checkpoint_format(tmp_path: Path) -> None:
+    _enable_torch()
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+    y = _build_targets(n=4, h=4, w=4)
+    bundle = fit_pod_basis_from_targets(
+        y,
+        output_keys=["density", "temperature"],
+        requested_rank=3,
+        center=True,
+        per_var=True,
+    )
+    model = PODDeepONetTorch(
+        input_dim=3,
+        grid_shape=(4, 4),
+        out_channels=2,
+        output_keys=["density", "temperature"],
+        pod_basis_bundle=bundle,
+        model_cfg={"hidden": [16, 12], "basis": {"rank": 3, "fit_scope": "train_only", "per_var": True, "center": True}},
+    )
+    ckpt = save_mlp_checkpoint(model, tmp_path / "ckpt_legacy")
+    meta_path = Path(ckpt) / "meta.json"
+    with meta_path.open("r", encoding="utf-8") as f:
+        meta = json.load(f)
+    meta.pop("impl_version", None)
+    with meta_path.open("w", encoding="utf-8") as f:
+        json.dump(meta, f, indent=2)
+    with pytest.raises(ValueError, match="expected impl_version"):
+        load_mlp_checkpoint(ckpt)
 
 
 def test_pod_deeponet_inference_does_not_use_grid_spatial_builder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

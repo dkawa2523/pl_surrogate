@@ -95,6 +95,8 @@ def test_pod_deeponet_train_split_only_basis_fit(monkeypatch: pytest.MonkeyPatch
             dtype=np.float32,
         ).copy()
         captured["train_targets"] = np.asarray(y_train, dtype=np.float32).copy()
+        captured["selection_mode"] = str(dict(kwargs.get("selection_cfg", {})).get("mode", ""))
+        captured["optimizer_schedule"] = str(dict(kwargs.get("unet_optimizer_cfg", {})).get("schedule", ""))
         return TrainOutput(history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}], model=model)
 
     monkeypatch.setattr(Trainer, "run_unet", _fake_run_unet)
@@ -103,6 +105,8 @@ def test_pod_deeponet_train_split_only_basis_fit(monkeypatch: pytest.MonkeyPatch
     assert np.allclose(captured["basis_mean_density"], expected_mean)
     assert np.allclose(captured["train_targets"], ctx.y_scaled[ctx.tr])
     assert out.extra_artifacts["deeponet_pod_contract_effective"]["basis_fit_scope_effective"] == "train_only"
+    assert captured["selection_mode"] == "best_val_allvars_balance"
+    assert captured["optimizer_schedule"] == "cosine"
 
 
 def test_pod_deeponet_rejects_invalid_rank(tmp_path: Path) -> None:
@@ -120,4 +124,38 @@ def test_pod_deeponet_rejects_invalid_fit_scope(tmp_path: Path) -> None:
     cfg["model_cfg"]["basis"]["fit_scope"] = "all_split"
     ctx.run_cfg = {"train": {"deeponet_pod": cfg}}
     with pytest.raises(ValueError, match="basis.fit_scope must be train_only"):
+        run_model_train_predict(ctx)
+
+
+def test_pod_deeponet_injects_training_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_torch()
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+    ctx = _ctx(tmp_path)
+    cfg = _valid_cfg(ctx.y_vars)
+    cfg.pop("selection", None)
+    cfg.pop("optimizer", None)
+    ctx.run_cfg = {"train": {"deeponet_pod": cfg, "unet_like": {"batch_size_cases": 4}}}
+    captured: dict[str, Any] = {}
+
+    def _fake_run_unet(self, model, cond_train, y_train, cond_val, y_val, **kwargs):
+        captured["selection_cfg"] = dict(kwargs.get("selection_cfg", {}))
+        captured["unet_optimizer_cfg"] = dict(kwargs.get("unet_optimizer_cfg", {}))
+        return TrainOutput(history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}], model=model)
+
+    monkeypatch.setattr(Trainer, "run_unet", _fake_run_unet)
+    out = run_model_train_predict(ctx)
+    assert captured["selection_cfg"]["mode"] == "best_val_allvars_balance"
+    assert captured["unet_optimizer_cfg"]["type"] == "adamw"
+    assert captured["unet_optimizer_cfg"]["schedule"] == "cosine"
+    assert captured["unet_optimizer_cfg"]["warmup_epochs"] == 10
+    assert out.extra_artifacts["deeponet_pod_contract_effective"]["optimizer_effective"]["schedule"] == "cosine"
+
+
+def test_pod_deeponet_rejects_selection_last(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    cfg = _valid_cfg(ctx.y_vars)
+    cfg["selection"] = {"mode": "last"}
+    ctx.run_cfg = {"train": {"deeponet_pod": cfg}}
+    with pytest.raises(ValueError, match="selection.mode must be best_val_allvars_balance"):
         run_model_train_predict(ctx)

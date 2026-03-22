@@ -698,7 +698,18 @@ def train_one_epoch_unet(
                     w_hidden_prev = w_hidden.detach().clone() if w_hidden is not None else None
                     w_out_prev = w_out.detach().clone() if w_out is not None else None
                 torch_optimizer.zero_grad(set_to_none=True)
-                _ = model.backward_raw(raw_grad.astype(np.float32), lr=lr, apply_step=False)
+                try:
+                    _ = model.backward_raw(
+                        raw_grad.astype(np.float32),
+                        lr=lr,
+                        apply_step=False,
+                        target_raw=np.asarray(y_batch, dtype=np.float32),
+                        loss_cfg=loss_cfg,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument" not in str(exc):
+                        raise
+                    _ = model.backward_raw(raw_grad.astype(np.float32), lr=lr, apply_step=False)
                 torch_optimizer.step()
                 with torch.no_grad():
                     w_hidden_cur, w_out_cur = model._torch_step_reference()
@@ -713,7 +724,17 @@ def train_one_epoch_unet(
                             torch.linalg.norm(do) / max(float(torch.linalg.norm(w_out_prev)), 1e-12)
                         )
             else:
-                ret = model.backward_raw(raw_grad.astype(np.float32), lr=lr)
+                try:
+                    ret = model.backward_raw(
+                        raw_grad.astype(np.float32),
+                        lr=lr,
+                        target_raw=np.asarray(y_batch, dtype=np.float32),
+                        loss_cfg=loss_cfg,
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument" not in str(exc):
+                        raise
+                    ret = model.backward_raw(raw_grad.astype(np.float32), lr=lr)
                 if isinstance(ret, dict):
                     back_diag["step_rel_hidden_mean"] = float(ret.get("step_rel_hidden_mean", 0.0))
                     back_diag["step_rel_output"] = float(ret.get("step_rel_output", 0.0))

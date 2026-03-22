@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import os
 import numpy as np
 import pytest
 
+from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.core.spatial_regions import build_region_masks
-from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy
+from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy, compose_supervised_torch
 
 
 def _pred_fields(batch: int = 2, h: int = 6, w: int = 6) -> dict[str, np.ndarray]:
@@ -1555,3 +1557,95 @@ def test_build_region_masks_signed_quantile_monotonic():
     boundary_thr = float(np.asarray(regions["boundary_threshold"]).reshape(-1)[0])
     deep_thr = float(np.asarray(regions["deep_threshold"]).reshape(-1)[0])
     assert boundary_thr <= deep_thr
+
+
+def test_compose_supervised_torch_region_balance_changes_loss():
+    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+
+    pred = {
+        "Te": np.array([[[2.0, 2.0], [0.5, 0.5]]], dtype=np.float32),
+        "phi": np.array([[[1.0, 1.0], [0.2, 0.2]]], dtype=np.float32),
+    }
+    tgt = np.zeros((1, 2, 2, 2), dtype=np.float32)
+    mask = np.ones((1, 2, 2), dtype=np.float32)
+    distance_any = np.array([[[1.0, 1.0], [8.0, 8.0]]], dtype=np.float32)
+
+    loss_base, _ = compose_supervised_torch(
+        pred,
+        tgt,
+        y_order=["Te", "phi"],
+        loss_cfg={"supervised": {"type": "mse"}},
+        mask=mask,
+        distance_any=distance_any,
+    )
+    loss_rb, _ = compose_supervised_torch(
+        pred,
+        tgt,
+        y_order=["Te", "phi"],
+        loss_cfg={
+            "supervised": {
+                "type": "mse",
+                "region_balance": {
+                    "enabled": True,
+                    "vars": ["Te", "phi"],
+                    "mode": "additive",
+                    "additive_lambda": 0.5,
+                    "boundary_in_px": 2.0,
+                    "mid_plasma_px": 4.0,
+                    "deep_plasma_px": 6.0,
+                    "weight_boundary_in": 0.1,
+                    "weight_plasma_mid": 0.2,
+                    "weight_deep_plasma": 0.7,
+                },
+            }
+        },
+        mask=mask,
+        distance_any=distance_any,
+    )
+    assert float(loss_rb.detach().cpu().item()) != pytest.approx(float(loss_base.detach().cpu().item()))
+
+
+def test_compose_supervised_torch_region_weighting_alias_warns():
+    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+
+    pred = {"phi": np.ones((1, 2, 2), dtype=np.float32)}
+    tgt = np.zeros((1, 1, 2, 2), dtype=np.float32)
+    mask = np.ones((1, 2, 2), dtype=np.float32)
+    distance_any = np.ones((1, 2, 2), dtype=np.float32)
+
+    with pytest.warns(DeprecationWarning, match="region_weighting"):
+        compose_supervised_torch(
+            pred,
+            tgt,
+            y_order=["phi"],
+            loss_cfg={
+                "supervised": {
+                    "type": "mse",
+                    "region_weighting": {"enabled": True, "boundary_delta": 2.0, "w_bulk": 1.0, "w_boundary": 3.0},
+                }
+            },
+            mask=mask,
+            distance_any=distance_any,
+        )
+
+
+def test_compose_supervised_region_contract_conflict_rejects():
+    pred = {"phi": np.ones((1, 2, 2), dtype=np.float32)}
+    tgt = {"phi": np.zeros((1, 2, 2), dtype=np.float32)}
+    with pytest.raises(ValueError, match="region_balance and supervised.region_weighting"):
+        compose_supervised_numpy(
+            pred,
+            tgt,
+            y_order=["phi"],
+            loss_cfg={
+                "supervised": {
+                    "type": "mse",
+                    "region_balance": {"enabled": True},
+                    "region_weighting": {"enabled": True},
+                }
+            },
+        )

@@ -381,6 +381,16 @@ class InferenceEngine:
             out[:, i : i + 1] = scaler.transform(out[:, i : i + 1]).astype(np.float32)
         return out.astype(np.float32)
 
+    def _require_coord_feature_scaling_enabled(self) -> None:
+        raw = dict(self.coord_feature_scaler or {})
+        enabled = bool(raw.get("enabled", False))
+        mode = str(raw.get("mode", "none")).strip().lower()
+        if (not enabled) or mode == "none":
+            raise ValueError(
+                "coord_mlp requires preprocessing.coord_features.scaling.enabled=true "
+                "(mode must not be none) for inference"
+            )
+
     def _build_grid_feature_rows(self, geom: GeometryContext, channels: list[str]) -> np.ndarray:
         h, w = geom.mask_plasma.shape
         pack = dict(self.coord_feature_pack or {})
@@ -424,6 +434,8 @@ class InferenceEngine:
         return self._build_coord_feature_rows(geom, channels)
 
     def _predict_grid_spatial_fields(self, cond_vec: np.ndarray, geom: GeometryContext) -> dict[str, np.ndarray]:
+        if isinstance(self.model, CoordMLPTorch):
+            self._require_coord_feature_scaling_enabled()
         channels = self._resolve_coord_feature_channels(self.model)
         spatial_rows = self._build_grid_feature_rows(geom, channels)
         h, w = geom.mask_plasma.shape

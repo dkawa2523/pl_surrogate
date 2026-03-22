@@ -2,14 +2,27 @@
 model:
   name: coord_mlp_siren
 
+preprocessing:
+  coord_features:
+    scaling:
+      enabled: true
+      mode: zscore
+      fit_scope: train_split
+      mask_scope: plasma_plus_band
+      chamber_band_px: 2.0
+
 train:
   coord_mlp_siren:
     target_family: allvars
     target_vars: [<set-to-output_layout.vars>]
-    epochs: 120
+    epochs: 160
+    lr: 3.0e-4
     optimizer:
       type: adamw
       schedule: cosine
+      warmup_epochs: 20
+    selection:
+      mode: best_val_allvars_balance
     input_features:
       mode: geom_feature_pack
       require_pack: error
@@ -24,5 +37,15 @@ train:
         type: none
       siren:
         enabled: true
-        w0_initial: 30.0
+        fusion: split_add
+        w0_initial: 10.0
         w0_hidden: 1.0
+        fusion_cfg:
+          cond_gain_init: 0.7
+          point_gain_init: 1.3
+          branch_norm: true
+      decoder_input_norm:
+        enabled: true
+      residual_head:
+        enabled: true
+        init_scale: 0.0

@@ -37,7 +37,13 @@ def _siren_model_cfg() -> dict[str, object]:
         "latent_dim": 12,
         "decoder_hidden": [24, 24],
         "embedding": {"type": "none"},
-        "siren": {"enabled": True, "w0_initial": 30.0, "w0_hidden": 1.0},
+        "siren": {
+            "enabled": True,
+            "fusion": "split_add",
+            "w0_initial": 10.0,
+            "w0_hidden": 1.0,
+            "fusion_cfg": {"cond_gain_init": 0.7, "point_gain_init": 1.3, "branch_norm": True},
+        },
     }
 
 
@@ -215,7 +221,7 @@ def test_coord_mlp_siren_rejects_invalid_contract() -> None:
             model_cfg=bad_cfg,
         )
     bad_cfg = _siren_model_cfg()
-    bad_cfg["siren"] = {"enabled": False, "w0_initial": 30.0, "w0_hidden": 1.0}
+    bad_cfg["siren"] = {"enabled": False, "w0_initial": 10.0, "w0_hidden": 1.0}
     with pytest.raises(ValueError, match="siren.enabled must be true"):
         CoordMLPTorch(
             input_dim=3,
@@ -250,6 +256,50 @@ def test_coord_mlp_siren_rejects_invalid_contract() -> None:
     bad_cfg = _siren_model_cfg()
     bad_cfg["siren"]["w0_hidden"] = 0.0
     with pytest.raises(ValueError, match="w0_hidden must be > 0"):
+        CoordMLPTorch(
+            input_dim=3,
+            grid_shape=(8, 8),
+            out_channels=2,
+            output_keys=["density", "temperature"],
+            input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+            model_cfg=bad_cfg,
+        )
+    bad_cfg = _siren_model_cfg()
+    bad_cfg["siren"]["fusion"] = "concat"
+    with pytest.raises(ValueError, match="siren.fusion must be split_add"):
+        CoordMLPTorch(
+            input_dim=3,
+            grid_shape=(8, 8),
+            out_channels=2,
+            output_keys=["density", "temperature"],
+            input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+            model_cfg=bad_cfg,
+        )
+    bad_cfg = _siren_model_cfg()
+    bad_cfg["siren"]["fusion_cfg"]["cond_gain_init"] = 0.0
+    with pytest.raises(ValueError, match="fusion_cfg.cond_gain_init must be > 0"):
+        CoordMLPTorch(
+            input_dim=3,
+            grid_shape=(8, 8),
+            out_channels=2,
+            output_keys=["density", "temperature"],
+            input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+            model_cfg=bad_cfg,
+        )
+    bad_cfg = _siren_model_cfg()
+    bad_cfg["siren"]["fusion_cfg"]["point_gain_init"] = 0.0
+    with pytest.raises(ValueError, match="fusion_cfg.point_gain_init must be > 0"):
+        CoordMLPTorch(
+            input_dim=3,
+            grid_shape=(8, 8),
+            out_channels=2,
+            output_keys=["density", "temperature"],
+            input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+            model_cfg=bad_cfg,
+        )
+    bad_cfg = _siren_model_cfg()
+    bad_cfg["siren"]["fusion_cfg"]["branch_norm"] = "true"
+    with pytest.raises(ValueError, match="fusion_cfg.branch_norm must be a boolean"):
         CoordMLPTorch(
             input_dim=3,
             grid_shape=(8, 8),
@@ -307,11 +357,43 @@ def test_coord_mlp_siren_checkpoint_roundtrip(tmp_path: Path) -> None:
     assert isinstance(loaded, CoordMLPTorch)
     assert loaded.model_type == "coord_mlp_siren"
     assert loaded.model_cfg["embedding"] == {"type": "none"}
+    assert loaded.model_cfg["siren"]["fusion"] == "split_add"
+    assert loaded.model_cfg["siren"]["fusion_cfg"]["branch_norm"] is True
+    assert loaded.model_cfg["siren"]["fusion_cfg"]["cond_gain_init"] == pytest.approx(0.7)
+    assert loaded.model_cfg["siren"]["fusion_cfg"]["point_gain_init"] == pytest.approx(1.3)
     assert "decoder_activation" not in loaded.model_cfg
     np.testing.assert_allclose(pred_before, pred_after, atol=1e-6, rtol=1e-6)
 
 
-def test_coord_mlp_siren_uses_standard_cond_encoder_and_sine_point_decoder() -> None:
+def test_coord_mlp_rejects_legacy_checkpoint_meta(tmp_path: Path) -> None:
+    _enable_torch()
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+    model = CoordMLPTorch(
+        input_dim=3,
+        grid_shape=(8, 8),
+        out_channels=2,
+        output_keys=["density", "temperature"],
+        input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+        model_cfg=_model_cfg(),
+    )
+    save_mlp_checkpoint(model, tmp_path / "ckpt_legacy")
+    meta_path = tmp_path / "ckpt_legacy" / "meta.json"
+    import json
+
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta.pop("coord_mlp_impl_version", None)
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    with pytest.raises(ValueError, match="coord_mlp_impl_version=v4_siren_branch_balanced"):
+        _ = load_mlp_checkpoint(tmp_path / "ckpt_legacy")
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["coord_mlp_impl_version"] = "v3_siren_split_add"
+    meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    with pytest.raises(ValueError, match="coord_mlp_impl_version=v4_siren_branch_balanced"):
+        _ = load_mlp_checkpoint(tmp_path / "ckpt_legacy")
+
+
+def test_coord_mlp_siren_uses_split_add_point_decoder() -> None:
     _enable_torch()
     if not torch_runtime_available(refresh=True):
         pytest.skip("torch backend disabled for this environment")
@@ -324,9 +406,44 @@ def test_coord_mlp_siren_uses_standard_cond_encoder_and_sine_point_decoder() -> 
         model_cfg=_siren_model_cfg(),
     )
     cond_has_sine = any(type(module).__name__ == "_SineActivation" for module in model.net.cond_encoder)
-    point_has_sine = any(type(module).__name__ == "_SineActivation" for module in model.net.point_decoder)
     assert cond_has_sine is False
-    assert point_has_sine is True
+    assert type(model.net.point_decoder).__name__ == "_SirenSplitAddPointDecoder"
+
+
+def test_coord_mlp_v4_has_decoder_input_norm_and_residual_head() -> None:
+    _enable_torch()
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+    model = CoordMLPTorch(
+        input_dim=3,
+        grid_shape=(8, 8),
+        out_channels=2,
+        output_keys=["density", "temperature"],
+        input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+        model_cfg=_model_cfg(),
+    )
+    assert hasattr(model.net, "decoder_input_norm")
+    assert model.net.decoder_input_norm is not None
+    assert hasattr(model.net, "residual_head")
+    assert model.net.residual_head is not None
+    assert hasattr(model.net, "residual_scale")
+    assert model.coord_mlp_impl_version == "v4_siren_branch_balanced"
+
+
+def test_coord_mlp_device_selection_matches_torch_runtime() -> None:
+    _enable_torch()
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+    model = CoordMLPTorch(
+        input_dim=3,
+        grid_shape=(8, 8),
+        out_channels=2,
+        output_keys=["density", "temperature"],
+        input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+        model_cfg=_model_cfg(),
+    )
+    expected = "cuda" if bool(model.torch.cuda.is_available()) else "cpu"
+    assert str(model.device.type) == expected
 
 
 def test_coord_mlp_changes_do_not_break_global_mlp_factory() -> None:

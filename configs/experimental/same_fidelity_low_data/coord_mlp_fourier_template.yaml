@@ -2,6 +2,15 @@
 model:
   name: coord_mlp_fourier
 
+preprocessing:
+  coord_features:
+    scaling:
+      enabled: true
+      mode: zscore
+      fit_scope: train_split
+      mask_scope: plasma_plus_band
+      chamber_band_px: 2.0
+
 train:
   coord_mlp_fourier:
     target_family: allvars
@@ -10,6 +19,9 @@ train:
     optimizer:
       type: adamw
       schedule: cosine
+      warmup_epochs: 10
+    selection:
+      mode: best_val_allvars_balance
     input_features:
       mode: geom_feature_pack
       require_pack: error
@@ -26,3 +38,8 @@ train:
         n_frequencies: 8
         include_raw: true
         frequency_scale: 10.0
+      decoder_input_norm:
+        enabled: true
+      residual_head:
+        enabled: true
+        init_scale: 0.0

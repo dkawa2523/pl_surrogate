@@ -308,7 +308,7 @@ def test_benchmark_runner_m7_unetpp_attn_isolated_smoke(tmp_path: Path):
                 "cond_hidden": [16, 16],
                 "latent_dim": 12,
                 "decoder_hidden": [24, 24],
-                "siren": {"enabled": True, "w0_initial": 30.0, "w0_hidden": 1.0},
+                "siren": {"enabled": True, "fusion": "split_add", "w0_initial": 10.0, "w0_hidden": 1.0},
             },
         ),
     ],
@@ -334,6 +334,12 @@ def test_benchmark_runner_coord_mlp_experimental_smoke(
                 "coord_features": {
                     "enabled": True,
                     "channels": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+                    "scaling": {
+                        "enabled": True,
+                        "mode": "zscore",
+                        "fit_scope": "train_split",
+                        "mask_scope": "plasma_plus_band",
+                    },
                 },
                 "scalers": {
                     "target_transforms": {

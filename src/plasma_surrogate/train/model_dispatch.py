@@ -284,6 +284,7 @@ def _validate_pod_deeponet_experimental_contract(
     target_family: str,
     target_vars: list[str],
     model_cfg: dict[str, Any],
+    selection_cfg: dict[str, Any],
 ) -> dict[str, Any]:
     cfg_prefix = "train.deeponet_pod"
     family = str(target_family).strip().lower()
@@ -304,12 +305,28 @@ def _validate_pod_deeponet_experimental_contract(
     if not per_var:
         raise ValueError(f"{cfg_prefix}.model_cfg.basis.per_var must be true")
     center = bool(basis_cfg.get("center", True))
+    selection_mode = str(dict(selection_cfg or {}).get("mode", "best_val_allvars_balance")).strip().lower()
+    if selection_mode != "best_val_allvars_balance":
+        raise ValueError(f"{cfg_prefix}.selection.mode must be best_val_allvars_balance")
     return {
         "rank": int(rank),
         "fit_scope": fit_scope,
         "per_var": per_var,
         "center": center,
     }
+
+
+def resolve_deeponet_pod_training_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    out = dict(cfg or {})
+    optimizer_cfg = dict(out.get("optimizer", {}))
+    optimizer_cfg.setdefault("type", "adamw")
+    optimizer_cfg.setdefault("schedule", "cosine")
+    optimizer_cfg.setdefault("warmup_epochs", 10)
+    out["optimizer"] = optimizer_cfg
+    selection_cfg = dict(out.get("selection", {}))
+    selection_cfg.setdefault("mode", "best_val_allvars_balance")
+    out["selection"] = selection_cfg
+    return out
 
 
 def _grid_contract_warning_key(model_name: str) -> str:
@@ -319,6 +336,29 @@ def _grid_contract_warning_key(model_name: str) -> str:
     if model_key in SPECTRAL_FAMILY_MODELS:
         return "grid_contract_warnings"
     return "unet_contract_warnings"
+
+
+def _resolve_coord_mlp_siren_training_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
+    out = dict(cfg or {})
+    out.setdefault("epochs", 160)
+    out.setdefault("lr", 3e-4)
+    optimizer_cfg = dict(out.get("optimizer", {}))
+    optimizer_cfg.setdefault("schedule", "cosine")
+    optimizer_cfg.setdefault("warmup_epochs", 20)
+    out["optimizer"] = optimizer_cfg
+    selection_cfg = dict(out.get("selection", {}))
+    selection_cfg.setdefault("mode", "best_val_allvars_balance")
+    out["selection"] = selection_cfg
+    return out
+
+
+def _resolve_family_train_cfg(train_cfg: dict[str, Any], *, model_name: str) -> dict[str, Any]:
+    cfg = dict(train_cfg.get(model_name, {}))
+    if model_name in POD_DEEPONET_FAMILY_MODELS:
+        cfg = resolve_deeponet_pod_training_defaults(cfg)
+    if model_name == "coord_mlp_siren":
+        cfg = _resolve_coord_mlp_siren_training_defaults(cfg)
+    return cfg
 
 
 def _validate_deeponet_mainline_contract(
@@ -939,7 +979,7 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         pred_eval = ctx.transforms.inverse_field_dict(model.predict_fields(ctx.cond_scaled[ctx.te]))
         true_eval = _to_true_eval(ctx.y, ctx.te, ctx.y_vars)
     elif model_name in POD_DEEPONET_FAMILY_MODELS:
-        cfg = dict(train_cfg.get(model_name, {}))
+        cfg = _resolve_family_train_cfg(train_cfg, model_name=model_name)
         train_key = "train.deeponet_pod"
         pod_target_family = _resolve_unet_target_family(
             cfg.get("target_family", "allvars"),
@@ -956,6 +996,7 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             target_family=pod_target_family,
             target_vars=pod_target_vars,
             model_cfg=dict(cfg.get("model_cfg", {})),
+            selection_cfg=dict(cfg.get("selection", {})),
         )
         pod_target_indices = [ctx.y_vars.index(v) for v in pod_target_vars]
         pod_y_train = np.asarray(ctx.y_scaled[ctx.tr][:, pod_target_indices], dtype=np.float32)
@@ -982,6 +1023,11 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             pod_basis_bundle=pod_basis_bundle,
         )
         pod_selection_cfg = dict(cfg.get("selection", {}))
+        pod_selection_cfg["weights"] = _resolve_mainline_selection_weights(
+            selection_cfg=pod_selection_cfg,
+            target_vars=pod_target_vars,
+            cfg_prefix=train_key,
+        )
         pod_optimizer_cfg = dict(cfg.get("optimizer", {}))
         grid_like_cfg = dict(train_cfg.get("unet_like", {}))
         batch_size_cases = int(grid_like_cfg.get("batch_size_cases", 0))
@@ -1014,11 +1060,21 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             "target_family_effective": str(pod_target_family),
             "target_vars_effective": list(pod_target_vars),
             "basis_rank_by_var": {str(k): int(v) for k, v in pod_basis_bundle.rank_by_var.items()},
+            "coeff_std_by_var": {
+                str(k): np.asarray(v, dtype=np.float32).reshape(-1).tolist()
+                for k, v in pod_basis_bundle.coeff_std_by_var.items()
+            },
             "basis_fit_scope_effective": str(basis_cfg_effective["fit_scope"]),
             "basis_center_effective": bool(basis_cfg_effective["center"]),
             "basis_per_var_effective": bool(basis_cfg_effective["per_var"]),
             "selection_mode_effective": str(pod_selection_cfg.get("mode", "last")).strip().lower(),
             "selection_weights_effective": dict(pod_selection_cfg.get("weights", {})),
+            "optimizer_effective": {
+                "type": str(pod_optimizer_cfg.get("type", "adamw")).strip().lower(),
+                "lr": float(pod_optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3)))),
+                "schedule": str(pod_optimizer_cfg.get("schedule", "none")).strip().lower(),
+                "warmup_epochs": int(max(int(pod_optimizer_cfg.get("warmup_epochs", 0)), 0)),
+            },
             "model_cfg_effective": dict(pod_model_cfg),
         }
         pred_features = model.forward_features(ctx.cond_scaled[ctx.te])
@@ -1028,7 +1084,7 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         true_eval = _to_true_eval(ctx.y, ctx.te, pod_target_vars, source_y_vars=ctx.y_vars)
         eval_vars = list(pod_target_vars)
     elif model_name in GRID_TORCH_MODELS:
-        cfg = dict(train_cfg.get(model_name, {}))
+        cfg = _resolve_family_train_cfg(train_cfg, model_name=model_name)
         grid_like_cfg = dict(train_cfg.get("unet_like", {}))
         grid_loss_cfg = copy.deepcopy(ctx.loss_cfg or {})
         grid_batch_size_cases = int(grid_like_cfg.get("batch_size_cases", 0))
@@ -1191,11 +1247,15 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
                     channels=grid_feature_channels,
                     cfg=distance_transform_cfg_effective,
                 )
-                rows, _, _ = _apply_coord_feature_scaling(
+                rows, _, scaling_applied = _apply_coord_feature_scaling(
                     rows.astype(np.float32),
                     channels=grid_feature_channels,
                     coord_feature_scaler_artifact=ctx.coord_feature_scaler,
                 )
+                if model_name in COORD_MLP_FAMILY_MODELS and not bool(scaling_applied):
+                    raise ValueError(
+                        f"train.{model_name} requires preprocessing.coord_features.scaling.enabled=true"
+                    )
             else:
                 yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
                 xx = np.linspace(0.0, 1.0, w, dtype=np.float32)

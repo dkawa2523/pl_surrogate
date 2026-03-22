@@ -31,6 +31,19 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
     cfg = dict(loss_cfg or {})
     sup = dict(cfg.get("supervised", {}))
     mt = dict(cfg.get("multitask", {}))
+    region_weighting_cfg = dict(sup.get("region_weighting", {}))
+    region_balance_cfg = dict(sup.get("region_balance", {}))
+    if region_weighting_cfg and region_balance_cfg:
+        raise ValueError(
+            "supervised.region_balance and supervised.region_weighting cannot be specified together; "
+            "use supervised.region_balance (region_weighting is deprecated alias)"
+        )
+    if region_weighting_cfg:
+        warnings.warn(
+            "supervised.region_weighting is deprecated; use supervised.region_balance",
+            DeprecationWarning,
+            stacklevel=2,
+        )
     if "coord_objective" in sup:
         raise ValueError("supervised.coord_objective is removed")
     if "sample_mean_group_scale" in sup:
@@ -46,7 +59,7 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         "fixed_weights_by_var": dict(mt.get("fixed_weights_by_var", {})),
         "sigma_init": dict(mt.get("sigma_init", {})),
         "sigma_clamp": tuple(mt.get("sigma_clamp", [-3.0, 3.0])),
-        "region_weighting": dict(sup.get("region_weighting", {})),
+        "region_weighting": region_weighting_cfg,
         "robust_weighting": dict(sup.get("robust_weighting", {})),
         "nan_region_policy": str(sup.get("nan_region_policy", "mask_only")).strip().lower(),
         "sdf_weighting": dict(sup.get("sdf_weighting", {})),
@@ -56,7 +69,7 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         "robust_clip_stats": dict(sup.get("robust_clip_stats", {})),
         "sdf_distance_contract": str(sup.get("sdf_distance_contract", "off")).strip().lower(),
         "chamber_aux": dict(sup.get("chamber_aux", {})),
-        "region_balance": dict(sup.get("region_balance", {})),
+        "region_balance": region_balance_cfg,
         "boundary_type_weighting": dict(sup.get("boundary_type_weighting", {})),
         "boundary_profile_weighting": dict(sup.get("boundary_profile_weighting", {})),
         "density_positivity_penalty": dict(sup.get("density_positivity_penalty", {})),
@@ -1030,6 +1043,50 @@ def _weighted_reduce_torch(base_map, sw, *, normalization: str, weight_denominat
     return (base_map * sw).sum() / denom
 
 
+def _weighted_mean_count_torch(base_map, sw, region_mask):
+    torch = require_torch()
+    reg = torch.as_tensor(region_mask, dtype=sw.dtype, device=sw.device)
+    numer = (base_map * sw * reg).sum()
+    denom = torch.clamp((reg > 0.0).to(dtype=sw.dtype).sum(), min=1.0)
+    return numer / denom
+
+
+def _resolve_torch_region_contract(
+    *,
+    cfg: dict[str, Any],
+    y_order: list[str],
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
+    """Resolve canonical region contract for torch supervised loss.
+
+    Returns (region_balance_cfg, legacy_region_weighting_cfg, alias_used).
+    """
+
+    region_balance_cfg = dict(cfg.get("region_balance", {}))
+    legacy_region_cfg = dict(cfg.get("region_weighting", {}))
+    if region_balance_cfg and legacy_region_cfg:
+        raise ValueError(
+            "supervised.region_balance and supervised.region_weighting cannot be specified together; "
+            "use supervised.region_balance (region_weighting is deprecated alias)"
+        )
+    alias_used = False
+    if (not region_balance_cfg) and legacy_region_cfg:
+        alias_used = True
+        warnings.warn(
+            "supervised.region_weighting is deprecated for torch path; "
+            "use supervised.region_balance instead",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        # Keep legacy semantics when only alias is provided.
+        return {}, legacy_region_cfg, alias_used
+    if not region_balance_cfg:
+        return {}, {}, alias_used
+    region_balance_cfg = dict(region_balance_cfg)
+    if "vars" not in region_balance_cfg:
+        region_balance_cfg["vars"] = list(y_order)
+    return region_balance_cfg, {}, alias_used
+
+
 def compose_supervised_torch(
     pred_fields: dict[str, Any],
     target_fields: Any,
@@ -1072,6 +1129,28 @@ def compose_supervised_torch(
     robust_vars = {str(v) for v in robust_cfg.get("vars", ["phi", "Te"])}
     robust_mad_scale = float(robust_cfg.get("mad_scale", 3.0))
     robust_min_weight = float(robust_cfg.get("min_weight", 0.2))
+    region_balance_cfg, legacy_region_cfg, _ = _resolve_torch_region_contract(cfg=cfg, y_order=y_order)
+    region_balance_enabled = bool(region_balance_cfg.get("enabled", False))
+    region_balance_mode = str(region_balance_cfg.get("mode", "replace")).strip().lower()
+    if region_balance_mode not in {"replace", "additive"}:
+        raise ValueError("supervised.region_balance.mode must be one of: replace, additive")
+    region_balance_lambda = float(region_balance_cfg.get("additive_lambda", 0.25))
+    if region_balance_lambda < 0.0:
+        raise ValueError("supervised.region_balance.additive_lambda must be >= 0")
+    region_balance_boundary_px = float(region_balance_cfg.get("boundary_in_px", 2.0))
+    region_balance_mid_px = float(region_balance_cfg.get("mid_plasma_px", region_balance_cfg.get("deep_plasma_px", 10.0)))
+    region_balance_deep_px = float(region_balance_cfg.get("deep_plasma_px", 10.0))
+    region_balance_vars = {str(v) for v in region_balance_cfg.get("vars", list(y_order))}
+    region_balance_w_boundary = float(region_balance_cfg.get("weight_boundary_in", 0.6))
+    region_balance_w_mid = float(region_balance_cfg.get("weight_plasma_mid", 0.0))
+    region_balance_w_deep = float(region_balance_cfg.get("weight_deep_plasma", 0.4))
+    region_balance_reduce = str(region_balance_cfg.get("reduce", "mean_count")).strip().lower()
+    if region_balance_reduce not in {"mean_count"}:
+        raise ValueError("supervised.region_balance.reduce must be: mean_count")
+    legacy_region_enabled = bool(legacy_region_cfg.get("enabled", False))
+    boundary_delta = float(legacy_region_cfg.get("boundary_delta", 2.0))
+    w_bulk = float(legacy_region_cfg.get("w_bulk", 1.0))
+    w_boundary = float(legacy_region_cfg.get("w_boundary", 3.0))
     normalization = str(cfg.get("normalization", "pixel_mean")).strip().lower()
     sample_mean_weight_denominator = str(cfg.get("sample_mean_weight_denominator", "weighted")).strip().lower()
     delta_by_var = dict(cfg.get("delta_by_var", {}))
@@ -1150,6 +1229,24 @@ def compose_supervised_torch(
             )
     total = torch.zeros((), dtype=torch.float32, device=tgt.device)
     per_var: dict[str, float] = {}
+    region_masks_torch: dict[str, Any] | None = None
+    if region_balance_enabled:
+        if m is None or d_any is None:
+            raise ValueError("supervised.region_balance.enabled requires supervised.mask=plasma_only and distance_any")
+        d_signed_eff = torch.where(m > 0.5, d_any, -d_any).to(dtype=torch.float32)
+        region_masks_np = build_region_masks(
+            mask_plasma=np.asarray(m[:, 0].detach().cpu().numpy(), dtype=np.float32),
+            distance_any=np.asarray(d_any[:, 0].detach().cpu().numpy(), dtype=np.float32),
+            distance_signed=np.asarray(d_signed_eff[:, 0].detach().cpu().numpy(), dtype=np.float32),
+            boundary_in_px=region_balance_boundary_px,
+            mid_plasma_px=region_balance_mid_px,
+            deep_plasma_px=region_balance_deep_px,
+        )
+        region_masks_torch = {
+            str(k): torch.as_tensor(v.astype(np.float32), dtype=torch.float32, device=tgt.device)[:, None, ...]
+            for k, v in region_masks_np.items()
+        }
+
     for i, name in enumerate(y_order):
         pred = _as_bchw(pred_fields[name], key=f"pred_{name}")
         err = pred - tgt[:, i : i + 1]
@@ -1182,14 +1279,14 @@ def compose_supervised_torch(
                             raise ValueError(msg)
                         warnings.warn(msg, RuntimeWarning, stacklevel=2)
                 sw = sdf_continuous_weight_map_torch(m, d_signed, sdf_cfg).to(dtype=base_map.dtype)
-                if use_region:
+                if legacy_region_enabled:
                     boundary = (d_any <= boundary_delta).to(dtype=base_map.dtype) * m
                     bulk = (m - boundary).clamp(min=0.0)
                     region_mult = boundary * max(w_boundary / max(w_bulk, 1e-8), 1.0) + bulk
                     outside = (1.0 - m).clamp(min=0.0)
                     sw = sw * (region_mult + outside)
             else:
-                if use_region:
+                if legacy_region_enabled:
                     if d_any is None:
                         raise ValueError("region_weighting.enabled requires distance_any")
                     boundary = (d_any <= boundary_delta).to(dtype=base_map.dtype) * m
@@ -1228,6 +1325,25 @@ def compose_supervised_torch(
                 normalization=normalization,
                 weight_denominator=sample_mean_weight_denominator,
             )
+
+        if region_balance_enabled and name in region_balance_vars:
+            if region_masks_torch is None:
+                raise ValueError("supervised.region_balance.enabled requires region masks")
+            boundary_region = region_masks_torch["boundary_in"].to(dtype=base_map.dtype)
+            mid_region = region_masks_torch["plasma_mid"].to(dtype=base_map.dtype)
+            deep_region = region_masks_torch["plasma_deep"].to(dtype=base_map.dtype)
+            l_boundary = _weighted_mean_count_torch(base_map, sw, boundary_region)
+            l_mid = _weighted_mean_count_torch(base_map, sw, mid_region)
+            l_deep = _weighted_mean_count_torch(base_map, sw, deep_region)
+            region_loss = (
+                float(region_balance_w_boundary) * l_boundary
+                + float(region_balance_w_mid) * l_mid
+                + float(region_balance_w_deep) * l_deep
+            )
+            if region_balance_mode == "replace":
+                base = region_loss
+            else:
+                base = base + float(region_balance_lambda) * region_loss
 
         if density_pos_enabled and name in density_pos_vars and density_pos_lambda > 0.0:
             mean_aff, std_aff = density_pos_affine_by_var.get(name, (0.0, 1.0))

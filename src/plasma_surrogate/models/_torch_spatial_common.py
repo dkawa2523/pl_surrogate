@@ -120,7 +120,12 @@ def _backward_raw_torch_step(
 ) -> dict[str, float]:
     if last_out is None:
         raise RuntimeError("torch backward called without forward cache")
-    grad_t = torch.as_tensor(np.asarray(grad_raw, dtype=np.float32))
+    grad_np = np.asarray(grad_raw, dtype=np.float32)
+    grad_t = torch.as_tensor(
+        grad_np,
+        dtype=getattr(last_out, "dtype", None) or torch.float32,
+        device=getattr(last_out, "device", None),
+    )
     params = [p for p in net.parameters() if p.requires_grad]
     if not params:
         return {"step_rel_hidden_mean": 0.0, "step_rel_output": 0.0}

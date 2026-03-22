@@ -55,6 +55,12 @@ benchmark:
       enabled: true
       output: features/coord_feature_pack.npz
       channels: [x, y, mask_plasma, distance_signed, distance_any]
+      scaling:
+        enabled: true
+        mode: zscore
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
       distance_transform_stats:
         enabled: true
         fit_scope: train_split
@@ -67,8 +73,14 @@ benchmark:
       batch_size_cases: 6
       shuffle_cases: true
     coord_mlp_siren:
-      epochs: 80
-      lr: 0.0008
+      epochs: 160
+      lr: 0.0003
+      optimizer:
+        type: adamw
+        schedule: cosine
+        warmup_epochs: 20
+      selection:
+        mode: best_val_allvars_balance
       target_family: allvars
       target_vars: [ne, ni, Te, phi]
       input_features:
@@ -85,8 +97,18 @@ benchmark:
           type: none
         siren:
           enabled: true
-          w0_initial: 30.0
+          fusion: split_add
+          w0_initial: 10.0
           w0_hidden: 1.0
+          fusion_cfg:
+            cond_gain_init: 0.7
+            point_gain_init: 1.3
+            branch_norm: true
+        decoder_input_norm:
+          enabled: true
+        residual_head:
+          enabled: true
+          init_scale: 0.0
   physics:
     enabled: false
   inference:

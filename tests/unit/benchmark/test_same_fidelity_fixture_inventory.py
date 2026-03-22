@@ -12,6 +12,12 @@ def _load_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
 
 
+def _target_ids(bench_cfg: dict) -> list[str]:
+    dataset_cfg = dict(bench_cfg.get("dataset", {}))
+    targets = list(dataset_cfg.get("targets", []))
+    return [str(dict(t).get("id", "")).strip() for t in targets if str(dict(t).get("id", "")).strip()]
+
+
 def test_same_fidelity_benchmark_fixture_inventory_is_consistent() -> None:
     expected = {
         "benchmark_periodic_real_m7_unetpp_isolated_mainline.yaml": ("m7_unetpp_isolated", "unetpp"),
@@ -28,6 +34,25 @@ def test_same_fidelity_benchmark_fixture_inventory_is_consistent() -> None:
         assert bench["profile"] == profile
         train_cfg = dict(bench.get("train", {}))
         assert model_name in train_cfg
+        target_ids = _target_ids(bench)
+        assert target_ids, f"{filename}: benchmark.dataset.targets[].id must be defined"
+        scalers_cfg = dict(dict(bench.get("preprocessing", {})).get("scalers", {}))
+        target_transforms = dict(scalers_cfg.get("target_transforms", {}))
+        assert target_transforms, f"{filename}: preprocessing.scalers.target_transforms must be defined"
+        assert set(target_transforms.keys()) == set(target_ids), (
+            f"{filename}: target_transforms keys must match dataset.targets[].id "
+            f"(got={sorted(target_transforms.keys())}, expected={sorted(target_ids)})"
+        )
+
+
+def test_deeponet_pod_fixture_has_required_runtime_blocks() -> None:
+    payload = _load_yaml(ROOT / "tests" / "fixtures" / "benchmark_periodic_real_m7_deeponet_pod_experimental.yaml")
+    bench = dict(payload.get("benchmark", {}))
+    assert isinstance(bench.get("dataset"), dict)
+    assert isinstance(bench.get("split"), dict)
+    assert isinstance(bench.get("preprocessing"), dict)
+    assert isinstance(bench.get("train"), dict)
+    assert "deeponet_pod" in dict(bench.get("train", {}))
 
 
 def test_same_fidelity_config_template_inventory_is_consistent() -> None:

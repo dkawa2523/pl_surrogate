@@ -72,6 +72,17 @@ def _ctx(tmp_path: Path, y_vars: list[str] | None = None) -> TrainDispatchContex
         deeponet_boundary_index={},
         deeponet_boundary_meta={},
         coord_feature_pack={"data": coord_data, "channels": np.asarray(channels)},
+        coord_feature_scaler={
+            "enabled": True,
+            "mode": "zscore",
+            "channels": {
+                "x": {"type": "none"},
+                "y": {"type": "none"},
+                "mask_plasma": {"type": "none"},
+                "distance_signed": {"type": "none"},
+                "distance_any": {"type": "none"},
+            },
+        },
         coord_distance_transform_stats={},
         config_base_dir=tmp_path,
     )
@@ -111,7 +122,13 @@ def _valid_siren_cfg(target_vars: list[str]) -> dict[str, Any]:
         "latent_dim": 12,
         "decoder_hidden": [24, 24],
         "embedding": {"type": "none"},
-        "siren": {"enabled": True, "w0_initial": 30.0, "w0_hidden": 1.0},
+        "siren": {
+            "enabled": True,
+            "fusion": "split_add",
+            "w0_initial": 10.0,
+            "w0_hidden": 1.0,
+            "fusion_cfg": {"cond_gain_init": 0.7, "point_gain_init": 1.3, "branch_norm": True},
+        },
     }
     return cfg
 
@@ -148,6 +165,8 @@ def test_coord_mlp_accepts_valid_dynamic_allvars(
     contract = out.extra_artifacts.get("coord_mlp_contract_effective", {})
     assert contract.get("target_family_effective") == "allvars"
     assert contract.get("model_type_effective") == model_name
+    expected_mode = "best_val_allvars_balance" if model_name == "coord_mlp_siren" else "last"
+    assert contract.get("selection_mode_effective") == expected_mode
 
 
 def test_coord_mlp_rejects_non_geom_feature_pack(tmp_path: Path) -> None:
@@ -204,4 +223,46 @@ def test_coord_mlp_siren_rejects_decoder_activation_noop(tmp_path: Path) -> None
     cfg["model_cfg"]["decoder_activation"] = "gelu"
     ctx.run_cfg = {"train": {"coord_mlp_siren": cfg}}
     with pytest.raises(ValueError, match="decoder_activation is not used for SIREN"):
+        run_model_train_predict(ctx)
+
+
+def test_coord_mlp_siren_injects_training_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _enable_torch()
+    if not torch_runtime_available(refresh=True):
+        pytest.skip("torch backend disabled for this environment")
+    ctx = _ctx(tmp_path)
+    ctx.model_name = "coord_mlp_siren"
+    cfg = _valid_siren_cfg(ctx.y_vars)
+    cfg.pop("epochs", None)
+    cfg.pop("lr", None)
+    cfg.pop("selection", None)
+    cfg.pop("optimizer", None)
+    ctx.run_cfg = {"train": {"coord_mlp_siren": cfg}}
+    captured: dict[str, Any] = {}
+
+    def _fake_run_unet(self, model, cond_train, y_train, cond_val, y_val, **kwargs):
+        captured["epochs"] = kwargs.get("epochs")
+        captured["lr"] = kwargs.get("lr")
+        captured["unet_optimizer_cfg"] = dict(kwargs.get("unet_optimizer_cfg", {}))
+        captured["selection_cfg"] = dict(kwargs.get("selection_cfg", {}))
+        return TrainOutput(
+            history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}],
+            model=model,
+        )
+
+    monkeypatch.setattr(Trainer, "run_unet", _fake_run_unet)
+    _ = run_model_train_predict(ctx)
+    assert captured["epochs"] == 160
+    assert captured["lr"] == pytest.approx(3e-4)
+    assert captured["unet_optimizer_cfg"].get("schedule") == "cosine"
+    assert captured["unet_optimizer_cfg"].get("warmup_epochs") == 20
+    assert captured["selection_cfg"].get("mode") == "best_val_allvars_balance"
+
+
+def test_coord_mlp_rejects_disabled_coord_feature_scaling(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    ctx.coord_feature_scaler = {"enabled": False, "mode": "none", "channels": {}}
+    cfg = _valid_cfg(ctx.y_vars)
+    ctx.run_cfg = {"train": {"coord_mlp_fourier": cfg}}
+    with pytest.raises(ValueError, match="requires preprocessing.coord_features.scaling.enabled=true"):
         run_model_train_predict(ctx)

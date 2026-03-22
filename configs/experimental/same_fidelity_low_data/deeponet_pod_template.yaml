@@ -7,12 +7,15 @@ train:
     target_family: allvars
     target_vars: [<set-to-output_layout.vars>]
     epochs: 120
+    lr: 0.0003
     optimizer:
       type: adamw
       schedule: cosine
+      warmup_epochs: 10
     model_cfg:
       hidden_dim: 128
       latent_dim: 128
+      coeff_loss_weight: 0.1
       basis:
         rank: 32
         fit_scope: train_only

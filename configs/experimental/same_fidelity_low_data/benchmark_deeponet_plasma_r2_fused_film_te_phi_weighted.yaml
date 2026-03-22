@@ -1,19 +1,31 @@
 benchmark:
-  output_dir: runs/periodic_real_tuned_v83/benchmark_m7_coord_mlp_fourier_experimental
-  profile: m7_coord_mlp_fourier_experimental
-  seed: 411
+  output_dir: runs/periodic_real_tuned_v84/benchmark_m7_deeponet_r2_fused_film_te_phi_weighted
+  profile: m7_deeponet_isolated
+  seed: 511
   phi_mode: direct
   eval:
     mask_metrics: plasma_only
     interp_mode: overlap
-    protocol_variant: coord_mlp_fourier_experimental
+    protocol_variant: deeponet_isolated_r2_fused_film_te_phi_weighted
     target_family_for_score: allvars
     target_vars_for_score: [ne, ni, Te, phi]
     primary_metric: test_r2_plasma_mean_dual
     primary_mode: max
+    aggregate_score:
+      enabled: true
+      rmse_weight: 0.5
+      r2_weight: 0.4
+      boundary_penalty_weight: 0.1
+      use_plasma_metrics: true
+    region_bands:
+      mode: fixed_px
+      boundary_in_px: 2.0
+      deep_plasma_px: 10.0
+      boundary_q: 0.15
+      deep_q: 0.70
   eval_protocol:
     mode: dual_axis
-    scope: common
+    scope: deeponet_isolated
     primary_split: interp
     interp_weight: 0.5
     extrap_weight: 0.5
@@ -55,12 +67,6 @@ benchmark:
       enabled: true
       output: features/coord_feature_pack.npz
       channels: [x, y, mask_plasma, distance_signed, distance_any]
-      scaling:
-        enabled: true
-        mode: zscore
-        fit_scope: train_split
-        mask_scope: plasma_plus_band
-        chamber_band_px: 2.0
       distance_transform_stats:
         enabled: true
         fit_scope: train_split
@@ -69,18 +75,13 @@ benchmark:
         signed_quantile: 0.45
         proximity_quantile: 0.25
   train:
-    unet_like:
-      batch_size_cases: 6
+    deeponet_plasma:
+      strict_mainline: true
+      epochs: 200
+      lr: 0.0005
+      batch_size_cases: 64
       shuffle_cases: true
-    coord_mlp_fourier:
-      epochs: 80
-      lr: 0.0008
-      optimizer:
-        type: adamw
-        schedule: cosine
-        warmup_epochs: 10
-      selection:
-        mode: best_val_allvars_balance
+      operator_mode: plain
       target_family: allvars
       target_vars: [ne, ni, Te, phi]
       input_features:
@@ -89,21 +90,61 @@ benchmark:
         features: [x, y, mask_plasma, distance_signed, distance_any]
         distance_transform:
           mode: bounded_auto
+          replace_distance_any: true
+      optimizer:
+        type: adamw
+        lr: 0.0005
+        weight_decay: 0.0001
+        betas: [0.9, 0.999]
+        eps: 1.0e-8
+        schedule: cosine
+        warmup_epochs: 12
+      selection:
+        mode: best_val_allvars_balance
+        eval_every_n_epochs: 2
+        warmup_epochs: 12
+        weights:
+          ne: 0.20
+          ni: 0.20
+          Te: 0.30
+          phi: 0.30
       model_cfg:
-        cond_hidden: [128, 128]
-        latent_dim: 128
-        decoder_hidden: [256, 256, 256]
-        decoder_activation: gelu
-        embedding:
-          type: fourier
-          n_frequencies: 8
-          include_raw: true
-          frequency_scale: 10.0
-        decoder_input_norm:
-          enabled: true
+        latent_dim: 64
+        hidden_dim: 128
+        trunk_input_mode: geom_feature_pack
+        branch_mode: cond_only
+        trunk_fourier_n_freq: 4
+        trunk_fourier_mode: symmetric
+        trunk_cond_modulation: film
+        trunk_cond_mod_hidden: 96
+        latent_layer_norm: false
+        output_path:
+          mode: fused
+          dot_skip: 0.20
+          fused_hidden_dim: 96
+          global_hidden_dim: 64
+          global_local:
+            enabled: false
         residual_head:
-          enabled: true
-          init_scale: 0.0
+          enabled: false
+    loss:
+      supervised:
+        type: huber
+        delta: 1.0
+        normalization: sample_mean
+        sample_mean_group_mode: batch
+        sample_mean_weight_denominator: count
+        mask: plasma_only
+        nan_region_policy: sdf_continuous
+      multitask:
+        weighting: fixed
+        fixed_weights_by_var:
+          ne: 1.0
+          ni: 1.0
+          Te: 1.35
+          phi: 1.35
+  boundary_operator:
+    primary_qoi_key: Gamma_i
   physics:
     enabled: false
   inference:

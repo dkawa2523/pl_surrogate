@@ -211,7 +211,10 @@ class PreprocessRunner:
         if len(target_transforms_cfg) == 0:
             raise ValueError(
                 "preprocessing.scalers.target_transforms is required. "
-                "Define per-var config: value_transform/scaler/fit_scope/clip for each target var."
+                "Define per-var config: value_transform/scaler/fit_scope/clip for each target var. "
+                "For deeponet_pod benchmark runs, define "
+                "tests/fixtures/benchmark_periodic_real_m7_deeponet_pod_experimental.yaml "
+                "preprocessing.scalers.target_transforms.<var>."
             )
         missing_transform_vars = [name for name in y_vars if name not in target_transforms_cfg]
         if missing_transform_vars:

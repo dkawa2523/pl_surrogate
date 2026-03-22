@@ -61,22 +61,24 @@ class SweepResult:
 
 _ISOLATED_SCOPE_MODEL_NAMES: dict[str, list[str]] = {
     "global_frozen": ["global_mlp"],
-    "unet_isolated": ["unet"],
-    "unetpp_isolated": ["unetpp"],
-    "unetpp_attn_isolated": ["unetpp_attn"],
-    "fno_isolated": ["fno"],
-    "ffno_isolated": ["ffno"],
+    "unet_isolated": [UNET_FAMILY_MODELS[0]],
+    "unetpp_isolated": [UNET_FAMILY_MODELS[1]],
+    "unetpp_attn_isolated": [UNET_FAMILY_MODELS[2]],
+    "fno_isolated": [SPECTRAL_FAMILY_MODELS[0]],
+    "ffno_isolated": [SPECTRAL_FAMILY_MODELS[1]],
     "deeponet_isolated": ["deeponet_plasma"],
 }
 
+_MAINLINE_ISOLATED_SECTION_NAMES: tuple[str, ...] = (
+    "global_mlp",
+    *UNET_FAMILY_MODELS,
+    *SPECTRAL_FAMILY_MODELS,
+    "deeponet_plasma",
+)
+
 _ISOLATED_SCOPE_FORBIDDEN_SECTIONS: dict[str, list[str]] = {
-    "global_frozen": ["unet", "unetpp", "unetpp_attn", "fno", "ffno", "deeponet_plasma"],
-    "unet_isolated": ["global_mlp", "unetpp", "unetpp_attn", "fno", "ffno", "deeponet_plasma"],
-    "unetpp_isolated": ["unet", "unetpp_attn", "global_mlp", "fno", "ffno", "deeponet_plasma"],
-    "unetpp_attn_isolated": ["unet", "unetpp", "global_mlp", "fno", "ffno", "deeponet_plasma"],
-    "fno_isolated": ["unet", "unetpp", "unetpp_attn", "global_mlp", "ffno", "deeponet_plasma"],
-    "ffno_isolated": ["unet", "unetpp", "unetpp_attn", "global_mlp", "fno", "deeponet_plasma"],
-    "deeponet_isolated": ["unet", "unetpp", "unetpp_attn", "global_mlp", "fno", "ffno"],
+    scope: [name for name in _MAINLINE_ISOLATED_SECTION_NAMES if name not in set(active)]
+    for scope, active in _ISOLATED_SCOPE_MODEL_NAMES.items()
 }
 
 

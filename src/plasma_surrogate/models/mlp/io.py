@@ -12,6 +12,7 @@ from plasma_surrogate.core.model_families import COORD_MLP_FAMILY_MODELS, UNETPP
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import (
     PODBasisBundle,
     PODDeepONetTorch,
+    POD_DEEPONET_IMPL_VERSION,
     normalize_pod_deeponet_model_cfg,
 )
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
@@ -366,6 +367,7 @@ def save_mlp_checkpoint(model: Any, ckpt_dir: str | Path) -> Path:
     elif isinstance(model, CoordMLPTorch):
         meta = {
             "model_type": str(getattr(model, "model_type", "coord_mlp_fourier")),
+            "coord_mlp_impl_version": str(getattr(model, "coord_mlp_impl_version", "v4_siren_branch_balanced")),
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
@@ -375,8 +377,10 @@ def save_mlp_checkpoint(model: Any, ckpt_dir: str | Path) -> Path:
             "model_cfg": dict(getattr(model, "model_cfg", {})),
         }
     elif isinstance(model, PODDeepONetTorch):
+        basis_bundle = model.basis_bundle_numpy()
         meta = {
             "model_type": "deeponet_pod",
+            "impl_version": str(getattr(model, "pod_impl_version", POD_DEEPONET_IMPL_VERSION)),
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
@@ -385,6 +389,10 @@ def save_mlp_checkpoint(model: Any, ckpt_dir: str | Path) -> Path:
             "model_cfg": dict(getattr(model, "model_cfg", {})),
             "basis_keys": list(getattr(model, "basis_keys", [])),
             "basis_rank_by_var": dict(getattr(model, "basis_rank_by_var", {})),
+            "coeff_std_by_var": {
+                str(k): np.asarray(v, dtype=np.float32).reshape(-1).tolist()
+                for k, v in basis_bundle.coeff_std_by_var.items()
+            },
         }
     elif isinstance(model, FNOBaseline):
         meta = {
@@ -526,6 +534,13 @@ def load_mlp_checkpoint(ckpt_dir: str | Path) -> Any:
             backend=backend,
         )
     elif model_type in {"coord_mlp_fourier", "coord_mlp_siren"}:
+        impl_version = str(meta.get("coord_mlp_impl_version", "")).strip().lower()
+        if impl_version != "v4_siren_branch_balanced":
+            raise ValueError(
+                "legacy coord_mlp checkpoint format is not supported; "
+                "expected coord_mlp_impl_version=v4_siren_branch_balanced; "
+                "retrain or re-export checkpoint with current code"
+            )
         _, model_cfg = _normalize_coord_mlp_model_cfg(
             model_name=str(model_type),
             raw_cfg=dict(meta.get("model_cfg", {})),
@@ -542,7 +557,27 @@ def load_mlp_checkpoint(ckpt_dir: str | Path) -> Any:
             backend=str(meta.get("backend", "torch")),
         )
     elif model_type == "deeponet_pod":
+        impl_version = str(meta.get("impl_version", "")).strip().lower()
+        if impl_version != str(POD_DEEPONET_IMPL_VERSION).strip().lower():
+            raise ValueError(
+                "legacy deeponet_pod checkpoint format is not supported; "
+                f"expected impl_version={POD_DEEPONET_IMPL_VERSION}; "
+                "retrain or re-export checkpoint with current code"
+            )
         basis_keys = [str(v) for v in list(meta.get("basis_keys", meta.get("output_keys", [])))]
+        coeff_std_meta = dict(meta.get("coeff_std_by_var", {}))
+        coeff_std_state = {
+            str(name): np.asarray(weights[f"coeff_std::{name}"], dtype=np.float32)
+            for name in basis_keys
+            if f"coeff_std::{name}" in weights
+        }
+        coeff_std_by_var = coeff_std_state if coeff_std_state else coeff_std_meta
+        missing_std_src = [name for name in basis_keys if str(name) not in set(str(k) for k in coeff_std_by_var.keys())]
+        if missing_std_src:
+            raise ValueError(
+                "legacy deeponet_pod checkpoint format is not supported; "
+                f"missing coeff_std for vars={missing_std_src}"
+            )
         basis_bundle = PODBasisBundle.from_dicts(
             basis_by_var={
             str(name): np.asarray(weights[f"basis::{name}"], dtype=np.float32)
@@ -555,6 +590,11 @@ def load_mlp_checkpoint(ckpt_dir: str | Path) -> Any:
             if f"mean::{name}" in weights
             },
             rank_by_var=dict(meta.get("basis_rank_by_var", {})),
+            coeff_std_by_var={
+                str(name): np.asarray(coeff_std_by_var[str(name)], dtype=np.float32)
+                for name in basis_keys
+                if str(name) in coeff_std_by_var
+            },
         )
         model = PODDeepONetTorch(
             input_dim=int(meta["input_dim"]),

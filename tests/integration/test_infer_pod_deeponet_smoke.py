@@ -9,6 +9,7 @@ import yaml
 
 from plasma_surrogate.cli.main import main
 from plasma_surrogate.core.torch_backend import torch_runtime_available
+from plasma_surrogate.models.deeponet.pod_deeponet_torch import POD_DEEPONET_IMPL_VERSION
 from plasma_surrogate.models.mlp.io import load_mlp_checkpoint
 
 
@@ -67,9 +68,10 @@ def test_infer_pod_deeponet_smoke(tmp_path: Path) -> None:
     with (run_dir / "checkpoints" / "meta.json").open("r", encoding="utf-8") as f:
         ckpt_meta = json.load(f)
     assert ckpt_meta["model_type"] == "deeponet_pod"
+    assert ckpt_meta["impl_version"] == POD_DEEPONET_IMPL_VERSION
     assert ckpt_meta["basis_keys"] == ["ne", "ni", "Te", "phi"]
+    assert "coeff_std_by_var" in ckpt_meta
     single_dirs = list((run_dir / "inference" / "single").glob("*"))
     assert single_dirs
     assert (single_dirs[0] / "fields_model.npz").exists()
     assert (single_dirs[0] / "fields_phys.npz").exists()
-
