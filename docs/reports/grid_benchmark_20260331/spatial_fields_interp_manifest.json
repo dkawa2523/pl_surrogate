@@ -1,0 +1,25 @@
+{
+  "compare_csv": "runs\\ext0520\\compare_unet_family_final_opt\\selected_models_comparison.csv",
+  "protocol": "interp",
+  "vars": [
+    "ne",
+    "ni",
+    "Te",
+    "phi"
+  ],
+  "model_names": [
+    "unet_wd1e3",
+    "unetpp_lr4e4",
+    "unetpp_attn_lr4e4"
+  ],
+  "reference_name": "unetpp_attn_lr4e4",
+  "selected_case_hash": "385ea312f0817d4cbc3a2bb92bcf483d0d694011",
+  "mean_case_hashes": [
+    "385ea312f0817d4cbc3a2bb92bcf483d0d694011",
+    "436360fc9f4a30360ba85cd7a4aad5c39963d97b",
+    "6fb5256a05de9bb1eb099d0990f8d6adaf89488c"
+  ],
+  "q_low": 2.0,
+  "q_high": 98.0,
+  "include_ground_truth": true
+}
