@@ -1,0 +1,25 @@
+{
+  "compare_csv": "runs\\report_20260402\\compare\\success_12\\selected_models_comparison.csv",
+  "summary_csv": "docs\\reports\\report_20260402\\evaluation_summary_success_12.csv",
+  "top4_candidates": [
+    "deeponet_pod",
+    "u_no",
+    "fno",
+    "coord_mlp_fourier"
+  ],
+  "top1_candidate": "deeponet_pod",
+  "all_12_names": [
+    "deeponet_pod",
+    "u_no",
+    "fno",
+    "coord_mlp_fourier",
+    "ffno",
+    "global_mlp",
+    "unetpp_attn",
+    "coord_mlp_siren",
+    "unetpp",
+    "deeponet_plasma",
+    "cno",
+    "unet"
+  ]
+}

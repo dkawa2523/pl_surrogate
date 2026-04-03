@@ -1,0 +1,176 @@
+benchmark:
+  output_dir: runs/report_20260402/full/unetpp_attn
+  profile: m7_unetpp_attn_isolated
+  seed: 411
+  phi_mode: direct
+  runtime:
+    input_mode: table_plus_structure
+    strict_input_mode: error
+    allow_mode_fallback: false
+    structure:
+      feature_profile: geom_v1_mainline
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: auto
+      provider_mode: fixed
+  eval:
+    mask_metrics: plasma_only
+    interp_mode: overlap
+    protocol_variant: unetpp_attn_isolated_mainline
+    target_family_for_score: allvars
+    target_vars_for_score: [ne, ni, Te, phi]
+    primary_metric: test_r2_plasma_mean_dual
+    primary_mode: max
+    aggregate_score:
+      enabled: true
+      rmse_weight: 0.5
+      r2_weight: 0.4
+      boundary_penalty_weight: 0.1
+      use_plasma_metrics: true
+    region_bands:
+      mode: fixed_px
+      boundary_in_px: 2.0
+      deep_plasma_px: 10.0
+      boundary_q: 0.15
+      deep_q: 0.70
+  eval_protocol:
+    mode: dual_axis
+    scope: unetpp_attn_isolated
+    primary_split: interp
+    interp_weight: 0.5
+    extrap_weight: 0.5
+    frozen_ref_tag: periodic_global_frozen_v2
+  dataset:
+    type: csv_npz
+    root: data/outputs_merged_td_csv_periodic
+    index_csv: index.csv
+    targets:
+      - {id: ne, source_key: log_ne, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: ni, source_key: log_ni, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: Te, source_key: Te, value_transform: identity, units: "eV", dtype: float32}
+      - {id: phi, source_key: phi, value_transform: identity, units: "V", dtype: float32}
+    cond_columns: [PP0, Td, gamma]
+    axis_column: axis
+    fields_npz_column: fields_npz
+    case_id_column: case_id
+    base_case_id_column: base_case_id
+    split_group_column: split_group
+    geometry_root: geometry
+  split:
+    seed: 7
+    ratios: [0.7, 0.15, 0.15]
+  preprocessing:
+    scalers:
+      enforce_target_transforms: true
+      y_fit_policy: plasma_only
+      target_transforms:
+        ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        phi: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+    distance_contract:
+      require_negative_outside: error
+    coord_grid_contract:
+      require_requested_source: warn
+    coord_grid_source: coord_grid
+    coord_features:
+      enabled: true
+      output: features/coord_feature_pack.npz
+      channels_from_profile: geom_v1_mainline
+      distance_transform_stats:
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
+        signed_quantile: 0.45
+        proximity_quantile: 0.25
+  train:
+    unet_like:
+      batch_size_cases: 6
+      shuffle_cases: true
+    unetpp_attn:
+      epochs: 120
+      lr: 0.0004
+      optimizer:
+        type: adamw
+        lr: 0.0004
+        weight_decay: 0.0001
+        betas: [0.9, 0.999]
+        eps: 1.0e-8
+        schedule: cosine
+        warmup_epochs: 5
+      target_family: allvars
+      target_vars: [ne, ni, Te, phi]
+      input_features:
+        mode: geom_feature_pack
+        require_pack: error
+        features: [x, y, mask_plasma, distance_signed, distance_any]
+        distance_transform:
+          mode: bounded_auto
+          signed_tanh_tau: 8.0
+          proximity_tau: 6.0
+          replace_distance_any: true
+      selection:
+        mode: best_val_allvars_balance
+        eval_every_n_epochs: 2
+        warmup_epochs: 8
+        boundary_band_px: 2.0
+        boundary_bonus_weight: 0.0
+        weights:
+          ne: 0.25
+          ni: 0.25
+          Te: 0.25
+          phi: 0.25
+      model_cfg:
+        backend: torch
+        conv_cfg:
+          base_channels: 32
+          depth: 2
+          upsample_mode: bilinear
+          nested_skip: true
+          attention_cfg:
+            enabled: true
+            reduction: 2
+            gate_activation: sigmoid
+          deep_supervision:
+            enabled: false
+        output_heads:
+          mode: shared
+    loss:
+      supervised:
+        type: huber
+        delta: 1.0
+        normalization: sample_mean
+        sample_mean_group_mode: batch
+        sample_mean_weight_denominator: count
+        mask: plasma_only
+        nan_region_policy: sdf_continuous
+        spatial_consistency:
+          enabled: true
+          vars: [ne, ni, Te, phi]
+          mode: grad_huber
+          lambda: 0.05
+          delta: 1.0
+          apply_region: plasma_only
+          normalize_by_var_scale: true
+          multiscale:
+            enabled: false
+            scales: [1, 2, 4]
+            scale_weights: [1.0, 0.7, 0.5]
+        chamber_aux:
+          enabled: false
+      multitask:
+        weighting: fixed
+        fixed_weights_by_var:
+          ne: 1.0
+          ni: 1.0
+          Te: 1.0
+          phi: 1.0
+  boundary_operator:
+    primary_qoi_key: Gamma_i
+  physics:
+    enabled: false
+  inference:
+    axis:
+      mode: steady
+      value: 0.0
