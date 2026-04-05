@@ -1,0 +1,14 @@
+name,model_id,status,source_leaderboard
+global_mlp,global_mlp,success,runs\ext0520\full\global_mlp\leaderboard.csv
+fno,fno,success,runs\ext0520\full\fno\leaderboard.csv
+ffno,ffno,success,runs\ext0520\full\ffno\leaderboard.csv
+coord_mlp_fourier,coord_mlp_fourier,success,runs\ext0520\full\coord_mlp_fourier\leaderboard.csv
+unetpp_attn,unetpp_attn,success,runs\ext0520\full_unetpp_family_final_opt_lr4e4_e120_b6\unetpp_attn\leaderboard.csv
+unetpp,unetpp,success,runs\ext0520\full_unetpp_family_final_opt_lr4e4_e120_b6\unetpp\leaderboard.csv
+coord_mlp_siren,coord_mlp_siren,success,runs\ext0520\full\coord_mlp_siren\leaderboard.csv
+unet,unet,success,runs\ext0520\full_unet_final_opt_wd1e3_e120_b6\unet\leaderboard.csv
+u_no,u_no,success,runs\ext0520\full\u_no\leaderboard.csv
+deeponet_pod,deeponet_pod,success,runs\ext0520\full\deeponet_pod_hybrid\leaderboard.csv
+cno,cno,success,runs\ext0520\full\cno\leaderboard.csv
+deeponet_plasma,deeponet_plasma,success,runs\ext0520\full\deeponet_plasma\leaderboard.csv
+geom_deeponet_siren,geom_deeponet_siren,success,runs\ext0520\full\geom_deeponet_siren\leaderboard.csv
