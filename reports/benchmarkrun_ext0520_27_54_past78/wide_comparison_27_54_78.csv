@@ -1,0 +1,19 @@
+model_id,display_name,family,input_mode,dual_r2_n27,interp_r2_n27,extrap_r2_n27,dual_r2_n54,interp_r2_n54,extrap_r2_n54,dual_r2_n78,interp_r2_n78,extrap_r2_n78
+deeponet_plasma_pod,Plasma POD-DeepONet,pod_operator,table_only,0.914111,0.896496,0.931725,0.917152,0.898829,0.935474,0.946188,0.951073,0.941304
+geom_deeponet_pod,Geom POD-DeepONet,pod_operator_geom,table_plus_structure,0.908894,0.902004,0.915784,0.918893,0.899177,0.938609,0.941284,0.952064,0.930504
+coord_mlp_pod_residual,Coord MLP POD residual,coord_continuous,table_plus_structure,0.900164,0.864014,0.936314,0.905648,0.869609,0.941687,0.948102,0.949642,0.946561
+deeponet_pod,POD-DeepONet,pod_operator,table_only,0.91411,0.896496,0.931725,0.917152,0.898829,0.935474,0.946188,0.951073,0.941304
+fno,FNO,neural_operator,table_plus_structure,0.896886,0.897776,0.895997,0.881068,0.863446,0.89869,0.930361,0.943785,0.916936
+ffno,FFNO,neural_operator,table_plus_structure,0.911692,0.91465,0.908733,0.886755,0.855852,0.917659,0.919557,0.933765,0.905349
+coord_mlp_fourier,Coord MLP Fourier,coord_continuous,table_plus_structure,0.879955,0.849547,0.910363,0.871252,0.825472,0.917032,0.926981,0.931957,0.922004
+coord_mlp_siren,Coord MLP SIREN,coord_continuous,table_plus_structure,0.739461,0.817029,0.661894,0.799326,0.849269,0.749384,0.849692,0.921287,0.778096
+u_no,U-NO,neural_operator,table_plus_structure,0.885963,0.921412,0.850513,0.857646,0.884439,0.830854,0.888889,0.948333,0.829445
+cno_operator_unet,CNO Operator U-Net,neural_operator_cnn,table_plus_structure,0.838969,0.869264,0.808674,0.823603,0.849008,0.798198,0.876016,0.931656,0.820375
+cno,CNO legacy,neural_operator_cnn,table_plus_structure,0.697159,0.776939,0.617378,0.717783,0.827821,0.607744,0.78828,0.913097,0.663462
+unet_operator_v2,U-Net Operator v2,cnn_operator,table_plus_structure,0.8356,0.893939,0.777261,0.832087,0.859018,0.805157,0.871886,0.929196,0.814575
+unet,U-Net,cnn,table_plus_structure,0.484415,0.67866,0.29017,0.770173,0.762925,0.77742,0.772169,0.897648,0.646689
+unetpp,U-Net++,cnn,table_plus_structure,0.745152,0.794586,0.695718,0.755741,0.793644,0.717838,0.882042,0.90901,0.855074
+unetpp_attn,U-Net++ Attention,cnn_attention,table_plus_structure,0.733273,0.800395,0.666151,0.786212,0.770113,0.802311,0.863047,0.903672,0.822422
+global_mlp,Global MLP,baseline,table_only,0.785914,0.717159,0.854669,0.828623,0.726495,0.93075,0.922083,0.916662,0.927504
+deeponet_plasma,Plasma DeepONet legacy,legacy_deeponet,table_plus_structure,0.476073,0.515062,0.437084,0.490662,0.519952,0.461372,0.486658,0.510673,0.462642
+geom_deeponet_siren,Geom DeepONet SIREN,legacy_geom_siren,table_plus_structure,0.349752,0.406643,0.292861,0.400688,0.484688,0.316688,0.381336,0.426689,0.335983
