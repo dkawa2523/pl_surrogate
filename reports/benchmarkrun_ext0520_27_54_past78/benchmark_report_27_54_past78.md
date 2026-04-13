@@ -85,26 +85,28 @@ $$
 
 ## モデル一覧と使いどころ
 
-| モデル | 内容 | メリット | デメリット | 推論時の使いどころ | 関連 |
-| --- | --- | --- | --- | --- | --- |
-| Global MLP | 表条件だけで場全体を出す基準線 | 速く、構造入力なしの上限/下限を見やすい | 幾何差や局所構造は直接表現しにくい | 新データの sanity check、構造入力モデルが本当に必要かの判定 | MLP |
-| POD-DeepONet | POD係数を条件から予測し、POD基底で場を復元 | 低データで強く、学習・推論が軽い | POD基底外の細部変形には弱い | 最初に使う主力基準、少数ケースでの代理モデル | DeepONet, POD |
-| Plasma POD-DeepONet | Plasma用途の実務版POD-DeepONet | POD-DeepONet同等の精度を用途名で明確に扱える | 現状はPOD-DeepONetと近く、差別化は物理制約追加後 | Plasma向けデフォルト候補、既存Plasma DeepONetの置換候補 | DeepONet, POD |
-| Geom POD-DeepONet | 幾何descriptorを条件に足したPOD-DeepONet | Geom SIRENより大幅に安定し、78ケースで上位 | descriptor設計が悪いと性能が落ちる | 形状/境界条件差を含む設計比較、幾何感度の評価 | DeepONet, POD, geometry descriptors |
-| Coord MLP POD residual | POD粗復元 + 座標MLP残差で連続場を補正 | Coord MLP系で最上位。外挿も強い | Te深部や負値率には追加制約の余地 | 連続座標推論、格子外補間、PODだけでは粗い局所補正 | SIREN/Fourier features, POD |
-| Coord MLP Fourier | Fourier特徴付き座標MLP | 軽量で高精度、特徴量追加の検証が速い | 全場を直接背負うためPOD residualほどは伸びにくい | 新しい空間特徴/SDF評価の初期検証 | Fourier features |
-| Coord MLP SIREN | 周期活性で座標場を表現 | 滑らかな連続場・高周波表現に向く | 今回の低データでは外挿が弱い | Fourier版との診断比較、細部表現の研究用途 | SIREN |
-| FNO | 周波数領域で作用素を学習 | 格子場の大域構造に強く、78ケースでも上位 | 格子前提が強く、境界細部は別評価が必要 | 構造入力ありの主力比較線 | FNO |
-| FFNO | FNOを分解型にした作用素モデル | FNO近い精度で安定、周波数作用素の別実装として有用 | 設定次第でFNOより伸びない場合がある | FNOの再現性確認、作用素系の頑健性比較 | FFNO |
-| U-NO | U-Net形状のNeural Operator | 局所/大域を混ぜやすい | 今回の上位には届かず、外挿に課題 | 作用素系の中間候補、ケース増加時の伸び確認 | U-NO |
-| CNO Operator U-Net | CNOの作用素性とU-Net decoderを合わせた改良版 | CNO legacyより明確に高精度 | 上位POD/FNO系にはまだ届かない | CNO系を残すならこちらを実務候補にする | CNO, U-Net |
-| CNO legacy | 従来の軽量CNO | 比較用に残す価値はある | 現行結果ではOperator U-Net版に劣る | 後方互換、改良効果の確認 | CNO |
-| U-Net Operator v2 | U-Netに条件埋め込み/作用素的入力を加えた改良版 | U-Netより安定 | POD/Coord POD/FNOには届かない | 画像型モデルの実務候補、局所構造を見たい場合 | U-Net |
-| U-Net | 基本CNN encoder-decoder | 単純で理解しやすい | 低データで弱く、外挿も不安定 | 画像型モデルの最低限の基準線 | U-Net |
-| U-Net++ | nested skip付きU-Net | 78ケースで大きく改善 | 学習コストが高め | データが増えたときのCNN系主力候補 | UNet++ |
-| U-Net++ Attention | Attention付きU-Net++ | 広域依存を補える | コスト増に対して今回の上位には届かない | 境界/局所構造の比較研究 | UNet++, attention |
-| Plasma DeepONet legacy | 既存のPlasma DeepONet | 互換性確認に使える | POD版に比べると現行設定では弱い | 過去結果との互換比較、旧モデルの再現 | DeepONet |
-| Geom DeepONet SIREN | 幾何情報とSIREN trunkの直接生成型 | 幾何入力の診断には使える | 実務精度には届いていない | Geom POD版との差分診断、研究用途 | DeepONet, SIREN |
+参考文献列の略記は末尾の参考文献一覧に対応する。推論時の最適化対象は、学習済みcheckpointを固定したうえで、`InferenceEngine` / `OptimizeRunner` に渡して探索しやすい入力変数を示す。
+
+| モデル | 内容 | メリット | デメリット | 推論時の使いどころ | 推論時の最適化対象 | 参考文献 |
+| --- | --- | --- | --- | --- | --- | --- |
+| Global MLP | 表条件だけで場全体を出す基準線 | 速く、構造入力なしの上限/下限を見やすい | 幾何差や局所構造は直接表現しにくい | 新データの sanity check、構造入力モデルが本当に必要かの判定 | 条件値のみ。`PP0`, `Td`, `gamma` などの探索に使う | Hornik 1989 |
+| POD-DeepONet | POD係数を条件から予測し、POD基底で場を復元 | 低データで強く、学習・推論が軽い | POD基底外の細部変形には弱い | 最初に使う主力基準、少数ケースでの代理モデル | 条件値。QoIは場平均、uniformity、負値率が中心 | Lu 2019, Berkooz 1993 |
+| Plasma POD-DeepONet | Plasma用途の実務版POD-DeepONet | POD-DeepONet同等の精度を用途名で明確に扱える | 現状はPOD-DeepONetと近く、差別化は物理制約追加後 | Plasma向けデフォルト候補、既存Plasma DeepONetの置換候補 | 条件値。Plasma QoI、非負制約、Poisson残差の監視に向く | Lu 2019, Berkooz 1993 |
+| Geom POD-DeepONet | 幾何descriptorを条件に足したPOD-DeepONet | Geom SIRENより大幅に安定し、78ケースで上位 | descriptor設計が悪いと性能が落ちる | 形状/境界条件差を含む設計比較、幾何感度の評価 | 条件値 + 少数の幾何descriptor/幾何パラメータ | Lu 2019, Berkooz 1993 |
+| Coord MLP POD residual | POD粗復元 + 座標MLP残差で連続場を補正 | Coord MLP系で最上位。外挿も強い | Te深部や負値率には追加制約の余地 | 連続座標推論、格子外補間、PODだけでは粗い局所補正 | 条件値 + 幾何パラメータ + 局所query位置。境界/深部QoIにも向く | Tancik 2020, Sitzmann 2020, Berkooz 1993 |
+| Coord MLP Fourier | Fourier特徴付き座標MLP | 軽量で高精度、特徴量追加の検証が速い | 全場を直接背負うためPOD residualほどは伸びにくい | 新しい空間特徴/SDF評価の初期検証 | 条件値 + 幾何パラメータ + query位置。SDF特徴の感度確認に向く | Tancik 2020 |
+| Coord MLP SIREN | 周期活性で座標場を表現 | 滑らかな連続場・高周波表現に向く | 今回の低データでは外挿が弱い | Fourier版との診断比較、細部表現の研究用途 | 条件値 + 幾何パラメータ + query位置。高周波局所評価に向く | Sitzmann 2020 |
+| FNO | 周波数領域で作用素を学習 | 格子場の大域構造に強く、78ケースでも上位 | 格子前提が強く、境界細部は別評価が必要 | 構造入力ありの主力比較線 | 条件値 + 幾何パラメータ。大域場QoI、uniformity最適化に向く | Li 2020 |
+| FFNO | FNOを分解型にした作用素モデル | FNO近い精度で安定、周波数作用素の別実装として有用 | 設定次第でFNOより伸びない場合がある | FNOの再現性確認、作用素系の頑健性比較 | 条件値 + 幾何パラメータ。FNOとの頑健性比較に使う | Tran 2021 |
+| U-NO | U-Net形状のNeural Operator | 局所/大域を混ぜやすい | 今回の上位には届かず、外挿に課題 | 作用素系の中間候補、ケース増加時の伸び確認 | 条件値 + 幾何パラメータ。固定grid上の局所/大域QoI比較 | Rahman 2022 |
+| CNO Operator U-Net | CNOの作用素性とU-Net decoderを合わせた改良版 | CNO legacyより明確に高精度 | 上位POD/FNO系にはまだ届かない | CNO系を残すならこちらを実務候補にする | 条件値 + 幾何パラメータ。境界近傍や局所構造QoIの比較 | Raonic 2023, Ronneberger 2015 |
+| CNO legacy | 従来の軽量CNO | 比較用に残す価値はある | 現行結果ではOperator U-Net版に劣る | 後方互換、改良効果の確認 | 条件値 + 幾何パラメータ。ただし実務最適化は改良版優先 | Raonic 2023 |
+| U-Net Operator v2 | U-Netに条件埋め込み/作用素的入力を加えた改良版 | U-Netより安定 | POD/Coord POD/FNOには届かない | 画像型モデルの実務候補、局所構造を見たい場合 | 条件値 + 幾何パラメータ。固定grid上の境界/局所QoI | Ronneberger 2015 |
+| U-Net | 基本CNN encoder-decoder | 単純で理解しやすい | 低データで弱く、外挿も不安定 | 画像型モデルの最低限の基準線 | 条件値 + 幾何パラメータ。主に基準比較用 | Ronneberger 2015 |
+| U-Net++ | nested skip付きU-Net | 78ケースで大きく改善 | 学習コストが高め | データが増えたときのCNN系主力候補 | 条件値 + 幾何パラメータ。局所構造QoIの改善確認 | Zhou 2018 |
+| U-Net++ Attention | Attention付きU-Net++ | 広域依存を補える | コスト増に対して今回の上位には届かない | 境界/局所構造の比較研究 | 条件値 + 幾何パラメータ。広域依存を含む境界QoI確認 | Zhou 2018, Vaswani 2017 |
+| Plasma DeepONet legacy | 既存のPlasma DeepONet | 互換性確認に使える | POD版に比べると現行設定では弱い | 過去結果との互換比較、旧モデルの再現 | 条件値 + 幾何パラメータ + query位置。研究/互換診断用 | Lu 2019 |
+| Geom DeepONet SIREN | 幾何情報とSIREN trunkの直接生成型 | 幾何入力の診断には使える | 実務精度には届いていない | Geom POD版との差分診断、研究用途 | 条件値 + 幾何パラメータ + query位置。幾何trunkの診断用 | Lu 2019, Sitzmann 2020 |
 
 ## ベンチマーク結果
 
@@ -281,8 +283,10 @@ $$
 
 ## 参考文献
 
+- Hornik, Stinchcombe, White. Multilayer feedforward networks are universal approximators. Neural Networks, 1989. https://doi.org/10.1016/0893-6080(89)90020-8
 - Ronneberger, Fischer, Brox. U-Net: Convolutional Networks for Biomedical Image Segmentation. arXiv:1505.04597. https://arxiv.org/abs/1505.04597
 - Zhou et al. UNet++: A Nested U-Net Architecture for Medical Image Segmentation. arXiv:1807.10165. https://arxiv.org/abs/1807.10165
+- Vaswani et al. Attention Is All You Need. arXiv:1706.03762. https://arxiv.org/abs/1706.03762
 - Lu et al. DeepONet: Learning nonlinear operators for identifying differential equations based on the universal approximation theorem of operators. arXiv:1910.03193. https://arxiv.org/abs/1910.03193
 - Li et al. Fourier Neural Operator for Parametric Partial Differential Equations. arXiv:2010.08895. https://arxiv.org/abs/2010.08895
 - Tran et al. Factorized Fourier Neural Operators. arXiv:2111.13802. https://arxiv.org/abs/2111.13802

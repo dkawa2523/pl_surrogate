@@ -89,3 +89,16 @@
 - physics は target 名直参照ではなく symbol mapping を使う
 - preprocess と infer で feature 契約をずらさない
 - `tests/fixtures` はテンプレであり、実運用正本は将来的に `configs/` へ置く
+
+## Dual-Mode Runtime (Experimental)
+
+`runtime.input_mode` を使う dual-mode 実行系 (`table_only` / `table_plus_structure`) の仕様は以下を参照してください。
+
+- [11_dual_input_mode_runtime.md](11_dual_input_mode_runtime.md)
+- [11_dual_input_mode_runtime/README.md](11_dual_input_mode_runtime/README.md)
+
+## Current Codebase And Model Reference
+
+コード全体の責務境界、学習・推論・benchmark のワークフロー図、各モデルのネットワーク構造、使いどころ、推論時の最適化対象は次を参照してください。
+
+- [12_codebase_model_workflow_reference.md](12_codebase_model_workflow_reference.md)
