@@ -1,4 +1,4 @@
-# 40. POD-DeepONet 実装仕様
+﻿# 40. POD-DeepONet 実装仕様
 
 ## 1. 目的
 
@@ -26,7 +26,7 @@ v1 では、既存 `deeponet_plasma` の mainline strict contract に無理に�
 - `src/plasma_surrogate/models/deeponet/pod_deeponet_torch.py`
 
 ### 変更
-- `src/plasma_surrogate/models/mlp/io.py`
+- `src/plasma_surrogate/models/checkpoint.py`
 - `src/plasma_surrogate/train/model_dispatch.py`
 - unit / integration tests
 
@@ -148,7 +148,7 @@ experimental validator として次を入れる。
 - `model_cfg.basis.rank >= 1`
 - `fit_scope=train_only` 以外は落とす
 
-## 6. `models/mlp/io.py` 実装
+## 6. `models/checkpoint.py` 実装
 
 ### builder
 

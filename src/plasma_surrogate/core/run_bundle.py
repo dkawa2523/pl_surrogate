@@ -12,7 +12,7 @@ import numpy as np
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.task_spec import TaskSpecV1
-from plasma_surrogate.models.mlp.io import load_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import load_checkpoint
 from plasma_surrogate.preprocessing.scalers import TransformBundle
 from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 
@@ -45,7 +45,11 @@ class RunBundle:
         if not cond_scaler or not y_scalers:
             raise FileNotFoundError(f"Missing scaler artifacts under {self.run_dir / 'preprocessing' / 'scalers'}")
         layout = self.schemas.get("output_layout", {})
-        y_order = list(layout.get("vars", ["ne", "ni", "Te", "phi"]))
+        y_order = [str(v) for v in layout.get("vars", []) if str(v).strip()]
+        if not y_order:
+            raise FileNotFoundError(
+                f"Missing output_layout vars under {self.run_dir / 'preprocessing' / 'schema' / 'output_layout.json'}"
+            )
         return TransformBundle.from_dict(
             cond_scaler=cond_scaler,
             y_scalers=y_scalers,
@@ -83,23 +87,23 @@ class RunBundleLoader:
         return {k: np.asarray(data[k]) for k in data.files}
 
     @staticmethod
-    def _default_task_spec(schemas: dict[str, Any]) -> TaskSpecV1:
+    def _default_task_spec(schemas: dict[str, Any], transforms: dict[str, Any]) -> TaskSpecV1:
         layout = schemas.get("output_layout", {})
-        shape = list(layout.get("shape", [3, 16, 16]))
+        vars_ = [str(v) for v in layout.get("vars", []) if str(v).strip()]
+        if not vars_:
+            raise FileNotFoundError("Missing output_layout.vars; cannot derive task_spec without fixed target names")
+        shape = list(layout.get("shape", []))
         if len(shape) >= 3:
             grid_shape = [int(shape[1]), int(shape[2])]
         else:
-            grid_shape = [16, 16]
+            raise FileNotFoundError("Missing output_layout.shape; cannot derive task_spec grid shape")
+        y_scalers = dict(transforms.get("y_scalers", {}))
+        transform_by_var = {name: str(dict(y_scalers.get(name, {})).get("type", "zscore")) for name in vars_}
         return TaskSpecV1.from_dict(
             {
-                "outputs": [
-                    {"name": "ne", "units": "m^-3", "transform": "zscore"},
-                    {"name": "ni", "units": "m^-3", "transform": "zscore"},
-                    {"name": "Te", "units": "eV", "transform": "zscore"},
-                    {"name": "phi", "units": "V", "transform": "zscore"},
-                ],
-                "transforms": {"ne": "zscore", "ni": "zscore", "Te": "zscore", "phi": "zscore"},
-                "units": {"ne": "m^-3", "ni": "m^-3", "Te": "eV", "phi": "V"},
+                "outputs": [{"name": name, "units": "", "transform": transform_by_var[name]} for name in vars_],
+                "transforms": transform_by_var,
+                "units": {name: "" for name in vars_},
                 "grid_spec": {
                     "axes_order": ["y", "x"],
                     "coord_components": ["x", "y"],
@@ -111,7 +115,13 @@ class RunBundleLoader:
         )
 
     @classmethod
-    def _load_task_spec(cls, run_path: Path, cfg: dict[str, Any], schemas: dict[str, Any]) -> TaskSpecV1:
+    def _load_task_spec(
+        cls,
+        run_path: Path,
+        cfg: dict[str, Any],
+        schemas: dict[str, Any],
+        transforms: dict[str, Any],
+    ) -> TaskSpecV1:
         task_spec_path = run_path / "task_spec.yaml"
         if cfg.get("task", {}).get("spec_path"):
             task_spec_path = Path(cfg["task"]["spec_path"])
@@ -119,7 +129,7 @@ class RunBundleLoader:
                 task_spec_path = run_path / task_spec_path
         if task_spec_path.exists():
             return TaskSpecV1.from_yaml(task_spec_path)
-        return cls._default_task_spec(schemas)
+        return cls._default_task_spec(schemas, transforms)
 
     @classmethod
     def load(
@@ -136,7 +146,7 @@ class RunBundleLoader:
                 cfg = yaml.safe_load(f) or {}
 
         if model is None and (run_path / "checkpoints" / "meta.json").exists():
-            model = load_mlp_checkpoint(run_path / "checkpoints")
+            model = load_checkpoint(run_path / "checkpoints")
 
         transforms = {
             "cond_scaler": cls._load_json_if_exists(run_path / "preprocessing" / "scalers" / "cond_scaler.json"),
@@ -158,6 +168,20 @@ class RunBundleLoader:
         if coord_pack_rel:
             coord_pack_path = run_path / "preprocessing" / coord_pack_rel
             coord_pack_meta_path = coord_pack_path.parent / f"{coord_pack_path.stem}_meta.json"
+        descriptor_pack_rel = str(
+            preprocess_report.get("structure_descriptor_pack_path", "features/structure_descriptor_pack.npz")
+        ).strip()
+        descriptor_pack_path: Path | None = None
+        descriptor_pack_meta_path: Path | None = None
+        if descriptor_pack_rel:
+            descriptor_pack_path = run_path / "preprocessing" / descriptor_pack_rel
+            descriptor_pack_meta_path = descriptor_pack_path.parent / f"{descriptor_pack_path.stem}_meta.json"
+        latent_pack_rel = str(preprocess_report.get("latent_feature_pack_path", "features/latent_feature_pack.npz")).strip()
+        latent_pack_path: Path | None = None
+        latent_pack_meta_path: Path | None = None
+        if latent_pack_rel:
+            latent_pack_path = run_path / "preprocessing" / latent_pack_rel
+            latent_pack_meta_path = latent_pack_path.parent / f"{latent_pack_path.stem}_meta.json"
 
         schemas = {
             "cond_schema": cls._load_json_if_exists(run_path / "preprocessing" / "schema" / "cond_schema.json"),
@@ -191,8 +215,12 @@ class RunBundleLoader:
             "preprocess_report": preprocess_report,
             "coord_feature_pack_meta": cls._load_json_if_exists(coord_pack_meta_path) if coord_pack_meta_path else {},
             "coord_feature_pack": cls._load_npz_if_exists(coord_pack_path) if coord_pack_path else None,
+            "structure_descriptor_pack_meta": cls._load_json_if_exists(descriptor_pack_meta_path) if descriptor_pack_meta_path else {},
+            "structure_descriptor_pack": cls._load_npz_if_exists(descriptor_pack_path) if descriptor_pack_path else None,
+            "latent_feature_pack_meta": cls._load_json_if_exists(latent_pack_meta_path) if latent_pack_meta_path else {},
+            "latent_feature_pack": cls._load_npz_if_exists(latent_pack_path) if latent_pack_path else None,
         }
-        task_spec = cls._load_task_spec(run_path=run_path, cfg=cfg, schemas=schemas)
+        task_spec = cls._load_task_spec(run_path=run_path, cfg=cfg, schemas=schemas, transforms=transforms)
 
         ArtifactStore(run_path / "artifacts")
 

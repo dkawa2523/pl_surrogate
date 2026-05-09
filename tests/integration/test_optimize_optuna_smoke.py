@@ -3,16 +3,16 @@ from __future__ import annotations
 from pathlib import Path
 
 import json
-import pytest
 
 from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
 from plasma_surrogate.infer.engine import InferenceEngine
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
+from tests._runtime_requirements import require_optuna
 
 
 def test_optimize_runner_optuna_smoke(tmp_path: Path, geometry_root: Path):
-    pytest.importorskip("optuna")
+    require_optuna()
     model = GlobalMLP(input_dim=2, grid_shape=(8, 8), seed=2)
     engine = InferenceEngine(
         model=model,
@@ -24,6 +24,7 @@ def test_optimize_runner_optuna_smoke(tmp_path: Path, geometry_root: Path):
 
     result = engine.optimize_run(
         space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+        geom_space=None,
         n_trials=4,
         geom={"geom_id": "default"},
         axis={"mode": "steady", "value": 0.0},

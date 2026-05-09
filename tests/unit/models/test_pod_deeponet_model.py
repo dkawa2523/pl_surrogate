@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from types import SimpleNamespace
 import json
@@ -8,19 +7,16 @@ import json
 import numpy as np
 import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.infer.engine import InferenceEngine
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import (
     PODDeepONetTorch,
     POD_DEEPONET_IMPL_VERSION,
     fit_pod_basis_from_targets,
     normalize_pod_deeponet_model_cfg,
 )
-from plasma_surrogate.models.mlp.io import load_mlp_checkpoint, save_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import load_checkpoint, save_checkpoint
 
-
-def _enable_torch() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
 
 
 def _build_targets(n: int = 6, h: int = 4, w: int = 4) -> np.ndarray:
@@ -62,9 +58,7 @@ def test_normalize_pod_model_cfg_canonicalizes_hidden() -> None:
 
 
 def test_pod_deeponet_forward_and_checkpoint_roundtrip(tmp_path: Path) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     y = _build_targets(n=5, h=4, w=4)
     bundle = fit_pod_basis_from_targets(
@@ -87,8 +81,8 @@ def test_pod_deeponet_forward_and_checkpoint_roundtrip(tmp_path: Path) -> None:
     assert pred.shape == (2, 2, 4, 4)
     assert np.all(np.isfinite(pred))
 
-    ckpt = save_mlp_checkpoint(model, tmp_path / "ckpt")
-    loaded = load_mlp_checkpoint(ckpt)
+    ckpt = save_checkpoint(model, tmp_path / "ckpt")
+    loaded = load_checkpoint(ckpt)
     pred_loaded = loaded.forward(cond)
     assert pred_loaded.shape == pred.shape
     assert loaded.to_meta()["basis_rank_by_var"] == {"density": bundle.rank_by_var["density"], "temperature": bundle.rank_by_var["temperature"]}
@@ -97,10 +91,33 @@ def test_pod_deeponet_forward_and_checkpoint_roundtrip(tmp_path: Path) -> None:
     assert "coeff_std_by_var" in loaded.to_meta()
 
 
+@pytest.mark.parametrize("model_type", ["deeponet_plasma_pod", "geom_deeponet_pod"])
+def test_pod_deeponet_checkpoint_preserves_family_model_type(tmp_path: Path, model_type: str) -> None:
+    require_torch_runtime()
+
+    bundle = fit_pod_basis_from_targets(
+        _build_targets(n=4, h=4, w=4),
+        output_keys=["density", "temperature"],
+        requested_rank=3,
+        center=True,
+        per_var=True,
+    )
+    model = PODDeepONetTorch(
+        input_dim=3,
+        grid_shape=(4, 4),
+        out_channels=2,
+        output_keys=["density", "temperature"],
+        pod_basis_bundle=bundle,
+        model_cfg={"hidden": [16, 12], "basis": {"rank": 3, "fit_scope": "train_only", "per_var": True, "center": True}},
+        model_type=model_type,
+    )
+    ckpt = save_checkpoint(model, tmp_path / f"ckpt_{model_type}")
+    loaded = load_checkpoint(ckpt)
+    assert loaded.to_meta()["model_type"] == model_type
+
+
 def test_pod_deeponet_rejects_legacy_checkpoint_format(tmp_path: Path) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     y = _build_targets(n=4, h=4, w=4)
     bundle = fit_pod_basis_from_targets(
         y,
@@ -117,7 +134,7 @@ def test_pod_deeponet_rejects_legacy_checkpoint_format(tmp_path: Path) -> None:
         pod_basis_bundle=bundle,
         model_cfg={"hidden": [16, 12], "basis": {"rank": 3, "fit_scope": "train_only", "per_var": True, "center": True}},
     )
-    ckpt = save_mlp_checkpoint(model, tmp_path / "ckpt_legacy")
+    ckpt = save_checkpoint(model, tmp_path / "ckpt_legacy")
     meta_path = Path(ckpt) / "meta.json"
     with meta_path.open("r", encoding="utf-8") as f:
         meta = json.load(f)
@@ -125,13 +142,11 @@ def test_pod_deeponet_rejects_legacy_checkpoint_format(tmp_path: Path) -> None:
     with meta_path.open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     with pytest.raises(ValueError, match="expected impl_version"):
-        load_mlp_checkpoint(ckpt)
+        load_checkpoint(ckpt)
 
 
 def test_pod_deeponet_inference_does_not_use_grid_spatial_builder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     bundle = fit_pod_basis_from_targets(
         _build_targets(n=4, h=4, w=4),

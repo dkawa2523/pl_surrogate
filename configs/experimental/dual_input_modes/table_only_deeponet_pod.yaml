@@ -15,8 +15,13 @@ dataset:
   cond_columns: [pressure, power, flow]
   geometry_root: data/m7/geometry
 
+preprocessing:
+  coord_features:
+    enabled: false  # table_only: geometry is output context only
+
 train:
   models: [deeponet_pod]
+  # deeponet_pod supports both table_only and table_plus_structure.
   deeponet_pod:
     target_family: allvars
     target_vars: [log_ne, Te, phi]

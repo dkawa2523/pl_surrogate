@@ -46,7 +46,8 @@ optional:
 - `unetpp_attn`
 - `fno`
 - `ffno`
-- 将来 `u_no`, `cno`
+- 実装済み `u_no`
+- 実装済み `cno`
 
 内容:
 - fixed-size spatial channels
@@ -57,7 +58,7 @@ optional:
 対象:
 - `coord_mlp_fourier`
 - `coord_mlp_siren`
-- 将来 `geom_deeponet_siren`
+- `geom_deeponet_siren` (implemented)
 
 内容:
 - query-point と同じ座標系で評価できる channels

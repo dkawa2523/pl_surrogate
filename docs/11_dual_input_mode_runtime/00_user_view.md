@@ -66,7 +66,8 @@
 - `coord_mlp_fourier`
 - `coord_mlp_siren`
 - `deeponet_pod`（descriptor/latent branch を使う場合）
-- 将来候補: `u_no`, `cno`, `geom_deeponet_siren`
+- 実装済み: `u_no`, `cno`
+- optional model: `geom_deeponet_siren` (implemented)
 
 ## ユーザー向け fail-fast
 

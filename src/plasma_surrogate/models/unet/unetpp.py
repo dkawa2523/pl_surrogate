@@ -250,6 +250,7 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
 
         torch.manual_seed(int(seed))
         self.torch = torch
+        self._init_torch_device()
         self.net = _build_unetpp_modules(
             torch=torch,
             nn=nn,
@@ -263,6 +264,7 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
             attention_enabled=attention_enabled,
             attention_reduction=attention_reduction,
         )
+        self._ensure_net_device()
         self.net.train()
         self._torch_seed = int(seed)
         self._torch_base_channels = int(base_channels)
@@ -317,8 +319,10 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
         lr: float,
         weight_decay: float = 0.0,
         apply_step: bool = True,
+        target_raw: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
     ) -> dict[str, float]:
-        del weight_decay
+        del weight_decay, target_raw, loss_cfg
         return self._backward_raw_torch(grad_raw, lr=float(lr), apply_step=bool(apply_step))
 
     def state_dict_numpy(self) -> dict[str, np.ndarray]:

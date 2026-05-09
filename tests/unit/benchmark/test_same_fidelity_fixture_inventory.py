@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[3]
+pytestmark = pytest.mark.config_catalog
 
 
 def _load_yaml(path: Path) -> dict:

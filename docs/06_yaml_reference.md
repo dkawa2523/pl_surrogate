@@ -289,9 +289,28 @@ train:
 
 ```yaml
 inference:
-  axis:
-    mode: steady
-    value: 0.0
+  single:
+    enabled: true
+    cond: {c0: 0.2, c1: 0.5, c2: 0.8}
+    geom: {geom_id: default}
+    axis: {mode: steady, value: 0.0}
+  batch:
+    enabled: true
+    cases:
+      - case_id: c001
+        cond: {c0: 0.1, c1: 0.2, c2: 0.3}
+        geom: {geom_id: default}
+        axis: {mode: steady, value: 0.0}
+      - case_id: c002
+        cond: {c0: 0.4, c1: 0.5, c2: 0.6}
+        geom:
+          geom_id: default
+          geom_param: {part.p0.tx: 0.05}
+    csv:
+      path: candidates.csv
+      cond_columns: [c0, c1, c2]
+      case_id_column: case_id
+      geom_id_column: geom_id
   ood:
     physics:
       enabled: false
@@ -301,20 +320,59 @@ inference:
 
 ### 用途
 
-- 推論時の軸設定
-- OOD / physics / boundary operator の解釈
+- 学習済み checkpoint と preprocess artifact を使って推論する。
+- `single` は 1 条件の確認、`batch` は候補群の推論と QoI/diagnostic 集計に使う。
+- `batch.cases` は YAML 直書き、`batch.csv` は CSV 候補を読むための薄い入口。
 
 ### 重要キー
 
-- `axis.mode`
-- `axis.value`
+- `single.enabled`
+- `single.cond`
+- `single.geom`
+- `single.axis`
+- `batch.enabled`
+- `batch.conds`: 既存互換の条件リスト。全 case で同じ `batch.geom` / `batch.axis` を使う。
+- `batch.cases`: `case_id`, `cond`, `geom`, `axis` を case ごとに指定する。
+- `batch.csv.path`
+- `batch.csv.cond_columns`
+- `batch.csv.case_id_column`
+- `batch.csv.geom_id_column`
 - `ood.physics.enabled`
 - `ood.physics.symbols`
 - `ood.boundary_operator.symbols`
 
+### 出力
+
+- `inference/single/<case_key>/fields_model.npz`
+- `inference/single/<case_key>/fields_phys.npz`
+- `inference/single/<case_key>/qoi.json`
+- `inference/single/<case_key>/diagnostics.json`
+- `inference/batch/summary.csv`
+- `inference/cases_summary.csv`
+- `inference/cases_summary.json`
+
+`cases_summary.csv/json` includes `case_key` so each row can be traced back to
+`inference/single/<case_key>/...`. Missing QoI/diagnostic values are written as
+empty CSV cells and `null` in JSON, not as `0.0`.
+
+For `inference.optimize`, omit `space` only when preprocessing `cond_stats` has
+complete `min`/`max` bounds; those bounds are used instead of a synthetic
+`[0, 1]` default.
+
+`cases_summary` は case ごとの `case_id`, `cond`, `geom`, `axis`, QoI, diagnostics をまとめる。初回統合では ground truth 比較や metric registry は持たず、推論結果から得られる既存 QoI/diagnostic の集約に留める。
+
+### geometry
+
+- 通常は `geom: {geom_id: default}` を使う。
+- `geom.geom_param` は `runtime.input_mode=table_plus_structure` かつ `runtime.structure.provider_mode=parametric_parts` のときだけ有効。
+- `geom_param` の詳細 schema は `inference` 側で重ねず、既存 geometry provider の contract に委ねる。
+
 ### mainline 既定
 
-- symbol 未解決のまま physics を有効化しない
+- `single.cond` 未指定時は condition schema の各キーに `0.5` を使う。
+- `batch.conds` / `batch.cases` / `batch.csv` が未指定なら、既存互換として簡易な 2 条件 batch を作る。
+- `axis` 未指定時は preprocess の axis schema から `mode` を取り、`value: 0.0` を使う。
+- physics symbol が未解決のまま OOD physics を有効化しない。
 
 ## 6. `physics`
 

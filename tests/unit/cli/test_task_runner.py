@@ -36,6 +36,26 @@ def test_task_runner_dispatches_benchmark_run(monkeypatch, tmp_path: Path):
     assert out["stages"] == ["benchmark"]
 
 
+def test_task_runner_dispatches_benchmark_sweep(monkeypatch, tmp_path: Path):
+    class _Result:
+        summary_path = tmp_path / "summary.json"
+        best_trial = {"trial_id": "t1", "score": 0.1}
+        locked_config_path = tmp_path / "locked.yaml"
+        locked_leaderboard_path = tmp_path / "leaderboard_locked.csv"
+
+    class _Runner:
+        def run_sweep(self):
+            return _Result()
+
+    monkeypatch.setattr("plasma_surrogate.pipeline.task_runner.BenchmarkRunner.from_yaml", lambda _: _Runner())
+    out = TaskRunner().run("benchmark.sweep", "bench.yaml")
+    assert out["summary"] == str(tmp_path / "summary.json")
+    assert out["best_trial"] == {"trial_id": "t1", "score": 0.1}
+    assert out["locked_config"] == str(tmp_path / "locked.yaml")
+    assert out["locked_leaderboard"] == str(tmp_path / "leaderboard_locked.csv")
+    assert out["stages"] == ["benchmark", "sweep"]
+
+
 def test_task_runner_unknown_task_raises():
     with pytest.raises(ValueError, match="Unknown task"):
         TaskRunner().run("invalid.task", "cfg.yaml")

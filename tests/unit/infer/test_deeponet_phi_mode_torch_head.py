@@ -42,4 +42,3 @@ def test_plasma_head_prefers_predict_phi_for_deeponet_mode(tmp_path: Path, geome
     )
     assert head.used_predict_phi is True
     assert res.fields_phys["phi"].shape == (1, 8, 8)
-

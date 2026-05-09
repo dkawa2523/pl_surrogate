@@ -68,3 +68,8 @@
 - point-cloud / mesh / transformer 系へ一気に全面移行する
 - `table_only` なのに暗黙に structure features を混ぜる
 - `table_plus_structure` なのに geometry を silently ignore する
+
+## Phase 5 Addendum (Checkpoint Contract)
+
+- `deeponet_pod_descriptor_*` and `deeponet_pod_latent_*` metadata are now propagated in both train and benchmark checkpoint meta.
+- Infer/evaluate summaries reuse these keys without renaming.

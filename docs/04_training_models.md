@@ -245,6 +245,10 @@ active target 群をまとめて扱う validation ベースの selection です�
 ### `model_dispatch`
 
 - 設定が mainline 契約を満たすかを判定する
+- `model_adapters.py` でモデル名を train-time の実行レーンへ対応づける
+- grid 系モデルの学習レーンは `grid_training.py` に集約する
+- target/selection の共通契約は `target_contracts.py` に置く
+- 空間特徴量の構築・変換は `spatial_features.py` に置く
 - target 順序、feature 契約、許可/禁止設定を固める
 
 ### trainer
@@ -258,6 +262,9 @@ active target 群をまとめて扱う validation ベースの selection です�
 ## 9. 修正入口
 
 - モデル構造を変える: `src/plasma_surrogate/models/*`
-- build/save/load 経路: `src/plasma_surrogate/models/mlp/io.py`
-- strict contract を変える: `src/plasma_surrogate/train/model_dispatch.py`
+- build/save/load 経路: `src/plasma_surrogate/models/checkpoint.py`
+- train 実行レーンを追加する: `src/plasma_surrogate/train/model_adapters.py`
+- grid 系の strict contract を変える: `src/plasma_surrogate/train/grid_training.py`
+- 共通 target/selection 契約を変える: `src/plasma_surrogate/train/target_contracts.py`
+- dispatch の上位ルーティングを変える: `src/plasma_surrogate/train/model_dispatch.py`
 - 学習実行を変える: `src/plasma_surrogate/train/trainer.py`, `src/plasma_surrogate/train/torch_trainer.py`

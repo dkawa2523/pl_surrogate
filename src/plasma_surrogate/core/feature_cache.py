@@ -6,14 +6,14 @@ from pathlib import Path
 from typing import Any
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.data.geometry_provider import GeometryProviderLike
 from plasma_surrogate.features.geometry_feature_store import GeometryFeatureStore
 
 
 def prepare_feature_cache(
     *,
     run_root: str | Path,
-    geometry_provider: FixedGeometryProvider,
+    geometry_provider: GeometryProviderLike,
     features_cfg: dict[str, Any] | None = None,
     axis_mode: str = "steady",
     axis_value: float = 0.0,

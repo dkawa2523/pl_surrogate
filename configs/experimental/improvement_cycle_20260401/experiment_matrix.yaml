@@ -1,0 +1,220 @@
+experiments:
+  - id: d1_deeponet_epochs240
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/d1_deeponet_epochs240
+        eval:
+          protocol_variant: deeponet_improve_d1_epochs240
+        train:
+          deeponet_plasma:
+            epochs: 240
+            model_cfg:
+              missing_geom_feature_policy: error
+
+  - id: d2_deeponet_epochs480
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/d2_deeponet_epochs480
+        eval:
+          protocol_variant: deeponet_improve_d2_epochs480
+        train:
+          deeponet_plasma:
+            epochs: 480
+            model_cfg:
+              missing_geom_feature_policy: error
+
+  - id: d3_deeponet_branch_moments
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/d3_deeponet_branch_moments
+        eval:
+          protocol_variant: deeponet_improve_d3_branch_moments
+        train:
+          deeponet_plasma:
+            strict_mainline: false
+            epochs: 240
+            model_cfg:
+              branch_mode: moments
+              sensor_pool_mode: moments
+              missing_geom_feature_policy: error
+
+  - id: d4_deeponet_branch_set_mlp_pool
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/d4_deeponet_branch_set_mlp_pool
+        eval:
+          protocol_variant: deeponet_improve_d4_branch_set_mlp_pool
+        train:
+          deeponet_plasma:
+            strict_mainline: false
+            epochs: 240
+            model_cfg:
+              branch_mode: set_mlp_pool
+              sensor_pool_mode: set_mlp_pool
+              sensor_embed_dim: 64
+              missing_geom_feature_policy: error
+
+  - id: d5_deeponet_film_fused
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/d5_deeponet_film_fused
+        eval:
+          protocol_variant: deeponet_improve_d5_film_fused
+        train:
+          deeponet_plasma:
+            strict_mainline: false
+            epochs: 240
+            model_cfg:
+              branch_mode: moments
+              sensor_pool_mode: moments
+              trunk_cond_modulation: film
+              output_path:
+                mode: fused
+              missing_geom_feature_policy: error
+
+  - id: d6_deeponet_film_fused_residual
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/d6_deeponet_film_fused_residual
+        eval:
+          protocol_variant: deeponet_improve_d6_residual
+        train:
+          deeponet_plasma:
+            strict_mainline: false
+            epochs: 240
+            model_cfg:
+              branch_mode: moments
+              sensor_pool_mode: moments
+              trunk_cond_modulation: film
+              output_path:
+                mode: fused
+              residual_head:
+                enabled: true
+                hidden_dim: 96
+                scale_init: 0.05
+              missing_geom_feature_policy: error
+
+  - id: u1_unetpp_attn_multitask_ne_ni_upweight
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_unetpp_attn_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/u1_unetpp_attn_multitask_ne_ni_upweight
+        eval:
+          protocol_variant: unetpp_attn_improve_u1_multitask_ne_ni
+        train:
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.3
+                ni: 1.3
+                Te: 1.0
+                phi: 1.0
+
+  - id: u2_unetpp_attn_selection_ne_ni_upweight
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_unetpp_attn_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/u2_unetpp_attn_selection_ne_ni_upweight
+        eval:
+          protocol_variant: unetpp_attn_improve_u2_selection_ne_ni
+        train:
+          unetpp_attn:
+            selection:
+              weights:
+                ne: 0.30
+                ni: 0.30
+                Te: 0.20
+                phi: 0.20
+
+  - id: u3_unetpp_attn_u1_u2_wd5e4
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_unetpp_attn_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/u3_unetpp_attn_u1_u2_wd5e4
+        eval:
+          protocol_variant: unetpp_attn_improve_u3_combined
+        train:
+          unetpp_attn:
+            optimizer:
+              weight_decay: 0.0005
+            selection:
+              weights:
+                ne: 0.30
+                ni: 0.30
+                Te: 0.20
+                phi: 0.20
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.3
+                ni: 1.3
+                Te: 1.0
+                phi: 1.0
+
+  - id: u4_unetpp_u3_weight_design
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_unetpp_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/u4_unetpp_u3_weight_design
+        eval:
+          protocol_variant: unetpp_improve_u4_from_u3_design
+        train:
+          unetpp:
+            optimizer:
+              weight_decay: 0.0005
+            selection:
+              weights:
+                ne: 0.30
+                ni: 0.30
+                Te: 0.20
+                phi: 0.20
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.3
+                ni: 1.3
+                Te: 1.0
+                phi: 1.0
+
+  - id: c1_coord_mlp_siren_w0_tune
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_coord_mlp_siren_experimental.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/c1_coord_mlp_siren_w0_tune
+        eval:
+          protocol_variant: coord_mlp_siren_improve_c1_w0
+        train:
+          coord_mlp_siren:
+            model_cfg:
+              siren:
+                w0_initial: 6.0
+                w0_hidden: 0.8
+
+  - id: c2_coord_mlp_siren_selection_fusion_tune
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_coord_mlp_siren_experimental.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401/c2_coord_mlp_siren_selection_fusion_tune
+        eval:
+          protocol_variant: coord_mlp_siren_improve_c2_selection_fusion
+        train:
+          coord_mlp_siren:
+            selection:
+              weights:
+                ne: 0.20
+                ni: 0.20
+                Te: 0.30
+                phi: 0.30
+            model_cfg:
+              siren:
+                w0_initial: 6.0
+                w0_hidden: 0.8
+                fusion_cfg:
+                  cond_gain_init: 0.9
+                  point_gain_init: 1.1

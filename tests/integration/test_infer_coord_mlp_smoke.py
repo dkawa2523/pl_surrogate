@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import os
+import pytest
 from pathlib import Path
 
-import pytest
+
 import yaml
 
 from plasma_surrogate.cli.main import main
-from plasma_surrogate.core.torch_backend import torch_runtime_available
-from plasma_surrogate.models.mlp.io import load_mlp_checkpoint
+from tests._config_presets import runtime_table_plus_structure
+from tests._runtime_requirements import require_torch_runtime
+from plasma_surrogate.models.checkpoint import load_checkpoint
+
+pytestmark = pytest.mark.torch_runtime
 
 
 @pytest.mark.parametrize(
@@ -61,13 +64,12 @@ from plasma_surrogate.models.mlp.io import load_mlp_checkpoint
     ],
 )
 def test_infer_coord_mlp_smoke(tmp_path: Path, model_name: str, per_model_cfg: dict[str, object]) -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     run_dir = tmp_path / "coord_mlp_run"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_plus_structure(feature_profile="geom_v1_mainline", adapter_mode="auto"),
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 5},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
@@ -81,7 +83,7 @@ def test_infer_coord_mlp_smoke(tmp_path: Path, model_name: str, per_model_cfg: d
             },
             "coord_features": {
                 "enabled": True,
-                "channels": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+                "channels_from_profile": "geom_v1_mainline",
                 "scaling": {"enabled": True, "mode": "zscore", "fit_scope": "train_split", "mask_scope": "plasma_plus_band"},
                 "distance_transform_stats": {"enabled": True, "fit_scope": "train_split", "mask_scope": "plasma_plus_band"},
             },
@@ -102,7 +104,7 @@ def test_infer_coord_mlp_smoke(tmp_path: Path, model_name: str, per_model_cfg: d
 
     assert main(["preprocess", "--config", str(cfg_path)]) == 0
     assert main(["train", "--config", str(cfg_path)]) == 0
-    loaded = load_mlp_checkpoint(run_dir / "checkpoints")
+    loaded = load_checkpoint(run_dir / "checkpoints")
     assert loaded.input_feature_channels == ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
     assert loaded.model_type == model_name
     if model_name == "coord_mlp_siren":

@@ -24,7 +24,7 @@
 - `src/plasma_surrogate/models/fno/factorized_fno.py`
 
 ### 変更
-- `src/plasma_surrogate/models/mlp/io.py`
+- `src/plasma_surrogate/models/checkpoint.py`
 - `src/plasma_surrogate/train/model_dispatch.py`
 - unit / integration tests
 - benchmark fixture
@@ -99,7 +99,7 @@ spectral_cfg:
 
 v1 では `mode=separable_1d` だけでよい。
 
-## 5. `models/mlp/io.py` 実装
+## 5. `models/checkpoint.py` 実装
 
 ### `build_model_from_name` に追加
 
@@ -144,7 +144,7 @@ if name == "ffno":
 }
 ```
 
-`load_mlp_checkpoint` に `model_type == "ffno"` を追加する。
+`models/checkpoint.py` の公開 API に `model_type == "ffno"` の save/load 対応を追加する。
 
 ## 6. `model_dispatch.py` 実装
 

@@ -112,6 +112,39 @@ def test_build_benchmark_eval_row_supports_dynamic_target_names():
     assert "test_rmse_temp_main_plasma_deep" in row
 
 
+def test_build_benchmark_eval_row_adds_sdf_boundary_deep_contrast():
+    distance_signed = np.array(
+        [[0.0, 1.0, 3.0, 12.0], [0.5, 1.5, 6.0, 14.0], [-1.0, -3.0, 5.0, 20.0], [0.2, 4.0, 16.0, -5.0]],
+        dtype=np.float32,
+    )
+    mask_plasma = (distance_signed >= 0.0).astype(np.float32)
+    true_te = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+    pred_te = true_te.copy()
+    boundary = np.logical_and(mask_plasma > 0.5, distance_signed <= 2.0)
+    deep = np.logical_and(mask_plasma > 0.5, distance_signed > 10.0)
+    pred_te[:, :, boundary] += 2.0
+    pred_te[:, :, deep] += 1.0
+
+    row = build_benchmark_eval_row(
+        model_id="fno",
+        metrics={"Te": 0.0},
+        r2_scores={"Te": 1.0},
+        pred_eval={"Te": pred_te},
+        true_eval={"Te": true_te},
+        mask_plasma=mask_plasma,
+        distance_signed=distance_signed,
+        single_qoi={"uniformity": 0.0, "boundary_gamma_uniformity": 0.0},
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        opt_best_uniformity=0.0,
+        target_vars_for_score=["Te"],
+    )
+
+    assert np.isclose(float(row["test_rmse_Te_boundary_to_deep_ratio"]), 2.0)
+    assert np.isclose(float(row["sdf_boundary_to_deep_rmse_ratio_mean"]), 2.0)
+    assert "test_r2_Te_boundary_minus_deep" in row
+    assert "sdf_boundary_minus_deep_r2_mean" in row
+
+
 def test_build_eval_and_viz_payload_helpers():
     true_eval = {
         "ne": np.zeros((2, 1, 3, 3), dtype=np.float32),

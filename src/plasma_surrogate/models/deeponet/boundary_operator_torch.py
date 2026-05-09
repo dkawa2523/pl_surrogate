@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.core.torch_backend import require_torch
+from plasma_surrogate.models._torch_spatial_common import _resolve_torch_device
 
 
 class BoundaryOperatorTorch:
@@ -22,11 +23,12 @@ class BoundaryOperatorTorch:
     ) -> None:
         torch = require_torch()
         self._torch = torch
+        self.device = _resolve_torch_device(torch)
         self.primary_qoi_key = str(primary_qoi_key)
-        self.w_log_ne = torch.nn.Parameter(torch.tensor(float(w_log_ne), dtype=torch.float32))
-        self.w_te = torch.nn.Parameter(torch.tensor(float(w_te), dtype=torch.float32))
-        self.w_en = torch.nn.Parameter(torch.tensor(float(w_en), dtype=torch.float32))
-        self.bias = torch.nn.Parameter(torch.tensor(float(bias), dtype=torch.float32))
+        self.w_log_ne = torch.nn.Parameter(torch.tensor(float(w_log_ne), dtype=torch.float32, device=self.device))
+        self.w_te = torch.nn.Parameter(torch.tensor(float(w_te), dtype=torch.float32, device=self.device))
+        self.w_en = torch.nn.Parameter(torch.tensor(float(w_en), dtype=torch.float32, device=self.device))
+        self.bias = torch.nn.Parameter(torch.tensor(float(bias), dtype=torch.float32, device=self.device))
         self.clamp = None if clamp is None else (float(clamp[0]), float(clamp[1]))
         self.freeze = bool(freeze)
         if self.freeze:
@@ -35,6 +37,12 @@ class BoundaryOperatorTorch:
 
     def parameters(self):
         return [self.w_log_ne, self.w_te, self.w_en, self.bias]
+
+    def to(self, device):
+        self.device = device
+        for p in self.parameters():
+            p.data = p.data.to(device)
+        return self
 
     def train(self) -> None:
         return None
@@ -66,17 +74,19 @@ class BoundaryOperatorTorch:
     def load_state_dict_numpy(self, weights: dict[str, np.ndarray]) -> None:
         torch = self._torch
         if "w_log_ne" in weights:
-            self.w_log_ne.data.copy_(torch.as_tensor(float(np.asarray(weights["w_log_ne"]).reshape(-1)[0])))
+            self.w_log_ne.data.copy_(
+                torch.as_tensor(float(np.asarray(weights["w_log_ne"]).reshape(-1)[0]), device=self.device)
+            )
         if "w_te" in weights:
-            self.w_te.data.copy_(torch.as_tensor(float(np.asarray(weights["w_te"]).reshape(-1)[0])))
+            self.w_te.data.copy_(torch.as_tensor(float(np.asarray(weights["w_te"]).reshape(-1)[0]), device=self.device))
         if "w_en" in weights:
-            self.w_en.data.copy_(torch.as_tensor(float(np.asarray(weights["w_en"]).reshape(-1)[0])))
+            self.w_en.data.copy_(torch.as_tensor(float(np.asarray(weights["w_en"]).reshape(-1)[0]), device=self.device))
         if "bias" in weights:
-            self.bias.data.copy_(torch.as_tensor(float(np.asarray(weights["bias"]).reshape(-1)[0])))
+            self.bias.data.copy_(torch.as_tensor(float(np.asarray(weights["bias"]).reshape(-1)[0]), device=self.device))
 
     def _grad_mag(self, phi):
         torch = self._torch
-        p = torch.as_tensor(phi, dtype=torch.float32)
+        p = torch.as_tensor(phi, dtype=torch.float32, device=self.device)
         if p.ndim == 3 and p.shape[-1] == 1:
             # Pointwise inputs do not have a local stencil; keep EN neutral.
             return torch.zeros_like(p)
@@ -88,7 +98,7 @@ class BoundaryOperatorTorch:
 
     def _as_bm1(self, x: Any, sample_idx: Any | None = None):
         torch = self._torch
-        t = torch.as_tensor(x, dtype=torch.float32)
+        t = torch.as_tensor(x, dtype=torch.float32, device=self.device)
         if t.ndim == 3 and t.shape[-1] == 1:
             return t
         if t.ndim == 3:

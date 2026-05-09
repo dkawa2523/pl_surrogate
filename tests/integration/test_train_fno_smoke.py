@@ -1,15 +1,21 @@
 from __future__ import annotations
 
-import os
-
+import pytest
 import numpy as np
 
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.fno.simple_fno import FNOBaseline
 from plasma_surrogate.train.trainer import Trainer
 
+pytestmark = pytest.mark.torch_runtime
+
+
+def _require_torch_runtime() -> None:
+    require_torch_runtime()
+
 
 def test_train_fno_smoke(tmp_path):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+    _require_torch_runtime()
     rng = np.random.default_rng(1)
     n, d, h, w = 12, 3, 8, 8
     cond = rng.uniform(0.0, 1.0, size=(n, d)).astype(np.float32)
@@ -48,7 +54,7 @@ def test_train_fno_smoke(tmp_path):
 
 
 def test_fno_spectral_filter_is_effective_on_retained_modes():
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+    _require_torch_runtime()
     model = FNOBaseline(
         input_dim=3,
         grid_shape=(16, 16),
@@ -72,7 +78,7 @@ def test_fno_spectral_filter_is_effective_on_retained_modes():
 
 
 def test_fno_skip_filter_match_spectral_reduces_high_frequency():
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+    _require_torch_runtime()
     model = FNOBaseline(
         input_dim=3,
         grid_shape=(16, 16),

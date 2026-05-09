@@ -64,10 +64,28 @@ def test_run_bundle_loader_fallback_without_run_metadata(tmp_path):
 
     bundle = RunBundleLoader.load(run_dir)
     assert bundle.task_spec.grid_spec.shape == (8, 8)
+    assert [out.name for out in bundle.task_spec.outputs] == ["log_ne", "Te", "phi"]
     assert bundle.task_spec.metadata["source"] == "run_bundle_fallback"
     assert bundle.cond_schema_obj().order == ["p", "q"]
     assert bundle.axis_schema_obj().mode == "steady"
     assert bundle.transform_bundle().cond_dim == 2
+
+
+def test_run_bundle_loader_requires_output_layout_for_fallback_task_spec(tmp_path):
+    run_dir = tmp_path / "missing_layout"
+    (run_dir / "preprocessing" / "scalers").mkdir(parents=True)
+    (run_dir / "preprocessing" / "schema").mkdir(parents=True)
+    with (run_dir / "preprocessing" / "scalers" / "cond_scaler.json").open("w", encoding="utf-8") as f:
+        json.dump({"type": "zscore", "mean": [0.0], "std": [1.0]}, f)
+    with (run_dir / "preprocessing" / "scalers" / "y_scalers.json").open("w", encoding="utf-8") as f:
+        json.dump({"density": {"type": "zscore", "mean": [0.0], "std": [1.0]}}, f)
+    with (run_dir / "preprocessing" / "schema" / "cond_schema.json").open("w", encoding="utf-8") as f:
+        json.dump({"order": ["p"]}, f)
+    with (run_dir / "preprocessing" / "schema" / "axis_schema.json").open("w", encoding="utf-8") as f:
+        json.dump({"mode": "steady", "harmonics": 1}, f)
+
+    with pytest.raises(FileNotFoundError, match="output_layout.vars"):
+        RunBundleLoader.load(run_dir)
 
 
 def test_require_artifacts_raises_with_missing_paths(tmp_path):

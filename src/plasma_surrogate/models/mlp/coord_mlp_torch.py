@@ -124,8 +124,8 @@ def _resolve_coord_mlp_config(cfg: dict[str, Any], *, model_type: str | None = N
         if "decoder_activation" in cfg_local:
             raise ValueError(f"{cfg_prefix}.model_cfg.decoder_activation is not used for SIREN; remove it")
         fusion = str(siren_cfg.get("fusion", "split_add")).strip().lower()
-        if fusion != "split_add":
-            raise ValueError(f"{cfg_prefix}.model_cfg.siren.fusion must be split_add")
+        if fusion not in {"split_add", "gated_affine"}:
+            raise ValueError(f"{cfg_prefix}.model_cfg.siren.fusion must be one of: split_add, gated_affine")
         w0_initial = _resolve_positive_float(
             siren_cfg.get("w0_initial"),
             default=10.0,
@@ -155,7 +155,7 @@ def _resolve_coord_mlp_config(cfg: dict[str, Any], *, model_type: str | None = N
         embedding_cfg = {"type": "none"}
         siren_cfg = {
             "enabled": True,
-            "fusion": "split_add",
+            "fusion": str(fusion),
             "w0_initial": float(w0_initial),
             "w0_hidden": float(w0_hidden),
             "fusion_cfg": {
@@ -511,12 +511,112 @@ if _torch_nn is not None and _torch_mod is not None:  # pragma: no branch - defi
             return self.out_layer(h)
 
 
+    class _SirenGatedAffinePointDecoder(_torch_nn.Module):
+        def __init__(
+            self,
+            *,
+            cond_dim: int,
+            point_dim: int,
+            hidden_dims: list[int],
+            out_dim: int,
+            w0_initial: float,
+            w0_hidden: float,
+            cond_gain_init: float,
+            point_gain_init: float,
+            branch_norm: bool,
+        ) -> None:
+            super().__init__()
+            if len(hidden_dims) == 0:
+                raise ValueError("train.coord_mlp_siren.model_cfg.decoder_hidden must be non-empty")
+            self.cond_dim = int(cond_dim)
+            self.point_dim = int(point_dim)
+            self.w0_initial = float(w0_initial)
+            self.w0_hidden = float(w0_hidden)
+            self.branch_norm = bool(branch_norm)
+            self.cond_norm = _torch_nn.LayerNorm(self.cond_dim) if self.branch_norm else _torch_nn.Identity()
+            self.point_norm = _torch_nn.LayerNorm(self.point_dim) if self.branch_norm else _torch_nn.Identity()
+            first_dim = int(hidden_dims[0])
+            self.first_cond = _torch_nn.Linear(self.cond_dim, first_dim, bias=False)
+            self.first_point = _torch_nn.Linear(self.point_dim, first_dim, bias=False)
+            self.affine_gamma = _torch_nn.Linear(self.cond_dim, first_dim)
+            self.affine_beta = _torch_nn.Linear(self.cond_dim, first_dim)
+            self.gate_cond = _torch_nn.Linear(self.cond_dim, first_dim, bias=False)
+            self.gate_point = _torch_nn.Linear(self.point_dim, first_dim, bias=False)
+            self.first_bias = _torch_nn.Parameter(_torch_mod.zeros((first_dim,), dtype=_torch_mod.float32))
+            # Positive-constrained branch gains keep cond/point contribution balancing stable.
+            self._cond_gain_raw = _torch_nn.Parameter(
+                _torch_mod.tensor([_softplus_inverse(float(cond_gain_init))], dtype=_torch_mod.float32)
+            )
+            self._point_gain_raw = _torch_nn.Parameter(
+                _torch_mod.tensor([_softplus_inverse(float(point_gain_init))], dtype=_torch_mod.float32)
+            )
+            _siren_init_linear(
+                torch=_torch_mod,
+                linear=self.first_cond,
+                w0=self.w0_initial,
+                is_first=True,
+            )
+            _siren_init_linear(
+                torch=_torch_mod,
+                linear=self.first_point,
+                w0=self.w0_initial,
+                is_first=True,
+            )
+            with _torch_mod.no_grad():
+                self.affine_gamma.weight.zero_()
+                self.affine_gamma.bias.zero_()
+                self.affine_beta.weight.zero_()
+                self.affine_beta.bias.zero_()
+                self.gate_cond.weight.zero_()
+                self.gate_point.weight.zero_()
+
+            self.hidden_layers = _torch_nn.ModuleList()
+            prev = first_dim
+            for nxt in [int(v) for v in hidden_dims[1:]]:
+                linear = _torch_nn.Linear(prev, nxt)
+                _siren_init_linear(
+                    torch=_torch_mod,
+                    linear=linear,
+                    w0=self.w0_hidden,
+                    is_first=False,
+                )
+                self.hidden_layers.append(linear)
+                prev = nxt
+            self.out_layer = _torch_nn.Linear(prev, int(out_dim))
+            _siren_init_linear(
+                torch=_torch_mod,
+                linear=self.out_layer,
+                w0=self.w0_hidden,
+                is_first=False,
+            )
+
+        def forward(self, flat):
+            cond = flat[..., : self.cond_dim]
+            point = flat[..., self.cond_dim : self.cond_dim + self.point_dim]
+            cond = self.cond_norm(cond)
+            point = self.point_norm(point)
+            cond_gain = _torch_nn.functional.softplus(self._cond_gain_raw)
+            point_gain = _torch_nn.functional.softplus(self._point_gain_raw)
+            cond_proj = cond_gain * self.first_cond(cond)
+            point_proj = point_gain * self.first_point(point)
+            gamma = 1.0 + _torch_mod.tanh(self.affine_gamma(cond))
+            beta = self.affine_beta(cond)
+            gate = _torch_mod.sigmoid(self.gate_cond(cond) + self.gate_point(point))
+            base_pre = point_proj + cond_proj + self.first_bias
+            affine_pre = (gamma * point_proj) + beta + cond_proj + self.first_bias
+            h = _torch_mod.sin(float(self.w0_initial) * (gate * affine_pre + (1.0 - gate) * base_pre))
+            for linear in self.hidden_layers:
+                h = _torch_mod.sin(float(self.w0_hidden) * linear(h))
+            return self.out_layer(h)
+
+
 else:  # pragma: no cover - only used when torch is unavailable at import time.
     _SineActivation = None
     _IdentityPointEncoder = None
     _FourierPointEncoder = None
     _CoordMLPNet = None
     _SirenSplitAddPointDecoder = None
+    _SirenGatedAffinePointDecoder = None
 
 
 def _build_coord_mlp_net(
@@ -566,11 +666,16 @@ def _build_coord_mlp_net(
         )
     if siren_enabled:
         fusion = str(dict(siren_cfg).get("fusion", "split_add")).strip().lower()
-        if fusion != "split_add":
-            raise ValueError(f"{cfg_prefix}.model_cfg.siren.fusion must be split_add")
-        if _SirenSplitAddPointDecoder is None:
+        decoder_cls: Any
+        if fusion == "split_add":
+            decoder_cls = _SirenSplitAddPointDecoder
+        elif fusion == "gated_affine":
+            decoder_cls = _SirenGatedAffinePointDecoder
+        else:
+            raise ValueError(f"{cfg_prefix}.model_cfg.siren.fusion must be one of: split_add, gated_affine")
+        if decoder_cls is None:
             raise RuntimeError("CoordMLPTorch requires torch SIREN decoder modules to be available")
-        point_decoder = _SirenSplitAddPointDecoder(
+        point_decoder = decoder_cls(
             cond_dim=int(latent_dim),
             point_dim=int(point_encoder.output_dim()),
             hidden_dims=list(decoder_hidden),
@@ -799,8 +904,10 @@ class CoordMLPTorch:
         lr: float,
         weight_decay: float = 0.0,
         apply_step: bool = True,
+        target_raw: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
     ) -> dict[str, float]:
-        del weight_decay
+        del weight_decay, target_raw, loss_cfg
         if self._torch_last_out is None:
             raise RuntimeError("CoordMLPTorch.backward_raw called without torch forward cache")
         out = _backward_raw_torch_step(

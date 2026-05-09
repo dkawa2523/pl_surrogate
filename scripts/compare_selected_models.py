@@ -6,17 +6,20 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+INPUT_MODE_EFFECTIVE_KEY = "input_mode_effective"
 
 
 def _as_float(row: dict[str, Any], key: str) -> float:
     raw = row.get(key, 0.0)
     try:
         return float(raw)
-    except Exception:
+    except (TypeError, ValueError):
         return 0.0
 
 
@@ -33,8 +36,21 @@ def _coerce_value(raw: Any) -> Any:
         if math.isfinite(val):
             return val
         return ""
-    except Exception:
+    except ValueError:
         return text
+
+
+def _as_bool(raw: Any, *, default: bool) -> bool:
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, bool):
+        return raw
+    txt = str(raw).strip().lower()
+    if txt in {"1", "true", "yes", "y", "on"}:
+        return True
+    if txt in {"0", "false", "no", "n", "off"}:
+        return False
+    return bool(default)
 
 
 def main() -> int:
@@ -48,6 +64,7 @@ def main() -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
     objective_metric_raw = str(compare_cfg.get("objective_metric", "auto_primary")).strip()
     objective_mode = str(compare_cfg.get("objective_mode", "min"))
+    require_same_input_mode = _as_bool(compare_cfg.get("require_same_input_mode"), default=True)
     primary_metric_cfg = str(compare_cfg.get("primary_metric", "")).strip()
     global_reference_mode = str(compare_cfg.get("global_reference_mode", "off")).strip().lower()
     if global_reference_mode not in {"off", "frozen"}:
@@ -77,7 +94,14 @@ def main() -> int:
             "source_leaderboard": str(lb),
             "reference_type": "frozen" if global_reference_mode == "frozen" and model_id == "global_mlp" else "candidate",
             "protocol_variant": str(row.get("protocol_variant", "")),
+            INPUT_MODE_EFFECTIVE_KEY: str(row.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower(),
         }
+        dynamic_keys.add(INPUT_MODE_EFFECTIVE_KEY)
+        if require_same_input_mode and not str(out_row.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip():
+            raise ValueError(
+                f"row for model_id={model_id} does not expose {INPUT_MODE_EFFECTIVE_KEY} "
+                "while compare.require_same_input_mode=true"
+            )
         for k, v in row.items():
             if k in {
                 "rank",
@@ -90,6 +114,7 @@ def main() -> int:
                 "source_leaderboard",
                 "reference_type",
                 "protocol_variant",
+                INPUT_MODE_EFFECTIVE_KEY,
             }:
                 continue
             out_row[str(k)] = _coerce_value(v)
@@ -100,6 +125,39 @@ def main() -> int:
 
     if global_reference_mode == "frozen" and not has_global_reference_row:
         raise ValueError("compare.global_reference_mode=frozen requires at least one row with model_id=global_mlp")
+
+    if require_same_input_mode and rows_out:
+        anchor_mode = ""
+        if global_reference_mode == "frozen":
+            for row in rows_out:
+                if str(row.get("model_id", "")) == "global_mlp":
+                    anchor_mode = str(row.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower()
+                    break
+        if not anchor_mode:
+            anchor_mode = str(rows_out[0].get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower()
+        filtered_rows: list[dict[str, Any]] = []
+        for row in rows_out:
+            row_mode = str(row.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower()
+            if row_mode == anchor_mode:
+                filtered_rows.append(row)
+                continue
+            print(
+                "[compare_selected_models] skip row due input_mode mismatch: "
+                f"model_id={row.get('model_id', '')}, "
+                f"row_mode={row_mode}, request_mode={anchor_mode}",
+                file=sys.stderr,
+            )
+        rows_out = filtered_rows
+        if not rows_out:
+            raise ValueError(
+                "compare.require_same_input_mode=true filtered out all rows due input_mode mismatch"
+            )
+        if global_reference_mode == "frozen":
+            has_global_reference_row = any(str(row.get("model_id", "")) == "global_mlp" for row in rows_out)
+            if not has_global_reference_row:
+                raise ValueError(
+                    "compare.global_reference_mode=frozen requires global_mlp row in the same input_mode bucket"
+                )
 
     if objective_metric_raw == "auto_primary":
         metric_candidates = [str(r.get("primary_metric", "")) for r in rows_out if str(r.get("primary_metric", ""))]

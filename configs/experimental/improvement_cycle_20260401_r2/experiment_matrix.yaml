@@ -1,0 +1,289 @@
+experiments:
+  - id: C3_coord_siren_control
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_coord_mlp_siren_experimental.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/C3_coord_siren_control
+        eval:
+          protocol_variant: improvement_cycle_r2_c3_coord_control
+        train:
+          coord_mlp_siren:
+            selection:
+              weights:
+                ne: 0.25
+                ni: 0.25
+                Te: 0.25
+                phi: 0.25
+            model_cfg:
+              siren:
+                fusion: split_add
+                w0_initial: 10.0
+                w0_hidden: 1.0
+
+  - id: C4_coord_siren_gated_affine
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_coord_mlp_siren_experimental.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/C4_coord_siren_gated_affine
+        eval:
+          protocol_variant: improvement_cycle_r2_c4_coord_gated_affine
+        train:
+          coord_mlp_siren:
+            selection:
+              weights:
+                ne: 0.25
+                ni: 0.25
+                Te: 0.25
+                phi: 0.25
+            model_cfg:
+              siren:
+                fusion: gated_affine
+                w0_initial: 10.0
+                w0_hidden: 1.0
+
+  - id: C5_coord_siren_gated_affine_sel
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_coord_mlp_siren_experimental.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/C5_coord_siren_gated_affine_sel
+        eval:
+          protocol_variant: improvement_cycle_r2_c5_coord_gated_affine_sel
+        train:
+          coord_mlp_siren:
+            selection:
+              weights:
+                ne: 0.20
+                ni: 0.20
+                Te: 0.30
+                phi: 0.30
+            model_cfg:
+              siren:
+                fusion: gated_affine
+                w0_initial: 10.0
+                w0_hidden: 1.0
+
+  - id: C6_coord_siren_gated_affine_sel_mt
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_coord_mlp_siren_experimental.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/C6_coord_siren_gated_affine_sel_mt
+        eval:
+          protocol_variant: improvement_cycle_r2_c6_coord_gated_affine_sel_mt
+        train:
+          coord_mlp_siren:
+            selection:
+              weights:
+                ne: 0.20
+                ni: 0.20
+                Te: 0.30
+                phi: 0.30
+            model_cfg:
+              siren:
+                fusion: gated_affine
+                w0_initial: 10.0
+                w0_hidden: 1.0
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.0
+                ni: 1.0
+                Te: 1.25
+                phi: 1.25
+
+  - id: C7_coord_siren_gated_affine_w0_res
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_coord_mlp_siren_experimental.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/C7_coord_siren_gated_affine_w0_res
+        eval:
+          protocol_variant: improvement_cycle_r2_c7_coord_gated_affine_w0_res
+        train:
+          coord_mlp_siren:
+            selection:
+              weights:
+                ne: 0.20
+                ni: 0.20
+                Te: 0.30
+                phi: 0.30
+            model_cfg:
+              siren:
+                fusion: gated_affine
+                w0_initial: 8.0
+                w0_hidden: 0.9
+                fusion_cfg:
+                  cond_gain_init: 0.8
+                  point_gain_init: 1.2
+              residual_head:
+                init_scale: 0.03
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.0
+                ni: 1.0
+                Te: 1.25
+                phi: 1.25
+
+  - id: D7_deeponet_control
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/D7_deeponet_control
+        eval:
+          protocol_variant: improvement_cycle_r2_d7_deeponet_control
+        train:
+          deeponet_plasma:
+            strict_mainline: true
+            epochs: 480
+            model_cfg:
+              missing_geom_feature_policy: error
+
+  - id: D8_deeponet_tephi_sel
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/D8_deeponet_tephi_sel
+        eval:
+          protocol_variant: improvement_cycle_r2_d8_deeponet_tephi_sel
+        train:
+          deeponet_plasma:
+            strict_mainline: true
+            epochs: 480
+            selection:
+              weights:
+                ne: 0.20
+                ni: 0.20
+                Te: 0.30
+                phi: 0.30
+            model_cfg:
+              missing_geom_feature_policy: error
+
+  - id: D9_deeponet_tephi_sel_mt
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/D9_deeponet_tephi_sel_mt
+        eval:
+          protocol_variant: improvement_cycle_r2_d9_deeponet_tephi_sel_mt
+        train:
+          deeponet_plasma:
+            strict_mainline: true
+            epochs: 480
+            selection:
+              weights:
+                ne: 0.20
+                ni: 0.20
+                Te: 0.30
+                phi: 0.30
+            model_cfg:
+              missing_geom_feature_policy: error
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.0
+                ni: 1.0
+                Te: 1.20
+                phi: 1.20
+
+  - id: D10_deeponet_fused_learned_mix
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/D10_deeponet_fused_learned_mix
+        eval:
+          protocol_variant: improvement_cycle_r2_d10_deeponet_fused_learned_mix
+        train:
+          deeponet_plasma:
+            strict_mainline: true
+            epochs: 480
+            selection:
+              weights:
+                ne: 0.20
+                ni: 0.20
+                Te: 0.30
+                phi: 0.30
+            model_cfg:
+              trunk_cond_modulation: none
+              missing_geom_feature_policy: error
+              output_path:
+                mode: fused
+                dot_skip_mode: learned_per_var
+                global_hidden_dim: 96
+                global_local:
+                  enabled: true
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.0
+                ni: 1.0
+                Te: 1.20
+                phi: 1.20
+
+  - id: U5_unetpp_attn_control
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_unetpp_attn_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/U5_unetpp_attn_control
+        eval:
+          protocol_variant: improvement_cycle_r2_u5_unetpp_attn_control
+        train:
+          unetpp_attn:
+            epochs: 120
+            lr: 0.0004
+            optimizer:
+              lr: 0.0004
+
+  - id: U6_unetpp_attn_density_bias
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_unetpp_attn_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/U6_unetpp_attn_density_bias
+        eval:
+          protocol_variant: improvement_cycle_r2_u6_unetpp_attn_density_bias
+        train:
+          unetpp_attn:
+            epochs: 120
+            lr: 0.0004
+            optimizer:
+              lr: 0.0004
+              weight_decay: 0.0005
+            selection:
+              weights:
+                ne: 0.35
+                ni: 0.35
+                Te: 0.15
+                phi: 0.15
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.40
+                ni: 1.40
+                Te: 1.0
+                phi: 1.0
+
+  - id: U7_unetpp_density_bias_port
+    base_fixture: tests/fixtures/benchmark_periodic_real_m7_unetpp_isolated_mainline.yaml
+    patch:
+      benchmark:
+        output_dir: runs/improvement_cycle_20260401_r2/U7_unetpp_density_bias_port
+        eval:
+          protocol_variant: improvement_cycle_r2_u7_unetpp_density_bias_port
+        train:
+          unetpp:
+            epochs: 120
+            lr: 0.0004
+            optimizer:
+              lr: 0.0004
+              weight_decay: 0.0005
+            selection:
+              weights:
+                ne: 0.35
+                ni: 0.35
+                Te: 0.15
+                phi: 0.15
+          loss:
+            multitask:
+              fixed_weights_by_var:
+                ne: 1.40
+                ni: 1.40
+                Te: 1.0
+                phi: 1.0

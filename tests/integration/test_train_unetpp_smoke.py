@@ -1,19 +1,17 @@
 from __future__ import annotations
 
-import os
-
-import numpy as np
 import pytest
+import numpy as np
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
 from plasma_surrogate.train.trainer import Trainer
 
+pytestmark = pytest.mark.torch_runtime
+
 
 def test_train_unetpp_smoke(tmp_path) -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     rng = np.random.default_rng(7)
     n, d, h, w = 10, 3, 8, 8

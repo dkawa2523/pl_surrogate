@@ -1,4 +1,4 @@
-# Same-Fidelity Low-Data Extensions: Codex 実装ガイド
+﻿# Same-Fidelity Low-Data Extensions: Codex 実装ガイド
 
 このディレクトリは、Codex Chat がそのまま読み込んで実装できるように、**実装順・守る契約・変更対象ファイル・テスト観点**を分割した仕様書です。
 
@@ -7,7 +7,7 @@
 - 既存 repo の中心モデルは `global_mlp`, `unet`, `fno`, `deeponet_plasma`。
 - `global_mlp` は条件ベクトル中心、`unet` / `fno` / `deeponet_plasma` は geometry / coord feature を直接使う。
 - strict contract の入口は `src/plasma_surrogate/train/model_dispatch.py`。
-- モデル追加時の接続点は `src/plasma_surrogate/models/*`, `src/plasma_surrogate/models/mlp/io.py`, `src/plasma_surrogate/train/model_dispatch.py` を基本とする。
+- モデル追加時の接続点は `src/plasma_surrogate/models/*`, `src/plasma_surrogate/models/checkpoint.py`, `src/plasma_surrogate/train/model_dispatch.py` を基本とする。
 
 ## Codex が最初に理解すべきこと
 

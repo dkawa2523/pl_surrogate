@@ -1,21 +1,32 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import json
-import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
 
 from plasma_surrogate.benchmark.runner import BenchmarkRunner
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+from tests._config_presets import runtime_table_plus_structure
+from tests._runtime_requirements import require_torch_runtime
+
+
+pytestmark = pytest.mark.benchmark_slow
+
+
+def _attach_table_plus_runtime(cfg: dict[str, Any], *, adapter_mode: str = "auto") -> None:
+    runtime_cfg = runtime_table_plus_structure(
+        feature_profile="geom_v1_mainline",
+        adapter_mode=adapter_mode,
+    )
+    cfg["runtime"] = dict(runtime_cfg)
+    cfg["benchmark"]["runtime"] = dict(runtime_cfg)
 
 
 def test_benchmark_runner_m7_fno_isolated_smoke(tmp_path: Path):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     cfg = {
             "benchmark": {
@@ -69,6 +80,7 @@ def test_benchmark_runner_m7_fno_isolated_smoke(tmp_path: Path):
             "physics": {"enabled": False},
         }
     }
+    _attach_table_plus_runtime(cfg)
     cfg_path = tmp_path / "bench_m7.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f)
@@ -109,9 +121,7 @@ def test_benchmark_runner_m7_fno_isolated_smoke(tmp_path: Path):
 
 
 def test_benchmark_runner_m7_ffno_isolated_smoke(tmp_path: Path):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     cfg = {
             "benchmark": {
@@ -176,6 +186,7 @@ def test_benchmark_runner_m7_ffno_isolated_smoke(tmp_path: Path):
             "physics": {"enabled": False},
         }
     }
+    _attach_table_plus_runtime(cfg)
     cfg_path = tmp_path / "bench_m7_ffno.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f)
@@ -202,9 +213,7 @@ def test_benchmark_runner_m7_ffno_isolated_smoke(tmp_path: Path):
 
 
 def test_benchmark_runner_m7_unetpp_attn_isolated_smoke(tmp_path: Path):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     cfg = {
         "benchmark": {
@@ -259,6 +268,7 @@ def test_benchmark_runner_m7_unetpp_attn_isolated_smoke(tmp_path: Path):
             "physics": {"enabled": False},
         }
     }
+    _attach_table_plus_runtime(cfg)
     cfg_path = tmp_path / "bench_m7_unetpp_attn.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f)
@@ -311,6 +321,25 @@ def test_benchmark_runner_m7_unetpp_attn_isolated_smoke(tmp_path: Path):
                 "siren": {"enabled": True, "fusion": "split_add", "w0_initial": 10.0, "w0_hidden": 1.0},
             },
         ),
+        (
+            "coord_mlp_pod_residual",
+            "m7_coord_mlp_pod_residual",
+            {
+                "basis": {"rank": 4, "fit_scope": "train_only", "per_var": True, "center": True},
+                "cond_hidden": [16, 16],
+                "latent_dim": 12,
+                "residual_hidden": [24, 24],
+                "residual_activation": "gelu",
+                "point_encoder": {
+                    "xy_fourier_frequencies": 4,
+                    "xy_frequency_scale": 10.0,
+                    "include_xy_raw": True,
+                    "include_aux_raw": True,
+                },
+                "coeff_loss_weight": 0.1,
+                "residual_scale_init": 0.05,
+            },
+        ),
     ],
 )
 def test_benchmark_runner_coord_mlp_experimental_smoke(
@@ -319,9 +348,7 @@ def test_benchmark_runner_coord_mlp_experimental_smoke(
     profile_name: str,
     model_cfg: dict[str, object],
 ):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     cfg = {
         "benchmark": {
@@ -330,13 +357,13 @@ def test_benchmark_runner_coord_mlp_experimental_smoke(
             "profile": profile_name,
             "phi_mode": "direct",
             "split": {"seed": 7, "ratios": [0.7, 0.15, 0.15]},
-            "preprocessing": {
-                "coord_features": {
-                    "enabled": True,
-                    "channels": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-                    "scaling": {
+                "preprocessing": {
+                    "coord_features": {
                         "enabled": True,
-                        "mode": "zscore",
+                        "channels_from_profile": "geom_v1_mainline",
+                        "scaling": {
+                            "enabled": True,
+                            "mode": "zscore",
                         "fit_scope": "train_split",
                         "mask_scope": "plasma_plus_band",
                     },
@@ -370,6 +397,7 @@ def test_benchmark_runner_coord_mlp_experimental_smoke(
             "physics": {"enabled": False},
         }
     }
+    _attach_table_plus_runtime(cfg)
     cfg_path = tmp_path / f"bench_{model_name}.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f)
@@ -386,15 +414,16 @@ def test_benchmark_runner_coord_mlp_experimental_smoke(
     if model_name == "coord_mlp_siren":
         assert resolved["coord_mlp_contract_effective"]["embedding"] == {"type": "none"}
         assert resolved["coord_mlp_contract_effective"]["siren"]["enabled"] is True
+    elif model_name == "coord_mlp_pod_residual":
+        assert resolved["coord_mlp_contract_effective"]["embedding"]["type"] == "xy_fourier_aux_raw"
+        assert resolved["coord_mlp_contract_effective"]["pod_residual"]["basis_rank_by_var"]
     else:
         assert resolved["coord_mlp_contract_effective"]["embedding"]["type"] == "fourier"
         assert resolved["coord_mlp_contract_effective"]["siren"]["enabled"] is False
 
 
 def test_benchmark_runner_deeponet_pod_experimental_smoke(tmp_path: Path):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     cfg = {
         "benchmark": {
@@ -432,6 +461,7 @@ def test_benchmark_runner_deeponet_pod_experimental_smoke(tmp_path: Path):
             "physics": {"enabled": False},
         }
     }
+    _attach_table_plus_runtime(cfg)
     cfg_path = tmp_path / "bench_deeponet_pod.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(cfg, f)
@@ -466,7 +496,17 @@ def test_benchmark_runner_scope_invalid_raises(tmp_path: Path):
             "eval_protocol": {"mode": "dual_axis", "scope": "coord_isolated"},
             "train": {"global_mlp": {"epochs": 1}},
             "physics": {"enabled": False},
-        }
+        },
+        "runtime": {
+            "input_mode": "table_only",
+            "structure": {
+                "feature_profile": "none",
+                "descriptor_profile": "none",
+                "latent_profile": "none",
+                "adapter_mode": "none",
+                "provider_mode": "fixed",
+            },
+        },
     }
     cfg_path = tmp_path / "bench_scope_mismatch.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
@@ -496,7 +536,17 @@ def test_benchmark_runner_scope_unet_profile_mismatch_raises(tmp_path: Path):
             "eval_protocol": {"mode": "dual_axis", "scope": "unet_isolated"},
             "train": {"global_mlp": {"epochs": 1}},
             "physics": {"enabled": False},
-        }
+        },
+        "runtime": {
+            "input_mode": "table_only",
+            "structure": {
+                "feature_profile": "none",
+                "descriptor_profile": "none",
+                "latent_profile": "none",
+                "adapter_mode": "none",
+                "provider_mode": "fixed",
+            },
+        },
     }
     cfg_path = tmp_path / "bench_scope_mismatch_unet.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
@@ -536,7 +586,17 @@ def test_benchmark_runner_unet_target_family_score_family_mismatch_raises(tmp_pa
                 }
             },
             "physics": {"enabled": False},
-        }
+        },
+        "runtime": {
+            "input_mode": "table_plus_structure",
+            "structure": {
+                "feature_profile": "geom_v1_mainline",
+                "descriptor_profile": "none",
+                "latent_profile": "none",
+                "adapter_mode": "auto",
+                "provider_mode": "fixed",
+            },
+        },
     }
     cfg_path = tmp_path / "bench_unet_family_mismatch.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:

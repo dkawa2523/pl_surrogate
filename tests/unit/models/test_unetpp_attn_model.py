@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import os
+import pytest
 from pathlib import Path
 
 import numpy as np
-import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
-from plasma_surrogate.models.mlp.io import build_model_from_name, load_mlp_checkpoint, save_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import build_model_from_name, load_checkpoint, save_checkpoint
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
 
-
-def _enable_torch() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+pytestmark = pytest.mark.torch_runtime
 
 
 def _spatial() -> np.ndarray:
@@ -32,9 +29,7 @@ def _spatial() -> np.ndarray:
 
 
 def test_build_unetpp_attn_smoke() -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = build_model_from_name(
         model_name="unetpp_attn",
         input_dim=3,
@@ -53,9 +48,7 @@ def test_build_unetpp_attn_smoke() -> None:
 
 
 def test_unetpp_attn_forward_shape_matches_unetpp_contract() -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     cond = np.ones((3, 3), dtype=np.float32)
     spatial = _spatial()
     base = UNetPPBaseline(
@@ -91,9 +84,7 @@ def test_unetpp_attn_forward_shape_matches_unetpp_contract() -> None:
 
 
 def test_unetpp_attn_checkpoint_roundtrip(tmp_path: Path) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = build_model_from_name(
         model_name="unetpp_attn",
         input_dim=3,
@@ -117,8 +108,8 @@ def test_unetpp_attn_checkpoint_roundtrip(tmp_path: Path) -> None:
     spatial = _spatial()
     model.set_static_spatial_features(spatial)
     pred_before = model.forward(cond)
-    save_mlp_checkpoint(model, tmp_path / "ckpt")
-    loaded = load_mlp_checkpoint(tmp_path / "ckpt")
+    save_checkpoint(model, tmp_path / "ckpt")
+    loaded = load_checkpoint(tmp_path / "ckpt")
     loaded.set_static_spatial_features(spatial)
     pred_after = loaded.forward(cond)
     assert isinstance(loaded, UNetPPBaseline)
@@ -127,9 +118,7 @@ def test_unetpp_attn_checkpoint_roundtrip(tmp_path: Path) -> None:
 
 
 def test_unetpp_attn_forward_accepts_batched_spatial_features() -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = build_model_from_name(
         model_name="unetpp_attn",
         input_dim=3,
@@ -164,9 +153,7 @@ def test_unetpp_attn_forward_accepts_batched_spatial_features() -> None:
     ],
 )
 def test_unetpp_attn_rejects_invalid_attention_cfg(attention_cfg: dict[str, object], message: str) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     conv_cfg = {
         "base_channels": 8,
         "depth": 2,

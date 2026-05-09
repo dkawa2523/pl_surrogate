@@ -6,8 +6,8 @@ from typing import Any
 import numpy as np
 import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.train.trainer import TrainOutput, Trainer
 from plasma_surrogate.train.torch_trainer import TorchTrainOutput, TorchTrainer
 
@@ -56,6 +56,8 @@ def _ctx(tmp_path: Path, model_name: str, y_vars: list[str] | None = None) -> Tr
         deeponet_poisson_meta={},
         deeponet_boundary_index={},
         deeponet_boundary_meta={},
+        input_mode_effective="table_plus_structure",
+        structure_adapter_mode_effective="auto",
         config_base_dir=tmp_path,
     )
 
@@ -107,6 +109,12 @@ def test_unet_mainline_accepts_allvars_shared(
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == {"ne", "ni", "Te", "phi"}
     assert out.extra_artifacts.get("unet_contract_effective", {}).get("target_family_effective") == "allvars"
+    assert (
+        out.extra_artifacts.get("unet_contract_effective", {})
+        .get("unet_feature_contract_effective", {})
+        .get("input_features_mode")
+        == "geom_feature_pack"
+    )
 
 
 def test_unet_mainline_auto_uniform_selection_weights_for_dynamic_targets(
@@ -190,11 +198,72 @@ def test_deeponet_requires_cond_only_branch_mode(tmp_path: Path) -> None:
         run_model_train_predict(ctx)
 
 
+def test_deeponet_rejects_invalid_missing_geom_feature_policy(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path, "deeponet_plasma")
+    ctx.run_cfg = {
+        "train": {
+            "deeponet_plasma": {
+                "epochs": 1,
+                "lr": 1e-3,
+                "target_family": "allvars",
+                "target_vars": ["ne", "ni", "Te", "phi"],
+                "selection": {
+                    "mode": "best_val_allvars_balance",
+                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
+                },
+                "input_features": {
+                    "mode": "geom_feature_pack",
+                    "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+                },
+                "operator_mode": "plain",
+                "strict_mainline": True,
+                "model_cfg": {
+                    "branch_mode": "cond_only",
+                    "trunk_input_mode": "geom_feature_pack",
+                    "missing_geom_feature_policy": "invalid_mode",
+                },
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="missing_geom_feature_policy"):
+        run_model_train_predict(ctx)
+
+
+def test_deeponet_rejects_invalid_output_path_dot_skip_mode(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path, "deeponet_plasma")
+    ctx.run_cfg = {
+        "train": {
+            "deeponet_plasma": {
+                "epochs": 1,
+                "lr": 1e-3,
+                "target_family": "allvars",
+                "target_vars": ["ne", "ni", "Te", "phi"],
+                "selection": {
+                    "mode": "best_val_allvars_balance",
+                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
+                },
+                "input_features": {
+                    "mode": "geom_feature_pack",
+                    "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+                },
+                "operator_mode": "plain",
+                "strict_mainline": True,
+                "model_cfg": {
+                    "branch_mode": "cond_only",
+                    "trunk_input_mode": "geom_feature_pack",
+                    "output_path": {"dot_skip_mode": "invalid"},
+                },
+            }
+        }
+    }
+    with pytest.raises(ValueError, match="dot_skip_mode"):
+        run_model_train_predict(ctx)
+
+
 def test_deeponet_mainline_runs_with_plain_cond_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled")
+    require_torch_runtime()
     ctx = _ctx(tmp_path, "deeponet_plasma")
     ctx.run_cfg = {
         "train": {
@@ -227,4 +296,36 @@ def test_deeponet_mainline_runs_with_plain_cond_only(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == {"ne", "ni", "Te", "phi"}
-    assert out.extra_artifacts.get("deeponet_contract_effective", {}).get("target_family_effective") == "allvars"
+    contract = out.extra_artifacts.get("deeponet_contract_effective", {})
+    assert contract.get("target_family_effective") == "allvars"
+    assert contract.get("missing_geom_feature_policy_effective") == "warn_zero"
+    assert contract.get("output_path_dot_skip_mode_effective") == "fixed"
+
+
+def test_train_dispatch_result_contains_runtime_effective_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ctx = _ctx(tmp_path, "global_mlp")
+    ctx.input_mode_effective = "table_only"
+    ctx.structure_adapter_mode_effective = "none"
+    ctx.run_cfg = {
+        "train": {
+            "global_mlp": {
+                "epochs": 1,
+                "lr": 1e-3,
+                "model_cfg": {"backend": "numpy"},
+            }
+        }
+    }
+    monkeypatch.setattr(
+        Trainer,
+        "run_global",
+        lambda self, model, cond_train, y_train, cond_val, y_val, **kwargs: TrainOutput(
+            history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}],
+            model=model,
+        ),
+    )
+
+    out = run_model_train_predict(ctx)
+    assert out.extra_artifacts["input_mode_effective"] == "table_only"
+    assert out.extra_artifacts["structure_adapter_mode_effective"] == "none"

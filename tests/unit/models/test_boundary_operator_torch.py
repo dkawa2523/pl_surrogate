@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import pytest
-
-from plasma_surrogate.core.torch_backend import require_torch, torch_runtime_available
+from plasma_surrogate.core.torch_backend import require_torch
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.deeponet.boundary_operator_torch import BoundaryOperatorTorch
+
+pytestmark = pytest.mark.torch_runtime
 
 
 def test_boundary_operator_torch_predict_target_shape():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     op = BoundaryOperatorTorch(primary_qoi_key="Gamma_i")
     log_ne = torch.ones((2, 1, 8, 8), dtype=torch.float32)
@@ -20,8 +21,7 @@ def test_boundary_operator_torch_predict_target_shape():
 
 
 def test_boundary_operator_torch_predict_target_with_sample_idx():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     op = BoundaryOperatorTorch(primary_qoi_key="Gamma_i")
     log_ne = torch.arange(2 * 1 * 8 * 8, dtype=torch.float32).reshape(2, 1, 8, 8)

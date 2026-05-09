@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,10 +13,45 @@ from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.dataset_io import load_dataset
 from plasma_surrogate.core.feature_cache import prepare_feature_cache
+from plasma_surrogate.core.input_modes import (
+    build_input_mode_effective_metadata,
+    normalize_input_mode_cfg,
+    resolve_benchmark_runtime_controls,
+    validate_input_mode_cfg,
+)
 from plasma_surrogate.core.run_bundle import RunBundle, RunBundleLoader, ensure_preprocess_contract
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.data.geometry_provider import GeometryProviderLike, build_geometry_provider
 from plasma_surrogate.features.geometry_feature_store import GeometryFeatureStore, hash_json
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
+
+
+def resolve_effective_benchmark_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Resolve benchmark-local effective config with runtime precedence and validation."""
+
+    root_cfg = copy.deepcopy(dict(cfg or {}))
+    benchmark_cfg_raw = dict(root_cfg.get("benchmark", root_cfg))
+    runtime_raw: dict[str, Any] | None = None
+    benchmark_runtime = benchmark_cfg_raw.get("runtime")
+    root_runtime = root_cfg.get("runtime")
+    if isinstance(benchmark_runtime, dict):
+        if isinstance(root_runtime, dict):
+            norm_bench_runtime = dict(normalize_input_mode_cfg({"runtime": benchmark_runtime}).get("runtime", {}))
+            norm_root_runtime = dict(normalize_input_mode_cfg({"runtime": root_runtime}).get("runtime", {}))
+            if norm_bench_runtime != norm_root_runtime:
+                raise ValueError(
+                    "benchmark.runtime conflicts with top-level runtime; "
+                    "benchmark runs require a single runtime contract"
+                )
+        runtime_raw = dict(benchmark_runtime)
+    else:
+        if isinstance(root_runtime, dict):
+            runtime_raw = dict(root_runtime)
+    if runtime_raw is not None:
+        benchmark_cfg_raw["runtime"] = copy.deepcopy(runtime_raw)
+    effective = normalize_input_mode_cfg(benchmark_cfg_raw)
+    validate_input_mode_cfg(effective)
+    resolve_benchmark_runtime_controls(effective)
+    return effective
 
 
 @dataclass
@@ -27,7 +63,7 @@ class BenchmarkDataContext:
     y: np.ndarray
     cond_scaled: np.ndarray
     y_scaled: np.ndarray
-    geom_provider: FixedGeometryProvider
+    geom_provider: GeometryProviderLike
     feature_store: GeometryFeatureStore
     feature_meta: dict[str, Any]
     profile_lock: dict[str, Any]
@@ -62,6 +98,8 @@ def build_benchmark_data_context(
     *,
     profile_lock: dict[str, Any],
 ) -> BenchmarkDataContext:
+    cfg = resolve_effective_benchmark_cfg(cfg)
+    input_mode_meta = build_input_mode_effective_metadata(cfg)
     requested_axis_mode = str(
         cfg.get(
             "axis_mode",
@@ -84,7 +122,8 @@ def build_benchmark_data_context(
     n_cases = len(dataset.cases)
     h, w = dataset.shape
     cond_order = dataset.cond_order
-    geom_provider = FixedGeometryProvider(dataset.geometry_root)
+    provider_mode = str(input_mode_meta.get("geometry_provider_mode_effective", "fixed"))
+    geom_provider = build_geometry_provider(dataset.geometry_root, provider_mode=provider_mode)
     feature_store, feature_meta = prepare_feature_cache(
         run_root=output_root,
         geometry_provider=geom_provider,
@@ -147,7 +186,12 @@ def build_benchmark_data_context(
     if deeponet_sampling_cfg:
         pre_cfg["sampling"] = {"deeponet": deeponet_sampling_cfg}
 
-    pre = PreprocessRunner(pre_cfg, output_root / "preprocessing")
+    pre = PreprocessRunner(
+        pre_cfg,
+        output_root / "preprocessing",
+        runtime_input_mode_meta=input_mode_meta,
+        runtime_cfg=dict(cfg.get("runtime", {})),
+    )
     pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
     ensure_preprocess_contract(output_root)
     bundle = RunBundleLoader.load(output_root)
@@ -261,6 +305,7 @@ def build_benchmark_data_context(
             "boundary_operator": {"index": deeponet_boundary_index, "meta": deeponet_boundary_meta},
             "primary_qoi_key": profile_lock["primary_qoi_key"],
         },
+        **input_mode_meta,
     }
 
     return BenchmarkDataContext(

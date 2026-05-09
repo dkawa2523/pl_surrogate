@@ -1,23 +1,25 @@
 from __future__ import annotations
 
-import os
+import pytest
 from pathlib import Path
 
-import pytest
+
 import yaml
 
 from plasma_surrogate.cli.main import main
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+from tests._config_presets import runtime_table_only
+from tests._runtime_requirements import require_torch_runtime
+
+pytestmark = pytest.mark.torch_runtime
 
 
 def test_train_pod_deeponet_smoke(tmp_path: Path) -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     run_dir = tmp_path / "pod_deeponet_train"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_only(),
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 9},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
@@ -56,4 +58,3 @@ def test_train_pod_deeponet_smoke(tmp_path: Path) -> None:
     assert main(["preprocess", "--config", str(cfg_path)]) == 0
     assert main(["train", "--config", str(cfg_path)]) == 0
     assert (run_dir / "checkpoints" / "meta.json").exists()
-

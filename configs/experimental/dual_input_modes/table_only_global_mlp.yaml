@@ -17,10 +17,11 @@ dataset:
 
 preprocessing:
   coord_features:
-    channels: [x, y, distance_signed, distance_any, mask_plasma]
+    enabled: false  # table_only: geometry is output context only
 
 train:
   models: [global_mlp]
+  # global_mlp is table_only only; table_plus_structure is rejected at dispatch entry.
   global_mlp:
     target_family: allvars
     target_vars: [log_ne, Te, phi]

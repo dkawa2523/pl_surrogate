@@ -7,7 +7,7 @@ This script compares spatial field maps across selected model rows in
 2) per-variable map comparison for the mean over N cases
 
 Usage example:
-  PYTHONPATH=src .venv-torch/bin/python scripts/plot_spatial_distribution_summary.py \
+  python scripts/plot_spatial_distribution_summary.py \
     --compare-csv runs/.../selected_models_comparison.csv \
     --out-dir runs/.../plots \
     --protocol interp \

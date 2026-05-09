@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,7 +11,25 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.core.input_modes import (
+    DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY,
+    GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
+    INPUT_MODE_EFFECTIVE_KEY,
+    STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+    STRUCTURE_FEATURE_PROFILE_EFFECTIVE_KEY,
+    STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+    TABLE_ONLY,
+    TABLE_PLUS_STRUCTURE,
+    build_input_mode_effective_metadata,
+    normalize_input_mode_cfg,
+    validate_input_mode_cfg,
+)
+from plasma_surrogate.data.geometry_provider import build_geometry_provider
+from plasma_surrogate.features.structure_feature_registry import (
+    resolve_spatial_channels_for_feature_profile,
+    validate_coord_feature_channels,
+)
+from plasma_surrogate.features.structure_descriptors import build_structure_descriptor
 from plasma_surrogate.features.geometry_feature_store import hash_json
 from plasma_surrogate.preprocessing.sampling import (
     build_deeponet_indices,
@@ -27,18 +46,6 @@ from plasma_surrogate.preprocessing.split import (
     build_extrapolation_split,
     build_interpolation_overlap_split_with_status,
     build_interpolation_split,
-)
-
-
-_ALLOWED_COORD_FEATURE_CHANNELS = (
-    "x",
-    "y",
-    "distance_signed",
-    "distance_any",
-    "mask_plasma",
-    "normal_x",
-    "normal_y",
-    "curvature_proxy",
 )
 
 
@@ -90,10 +97,184 @@ class PreprocessOutput:
 class PreprocessRunner:
     """Minimal implementation for cycle1 preprocessing outputs."""
 
-    def __init__(self, cfg: dict[str, Any], output_dir: str | Path):
+    def __init__(
+        self,
+        cfg: dict[str, Any],
+        output_dir: str | Path,
+        *,
+        runtime_input_mode_meta: dict[str, Any] | None = None,
+        runtime_cfg: dict[str, Any] | None = None,
+    ):
         self.cfg = cfg
         self.output_dir = Path(output_dir)
         self.store = ArtifactStore(self.output_dir)
+        self.runtime_cfg = dict(runtime_cfg or {})
+        self.runtime_input_mode_meta = dict(runtime_input_mode_meta or {})
+        if self.runtime_cfg:
+            normalized = normalize_input_mode_cfg({"runtime": self.runtime_cfg})
+            validate_input_mode_cfg(normalized)
+            self.runtime_cfg = dict(normalized.get("runtime", {}))
+            runtime_meta = build_input_mode_effective_metadata(normalized)
+            existing_mode = str(self.runtime_input_mode_meta.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower()
+            runtime_mode = str(runtime_meta.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower()
+            if existing_mode and runtime_mode and existing_mode != runtime_mode:
+                raise ValueError(
+                    "runtime_input_mode_meta.input_mode_effective conflicts with runtime_cfg.input_mode: "
+                    f"meta={existing_mode!r}, runtime={runtime_mode!r}"
+                )
+            self.runtime_input_mode_meta = {**runtime_meta, **self.runtime_input_mode_meta}
+        self.input_mode_effective = str(
+            self.runtime_input_mode_meta.get(INPUT_MODE_EFFECTIVE_KEY, TABLE_PLUS_STRUCTURE)
+        ).strip().lower()
+        self._validate_table_only_contract()
+
+    def _validate_table_only_contract(self) -> None:
+        if self.input_mode_effective != TABLE_ONLY:
+            return
+        structure = dict(self.runtime_cfg.get("structure", {}))
+        feature_profile = str(structure.get("feature_profile", "none")).strip().lower()
+        descriptor_profile = str(structure.get("descriptor_profile", "none")).strip().lower()
+        latent_profile = str(structure.get("latent_profile", "none")).strip().lower()
+        if feature_profile != "none" or descriptor_profile != "none" or latent_profile != "none":
+            raise ValueError(
+                "runtime.input_mode=table_only requires runtime.structure feature/descriptor/latent profiles to be none"
+            )
+        coord_features_cfg = dict(self.cfg.get("coord_features", {}))
+        channels_from_profile = str(coord_features_cfg.get("channels_from_profile", "")).strip().lower()
+        if channels_from_profile:
+            raise ValueError(
+                "runtime.input_mode=table_only does not allow preprocessing.coord_features.channels_from_profile"
+            )
+
+    def _resolve_runtime_feature_profile(self) -> str:
+        profile = str(
+            self.runtime_input_mode_meta.get(
+                STRUCTURE_FEATURE_PROFILE_EFFECTIVE_KEY,
+                dict(self.runtime_cfg.get("structure", {})).get("feature_profile", "none"),
+            )
+        ).strip().lower()
+        return profile or "none"
+
+    def _resolve_runtime_descriptor_profile(self) -> str:
+        profile = str(
+            self.runtime_input_mode_meta.get(
+                STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+                dict(self.runtime_cfg.get("structure", {})).get("descriptor_profile", "none"),
+            )
+        ).strip().lower()
+        return profile or "none"
+
+    def _resolve_runtime_latent_profile(self) -> str:
+        profile = str(
+            self.runtime_input_mode_meta.get(
+                STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+                dict(self.runtime_cfg.get("structure", {})).get("latent_profile", "none"),
+            )
+        ).strip().lower()
+        return profile or "none"
+
+    def _build_descriptor_artifact(
+        self,
+        *,
+        geom: Any,
+        descriptor_profile: str,
+    ) -> dict[str, Any]:
+        descriptor = build_structure_descriptor(descriptor_profile, geom)
+        pack_rel = "features/structure_descriptor_pack.npz"
+        self.store.save_npz(pack_rel, **descriptor.to_npz_payload())
+        pack_path = Path(pack_rel)
+        meta_rel = str(pack_path.parent / f"{pack_path.stem}_meta.json")
+        meta_payload = descriptor.to_meta_dict()
+        self.store.save_json(meta_rel, meta_payload)
+        return {
+            "structure_descriptor_pack_path": pack_rel,
+            "structure_descriptor_pack_meta_path": meta_rel,
+            "structure_descriptor_dim": int(meta_payload["descriptor_dim"]),
+            "structure_descriptor_n_parts": int(meta_payload["n_parts"]),
+        }
+
+    def _resolve_latent_artifact(
+        self,
+        *,
+        latent_profile: str,
+        geometry_root: str | Path,
+    ) -> dict[str, Any]:
+        if latent_profile == "none":
+            return {
+                "latent_feature_pack_path": "",
+                "latent_feature_pack_meta_path": "",
+                "latent_feature_dim": 0,
+                DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: False,
+            }
+        dst_rel = "features/latent_feature_pack.npz"
+        dst_path = self.output_dir / dst_rel
+        if not dst_path.exists():
+            base = Path(geometry_root)
+            candidates = [
+                base / "geometry" / "latent_feature_pack.npz",
+                base / "latent_feature_pack.npz",
+            ]
+            src = next((path for path in candidates if path.exists()), None)
+            if src is None:
+                raise ValueError(
+                    "runtime.structure.latent_profile is enabled but latent artifact is missing. "
+                    "Expected one of: "
+                    f"{[str(p) for p in candidates]} or existing {dst_path}"
+                )
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst_path)
+        with np.load(dst_path, allow_pickle=True) as data:
+            if "vector" not in data.files:
+                raise ValueError(
+                    f"latent artifact must include 'vector' key: {dst_path}"
+                )
+            vector = np.asarray(data["vector"], dtype=np.float32).reshape(-1)
+            if vector.size < 1:
+                raise ValueError(f"latent artifact vector must be non-empty: {dst_path}")
+            if not np.all(np.isfinite(vector)):
+                raise ValueError(f"latent artifact vector must be finite: {dst_path}")
+            names_arr = data["feature_names"] if "feature_names" in data.files else np.asarray([], dtype=object)
+            names = [str(v) for v in np.asarray(names_arr).reshape(-1).tolist()]
+            if names and len(names) != int(vector.shape[0]):
+                raise ValueError(
+                    "latent artifact feature_names length mismatch: "
+                    f"len(names)={len(names)}, dim={int(vector.shape[0])}"
+                )
+        meta_rel = "features/latent_feature_pack_meta.json"
+        meta_payload = {
+            "profile": str(latent_profile),
+            "latent_dim": int(vector.shape[0]),
+            "feature_names": names,
+        }
+        self.store.save_json(meta_rel, meta_payload)
+        return {
+            "latent_feature_pack_path": dst_rel,
+            "latent_feature_pack_meta_path": meta_rel,
+            "latent_feature_dim": int(vector.shape[0]),
+            DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: True,
+        }
+
+    def _resolve_coord_feature_channels(self, coord_features_cfg: dict[str, Any]) -> list[str]:
+        if self.input_mode_effective == TABLE_PLUS_STRUCTURE:
+            runtime_profile = self._resolve_runtime_feature_profile()
+            if "channels" in coord_features_cfg:
+                raise ValueError(
+                    "runtime.input_mode=table_plus_structure does not allow "
+                    "preprocessing.coord_features.channels; use runtime.structure.feature_profile"
+                )
+            channels_from_profile = str(coord_features_cfg.get("channels_from_profile", "")).strip().lower()
+            if channels_from_profile and channels_from_profile != runtime_profile:
+                raise ValueError(
+                    "preprocessing.coord_features.channels_from_profile must match runtime.structure.feature_profile "
+                    f"for table_plus_structure: expected={runtime_profile!r}, got={channels_from_profile!r}"
+                )
+            return list(resolve_spatial_channels_for_feature_profile(runtime_profile))
+
+        coord_feature_channels_raw = coord_features_cfg.get(
+            "channels",
+            ["x", "y", "distance_signed", "distance_any", "mask_plasma"],
+        )
+        return list(validate_coord_feature_channels(coord_feature_channels_raw))
 
     def run(self, cases: list[dict[str, Any]], geometry_root: str | Path) -> PreprocessOutput:
         split_cfg = self.cfg.get("split", {})
@@ -180,7 +361,28 @@ class PreprocessRunner:
             raise ValueError(
                 "preprocessing.coord_grid_contract.require_requested_source must be one of: warn, error, off"
             )
-        geom = FixedGeometryProvider(geometry_root, coord_grid_source=coord_grid_source).get()
+        provider_mode = str(
+            self.runtime_input_mode_meta.get(
+                GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
+                dict(self.runtime_cfg.get("structure", {})).get("provider_mode", "fixed"),
+            )
+        ).strip().lower() or "fixed"
+        descriptor_profile = self._resolve_runtime_descriptor_profile()
+        latent_profile = self._resolve_runtime_latent_profile()
+        geom_provider = build_geometry_provider(
+            geometry_root,
+            provider_mode=provider_mode,
+            coord_grid_source=coord_grid_source,
+        )
+        geom_ref: dict[str, Any] = {"geom_id": "default"}
+        if (
+            self.input_mode_effective == TABLE_PLUS_STRUCTURE
+            and descriptor_profile != "none"
+            and provider_mode == "parametric_parts"
+        ):
+            # Use default parametric-parts reconstruction so descriptor lane receives part masks.
+            geom_ref["geom_param"] = {}
+        geom = geom_provider.get(geom_ref)
         raw_coord_grid = np.asarray(geom.coord_grid, dtype=np.float32)
         if raw_coord_grid.ndim != 3:
             raise ValueError(f"Geometry coord_grid must be rank-3, got shape={raw_coord_grid.shape}")
@@ -412,21 +614,7 @@ class PreprocessRunner:
         coord_features_scaling_band = float(coord_features_scaling_cfg.get("chamber_band_px", 2.0))
         if coord_features_scaling_band < 0.0:
             raise ValueError("preprocessing.coord_features.scaling.chamber_band_px must be >= 0")
-        coord_feature_channels_raw = coord_features_cfg.get(
-            "channels",
-            ["x", "y", "distance_signed", "distance_any", "mask_plasma"],
-        )
-        if not isinstance(coord_feature_channels_raw, list) or len(coord_feature_channels_raw) == 0:
-            raise ValueError("preprocessing.coord_features.channels must be a non-empty list")
-        coord_feature_channels = [str(v) for v in coord_feature_channels_raw]
-        unknown_channels = [v for v in coord_feature_channels if v not in _ALLOWED_COORD_FEATURE_CHANNELS]
-        if unknown_channels:
-            raise ValueError(
-                "preprocessing.coord_features.channels contains unsupported entries: "
-                f"{unknown_channels}; allowed={list(_ALLOWED_COORD_FEATURE_CHANNELS)}"
-            )
-        if len(set(coord_feature_channels)) != len(coord_feature_channels):
-            raise ValueError("preprocessing.coord_features.channels must not contain duplicates")
+        coord_feature_channels = self._resolve_coord_feature_channels(coord_features_cfg)
         coord_feature_rel_path = str(coord_features_cfg.get("output", "features/coord_feature_pack.npz"))
         coord_x, coord_y = _coord_xy_maps(raw_coord_grid)
         coord_feature_maps = {
@@ -658,49 +846,71 @@ class PreprocessRunner:
                     f"{coord_source_requested} but applied {coord_source_applied}"
                 )
 
-        self.store.save_json(
-            "validation/report.json",
-            {
-                "status": "ok",
-                "n_cases": len(cases),
-                "coord_grid_source": coord_source_applied,
-                "coord_grid_source_requested": coord_source_requested,
-                "coord_grid_source_applied": coord_source_applied,
-                "coord_grid_contract_status": coord_contract_status,
-                "distance_signed_negative_ratio": negative_ratio,
-                "distance_contract_status": distance_contract_status,
-                "coord_value_range_raw": {
-                    "x": [float(np.min(coord_rows[:, 0])), float(np.max(coord_rows[:, 0]))],
-                    "y": [float(np.min(coord_rows[:, 1])), float(np.max(coord_rows[:, 1]))],
+        descriptor_artifact_meta = {
+            "structure_descriptor_pack_path": "",
+            "structure_descriptor_pack_meta_path": "",
+            "structure_descriptor_dim": 0,
+            "structure_descriptor_n_parts": 0,
+        }
+        if self.input_mode_effective == TABLE_PLUS_STRUCTURE and descriptor_profile != "none":
+            descriptor_artifact_meta = self._build_descriptor_artifact(
+                geom=geom,
+                descriptor_profile=descriptor_profile,
+            )
+        latent_artifact_meta = self._resolve_latent_artifact(
+            latent_profile=latent_profile,
+            geometry_root=geometry_root,
+        ) if self.input_mode_effective == TABLE_PLUS_STRUCTURE else {
+            "latent_feature_pack_path": "",
+            "latent_feature_pack_meta_path": "",
+            "latent_feature_dim": 0,
+            DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: False,
+        }
+
+        report_payload = {
+            "status": "ok",
+            "n_cases": len(cases),
+            "coord_grid_source": coord_source_applied,
+            "coord_grid_source_requested": coord_source_requested,
+            "coord_grid_source_applied": coord_source_applied,
+            "coord_grid_contract_status": coord_contract_status,
+            "distance_signed_negative_ratio": negative_ratio,
+            "distance_contract_status": distance_contract_status,
+            "coord_value_range_raw": {
+                "x": [float(np.min(coord_rows[:, 0])), float(np.max(coord_rows[:, 0]))],
+                "y": [float(np.min(coord_rows[:, 1])), float(np.max(coord_rows[:, 1]))],
+            },
+            "coord_value_range_scaled": {
+                "zscore": {
+                    "x": [float(np.min(coord_rows_z[:, 0])), float(np.max(coord_rows_z[:, 0]))],
+                    "y": [float(np.min(coord_rows_z[:, 1])), float(np.max(coord_rows_z[:, 1]))],
                 },
-                "coord_value_range_scaled": {
-                    "zscore": {
-                        "x": [float(np.min(coord_rows_z[:, 0])), float(np.max(coord_rows_z[:, 0]))],
-                        "y": [float(np.min(coord_rows_z[:, 1])), float(np.max(coord_rows_z[:, 1]))],
-                    },
-                    "minmax": {
-                        "x": [float(np.min(coord_rows_mm[:, 0])), float(np.max(coord_rows_mm[:, 0]))],
-                        "y": [float(np.min(coord_rows_mm[:, 1])), float(np.max(coord_rows_mm[:, 1]))],
-                    },
-                },
-                "coord_scaler_status": "ok",
-                "coord_features_enabled": bool(coord_features_enabled),
-                "coord_feature_channels": coord_feature_channels,
-                "coord_feature_pack_path": coord_feature_rel_path if coord_features_enabled else "",
-                "coord_feature_scaling_enabled": bool(coord_features_scaling_enabled),
-                "coord_feature_scaling_mode": str(coord_features_scaling_mode),
-                "distance_transform_stats_path": "scalers/distance_transform_stats.json",
-                "distance_transform_stats_enabled": bool(distance_stats_enabled),
-                "distance_transform_tau_auto": {
-                    "signed_tanh_tau_auto": float(signed_tanh_tau_auto),
-                    "proximity_tau_auto": float(proximity_tau_auto),
-                },
-                "distance_transform_quantiles": {
-                    "signed_quantile": float(signed_q_raw),
-                    "proximity_quantile": float(proximity_q_raw),
+                "minmax": {
+                    "x": [float(np.min(coord_rows_mm[:, 0])), float(np.max(coord_rows_mm[:, 0]))],
+                    "y": [float(np.min(coord_rows_mm[:, 1])), float(np.max(coord_rows_mm[:, 1]))],
                 },
             },
-        )
+            "coord_scaler_status": "ok",
+            "coord_features_enabled": bool(coord_features_enabled),
+            "coord_feature_channels": coord_feature_channels,
+            "coord_feature_pack_path": coord_feature_rel_path if coord_features_enabled else "",
+            "coord_feature_scaling_enabled": bool(coord_features_scaling_enabled),
+            "coord_feature_scaling_mode": str(coord_features_scaling_mode),
+            "distance_transform_stats_path": "scalers/distance_transform_stats.json",
+            "distance_transform_stats_enabled": bool(distance_stats_enabled),
+            "distance_transform_tau_auto": {
+                "signed_tanh_tau_auto": float(signed_tanh_tau_auto),
+                "proximity_tau_auto": float(proximity_tau_auto),
+            },
+            "distance_transform_quantiles": {
+                "signed_quantile": float(signed_q_raw),
+                "proximity_quantile": float(proximity_q_raw),
+            },
+            **descriptor_artifact_meta,
+            **latent_artifact_meta,
+        }
+        report_payload.update(self.runtime_input_mode_meta)
+        self.store.save_json("validation/report.json", report_payload)
 
         return PreprocessOutput(
             split=split,

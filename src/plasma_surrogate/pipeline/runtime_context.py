@@ -10,8 +10,14 @@ import yaml
 
 from plasma_surrogate.core.dataset_io import load_dataset
 from plasma_surrogate.core.feature_cache import prepare_feature_cache
+from plasma_surrogate.core.input_modes import (
+    GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
+    build_input_mode_effective_metadata,
+    normalize_input_mode_cfg,
+    validate_input_mode_cfg,
+)
 from plasma_surrogate.core.run_bundle import RunBundle, RunBundleLoader, ensure_preprocess_contract, require_artifacts
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.data.geometry_provider import build_geometry_provider
 from plasma_surrogate.features.geometry_feature_store import GeometryFeatureStore
 
 
@@ -28,7 +34,10 @@ class RuntimeContext:
 
 def _load_cfg(config_path: str | Path) -> dict[str, Any]:
     with Path(config_path).open("r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+        cfg = yaml.safe_load(f) or {}
+    cfg_norm = normalize_input_mode_cfg(cfg)
+    validate_input_mode_cfg(cfg_norm)
+    return cfg_norm
 
 
 def _resolve_axis_mode(cfg: dict[str, Any], *, fallback: str = "steady") -> str:
@@ -45,9 +54,12 @@ def build_preprocess_context(config_path: str | Path) -> RuntimeContext:
     run_dir = Path(cfg.get("run_dir", "runs/cycle1"))
     dataset = load_dataset(cfg, run_dir)
     axis_mode = _resolve_axis_mode(cfg, fallback="steady")
+    input_mode_meta = build_input_mode_effective_metadata(cfg)
+    provider_mode = str(input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed"))
+    geometry_provider = build_geometry_provider(dataset.geometry_root, provider_mode=provider_mode)
     feature_store, feature_meta = prepare_feature_cache(
         run_root=run_dir,
-        geometry_provider=FixedGeometryProvider(dataset.geometry_root),
+        geometry_provider=geometry_provider,
         features_cfg=cfg.get("features", {}),
         axis_mode=axis_mode,
         axis_value=0.0,
@@ -115,4 +127,3 @@ def build_infer_context(
         feature_meta=ctx.feature_meta,
         bundle=bundle,
     )
-

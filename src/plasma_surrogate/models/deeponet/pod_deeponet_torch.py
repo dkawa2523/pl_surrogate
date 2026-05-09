@@ -6,7 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
-from plasma_surrogate.models._torch_spatial_common import _load_state_dict_numpy_torch, _state_dict_numpy_torch
+from plasma_surrogate.models._torch_spatial_common import (
+    _load_state_dict_numpy_torch,
+    _resolve_torch_device,
+    _state_dict_numpy_torch,
+)
 
 
 POD_DEEPONET_IMPL_VERSION = "deeponet_pod_v2_coeffnorm"
@@ -199,14 +203,16 @@ class PODDeepONetTorch:
         basis_rank_by_var: dict[str, int] | None = None,
         seed: int = 0,
         backend: str = "torch",
+        model_type: str = "deeponet_pod",
     ) -> None:
+        self.model_type = str(model_type).strip().lower() or "deeponet_pod"
         self.input_dim = int(input_dim)
         self.grid_shape = tuple(int(v) for v in grid_shape)
         self.out_channels = int(out_channels)
         self.output_keys = list(output_keys or [f"out_{i}" for i in range(self.out_channels)])
         self.backend = str(backend).strip().lower()
         if self.backend != "torch":
-            raise ValueError("train.deeponet_pod.model_cfg.backend must be torch")
+            raise ValueError(f"{_cfg_prefix(self.model_type)}.model_cfg.backend must be torch")
         self.model_cfg = normalize_pod_deeponet_model_cfg(model_cfg, model_type=self.model_type)
         self.coeff_loss_weight = float(self.model_cfg.get("coeff_loss_weight", 0.1))
         if list(self.output_keys) != list(self.output_keys[: self.out_channels]):
@@ -250,6 +256,7 @@ class PODDeepONetTorch:
         from plasma_surrogate.core.torch_backend import require_torch
 
         self.torch = require_torch()
+        self.device = _resolve_torch_device(self.torch)
         self.torch.manual_seed(int(seed))
         nn = self.torch.nn
         hidden = [int(v) for v in list(self.model_cfg["hidden"])]
@@ -282,6 +289,7 @@ class PODDeepONetTorch:
                 self.torch.as_tensor(basis_bundle.coeff_std_by_var[name], dtype=self.torch.float32),
                 persistent=False,
             )
+        self.net.to(self.device)
         self._torch_last_out = None
         self._torch_last_coeff_norm = None
 
@@ -505,20 +513,22 @@ class PODDeepONetTorch:
             torch=self.torch,
             net=self.net,
             empty_message="PODDeepONetTorch state dict does not contain expected torch::* weights",
+            device=self.device,
         )
+        self.net.to(self.device)
         for name in self.basis_keys:
             basis_key = f"basis::{name}"
             mean_key = f"mean::{name}"
             coeff_std_key = f"coeff_std::{name}"
             if basis_key in state:
                 arr = np.asarray(state[basis_key], dtype=np.float32)
-                self._basis_tensor(name).data.copy_(self.torch.as_tensor(arr, dtype=self.torch.float32))
+                self._basis_tensor(name).data.copy_(self.torch.as_tensor(arr, dtype=self.torch.float32, device=self.device))
             if mean_key in state:
                 arr = np.asarray(state[mean_key], dtype=np.float32)
-                self._mean_tensor(name).data.copy_(self.torch.as_tensor(arr, dtype=self.torch.float32))
+                self._mean_tensor(name).data.copy_(self.torch.as_tensor(arr, dtype=self.torch.float32, device=self.device))
             if coeff_std_key in state:
                 arr = np.asarray(state[coeff_std_key], dtype=np.float32).reshape(-1)
-                self._coeff_std_tensor(name).data.copy_(self.torch.as_tensor(arr, dtype=self.torch.float32))
+                self._coeff_std_tensor(name).data.copy_(self.torch.as_tensor(arr, dtype=self.torch.float32, device=self.device))
             else:
                 raise ValueError(
                     "legacy deeponet_pod checkpoint format is not supported; missing coeff_std::<var> entries"

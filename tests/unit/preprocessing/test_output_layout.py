@@ -7,6 +7,10 @@ import numpy as np
 
 from plasma_surrogate.core.synthetic_data import build_synthetic_dataset
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
+from tests._config_presets import (
+    default_target_transforms_ne_ni_te_phi,
+    runtime_table_plus_structure,
+)
 
 
 def test_preprocess_saves_output_layout_and_train_only_cond_stats(tmp_path: Path):
@@ -18,16 +22,10 @@ def test_preprocess_saves_output_layout_and_train_only_cond_stats(tmp_path: Path
     pre = PreprocessRunner(
         {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
-            "scalers": {
-                "target_transforms": {
-                    "ne": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "ni": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "Te": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "phi": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "all", "clip": {"mode": "none"}},
-                }
-            },
+            "scalers": {"target_transforms": default_target_transforms_ne_ni_te_phi()},
         },
         run_dir / "preprocessing",
+        runtime_cfg=runtime_table_plus_structure(),
     )
     output = pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
 

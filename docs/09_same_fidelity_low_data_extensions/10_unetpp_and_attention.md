@@ -42,7 +42,7 @@
 - `src/plasma_surrogate/models/unet/unetpp.py`
 
 ### 変更
-- `src/plasma_surrogate/models/mlp/io.py`
+- `src/plasma_surrogate/models/checkpoint.py`
 - `src/plasma_surrogate/train/model_dispatch.py`
 - `tests/unit/models/` 配下の該当テスト
 - `tests/integration/` 配下の smoke test
@@ -131,7 +131,7 @@ attention_cfg:
 
 ## 6. builder / checkpoint 実装
 
-## 6.1 `models/mlp/io.py`
+## 6.1 `models/checkpoint.py`
 
 ### `build_model_from_name` に追加
 
@@ -167,7 +167,8 @@ if name == "unetpp_attn":
 }
 ```
 
-`load_mlp_checkpoint` に `model_type in {"unetpp", "unetpp_attn"}` を追加する。
+`models/checkpoint.py` の公開 API に `model_type in {"unetpp", "unetpp_attn"}` の
+save/load 対応を追加する。
 
 ## 7. `model_dispatch.py` 実装
 

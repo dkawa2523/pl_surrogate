@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.train.trainer import TrainOutput, Trainer
 
 
@@ -23,9 +22,6 @@ class _IdentityTransforms:
     def inverse_fields(self, arr: np.ndarray) -> np.ndarray:
         return np.asarray(arr, dtype=np.float32)
 
-
-def _enable_torch() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
 
 
 def _ctx(tmp_path: Path, y_vars: list[str] | None = None) -> TrainDispatchContext:
@@ -60,6 +56,8 @@ def _ctx(tmp_path: Path, y_vars: list[str] | None = None) -> TrainDispatchContex
         deeponet_poisson_meta={},
         deeponet_boundary_index={},
         deeponet_boundary_meta={},
+        input_mode_effective="table_plus_structure",
+        structure_adapter_mode_effective="auto",
         config_base_dir=tmp_path,
     )
 
@@ -80,9 +78,7 @@ def _valid_cfg(target_vars: list[str]) -> dict[str, Any]:
 
 
 def test_pod_deeponet_train_split_only_basis_fit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     ctx = _ctx(tmp_path)
     ctx.run_cfg = {"train": {"deeponet_pod": _valid_cfg(ctx.y_vars), "unet_like": {"batch_size_cases": 4}}}
 
@@ -109,6 +105,29 @@ def test_pod_deeponet_train_split_only_basis_fit(monkeypatch: pytest.MonkeyPatch
     assert captured["optimizer_schedule"] == "cosine"
 
 
+def test_plasma_pod_uses_pod_family_dispatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    require_torch_runtime()
+    ctx = _ctx(tmp_path)
+    ctx.model_name = "deeponet_plasma_pod"
+    ctx.input_mode_effective = "table_only"
+    ctx.structure_adapter_mode_effective = "none"
+    ctx.run_cfg = {
+        "train": {
+            "deeponet_plasma_pod": _valid_cfg(ctx.y_vars),
+            "unet_like": {"batch_size_cases": 4},
+        }
+    }
+
+    def _fake_run_unet(self, model, cond_train, y_train, cond_val, y_val, **kwargs):
+        return TrainOutput(history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}], model=model)
+
+    monkeypatch.setattr(Trainer, "run_unet", _fake_run_unet)
+    out = run_model_train_predict(ctx)
+    contract = out.extra_artifacts["deeponet_pod_contract_effective"]
+    assert contract["model_type_effective"] == "deeponet_plasma_pod"
+    assert contract["basis_fit_scope_effective"] == "train_only"
+
+
 def test_pod_deeponet_rejects_invalid_rank(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     cfg = _valid_cfg(ctx.y_vars)
@@ -128,9 +147,7 @@ def test_pod_deeponet_rejects_invalid_fit_scope(tmp_path: Path) -> None:
 
 
 def test_pod_deeponet_injects_training_defaults(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     ctx = _ctx(tmp_path)
     cfg = _valid_cfg(ctx.y_vars)
     cfg.pop("selection", None)

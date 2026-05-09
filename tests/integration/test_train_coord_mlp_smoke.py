@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import os
-
-import numpy as np
 import pytest
+import numpy as np
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.mlp.coord_mlp_torch import CoordMLPTorch
 from plasma_surrogate.train.trainer import Trainer
+
+pytestmark = pytest.mark.torch_runtime
 
 
 @pytest.mark.parametrize(
@@ -42,9 +43,7 @@ from plasma_surrogate.train.trainer import Trainer
     ],
 )
 def test_train_coord_mlp_smoke(tmp_path, model_name: str, model_cfg: dict[str, object]) -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     rng = np.random.default_rng(11)
     n, d, h, w = 12, 3, 8, 8

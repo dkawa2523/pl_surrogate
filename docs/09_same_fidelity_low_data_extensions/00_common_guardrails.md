@@ -1,4 +1,4 @@
-# 00. Common Guardrails
+﻿# 00. Common Guardrails
 
 このファイルは、**全モデル共通の絶対条件**だけをまとめたものです。Codex は個別モデル仕様に入る前に必ず読むこと。
 
@@ -27,7 +27,7 @@
 
 モデル追加時の基本変更点:
 - `src/plasma_surrogate/models/*`
-- `src/plasma_surrogate/models/mlp/io.py`
+- `src/plasma_surrogate/models/checkpoint.py`
 - `src/plasma_surrogate/train/model_dispatch.py`
 - 必要なら `src/plasma_surrogate/train/trainer.py`
 - 必要なら `src/plasma_surrogate/train/torch_trainer.py`
@@ -83,7 +83,7 @@ load_state_dict_numpy(self, state: dict[str, np.ndarray]) -> None
 新モデルクラスを追加する。
 
 ### Step B
-`models/mlp/io.py` に `build_model_from_name` / save / load を追加する。
+`models/checkpoint.py` に `build_model_from_name` / save / load を追加する。
 
 ### Step C
 `train/model_dispatch.py` に学習分岐と strict validation を追加する。
@@ -114,6 +114,6 @@ Codex には、最初の実装で次の軽い整理を推奨する。
    - distance transform 適用
    - coord feature scaling 適用
 
-2. `models/mlp/io.py` で non-DeepONet torch wrapper の save/load を family ごとに分ける
+2. `models/checkpoint.py` で non-DeepONet torch wrapper の save/load を family ごとに分ける
 
 ただし、既存挙動を変える refactor は避け、**新モデル追加に必要な最小抽出**だけを行う。

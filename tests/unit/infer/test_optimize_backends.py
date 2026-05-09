@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from plasma_surrogate.cli.workflows import _resolve_optimize_backend
-from plasma_surrogate.infer.optimize import OptimizeRunner
+from plasma_surrogate.infer.optimize import OptimizeRunner, cond_space_from_stats
 
 
 class _FakeResult:
     def __init__(self, value: float):
         self.qoi = {"uniformity": float(value)}
+        self.diagnostics = {"poisson_residual_norm": 1.5}
+        self.warnings = []
 
 
 class _FakeEngine:
@@ -27,6 +29,7 @@ def test_optimize_runner_random_backend_reproducible():
     runner = OptimizeRunner(_FakeEngine())
     kwargs = {
         "space": {"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+        "geom_space": {},
         "n_trials": 6,
         "geom_ref": {"geom_id": "default"},
         "axis": {"mode": "steady", "value": 0.0},
@@ -47,9 +50,22 @@ def test_optimize_runner_unknown_backend_raises():
     with pytest.raises(ValueError, match="Unsupported optimize backend"):
         runner.run(
             space={"c0": (0.0, 1.0)},
+            geom_space={},
             n_trials=2,
             geom_ref={"geom_id": "default"},
             backend="unknown_backend",
+        )
+
+
+def test_optimize_runner_rejects_zero_trials():
+    runner = OptimizeRunner(_FakeEngine())
+    with pytest.raises(ValueError, match="n_trials must be >= 1"):
+        runner.run(
+            space={"c0": (0.0, 1.0)},
+            geom_space={},
+            n_trials=0,
+            geom_ref={"geom_id": "default"},
+            backend="random",
         )
 
 
@@ -66,6 +82,7 @@ def test_optimize_runner_optuna_unavailable_raises(monkeypatch):
     with pytest.raises(RuntimeError, match="optuna backend is not available"):
         runner.run(
             space={"c0": (0.0, 1.0)},
+            geom_space={},
             n_trials=2,
             geom_ref={"geom_id": "default"},
             backend="optuna",
@@ -90,6 +107,7 @@ def test_optimize_runner_csv_backend(tmp_path: Path):
     runner = OptimizeRunner(_FakeEngine())
     out = runner.run(
         space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+        geom_space={},
         n_trials=10,
         geom_ref={"geom_id": "default"},
         axis={"mode": "steady", "value": 0.0},
@@ -99,3 +117,17 @@ def test_optimize_runner_csv_backend(tmp_path: Path):
     assert out.backend == "csv"
     assert out.best_cond == {"c0": 0.1, "c1": 0.1}
     assert len(out.trials) == 2
+    assert out.trials[0]["poisson_residual_norm"] == pytest.approx(1.5)
+
+
+def test_cond_space_from_stats_uses_preprocessing_bounds():
+    space = cond_space_from_stats(
+        ["PP0", "Td"],
+        {"PP0": {"min": 1.0, "max": 5.0}, "Td": {"min": 0.03, "max": 0.3}},
+    )
+    assert space == {"PP0": (1.0, 5.0), "Td": (0.03, 0.3)}
+
+
+def test_cond_space_from_stats_requires_complete_bounds():
+    with pytest.raises(ValueError, match="cond_stats is missing bounds"):
+        cond_space_from_stats(["PP0", "Td"], {"PP0": {"min": 1.0, "max": 5.0}})

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.train.trainer import TrainOutput, Trainer
 
 
@@ -23,9 +22,6 @@ class _IdentityTransforms:
     def inverse_fields(self, arr: np.ndarray) -> np.ndarray:
         return np.asarray(arr, dtype=np.float32)
 
-
-def _enable_torch() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
 
 
 def _ctx(tmp_path: Path, y_vars: list[str] | None = None) -> TrainDispatchContext:
@@ -71,6 +67,8 @@ def _ctx(tmp_path: Path, y_vars: list[str] | None = None) -> TrainDispatchContex
         deeponet_poisson_meta={},
         deeponet_boundary_index={},
         deeponet_boundary_meta={},
+        input_mode_effective="table_plus_structure",
+        structure_adapter_mode_effective="auto",
         coord_feature_pack={"data": coord_data, "channels": np.asarray(channels)},
         coord_distance_transform_stats={},
         config_base_dir=tmp_path,
@@ -101,9 +99,7 @@ def _valid_cfg(target_vars: list[str]) -> dict[str, Any]:
 def test_unetpp_mainline_accepts_valid_dynamic_allvars(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     custom_vars = ["density", "temperature"]
     ctx = _ctx(tmp_path, y_vars=custom_vars)
     ctx.run_cfg = {"train": {"unetpp": _valid_cfg(custom_vars)}}

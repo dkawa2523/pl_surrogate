@@ -1,18 +1,16 @@
 from __future__ import annotations
 
-import os
-
-import numpy as np
 import pytest
+import numpy as np
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
+from tests._runtime_requirements import require_torch_runtime
+
+pytestmark = pytest.mark.torch_runtime
 
 
 def test_unet_torch_forward_accepts_batched_spatial_features() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = UNetBaseline(
         input_dim=3,
         grid_shape=(8, 8),

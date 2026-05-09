@@ -1,24 +1,33 @@
 from __future__ import annotations
 
+import pytest
 import json
 from pathlib import Path
 
-import pytest
 import yaml
 
 from plasma_surrogate.cli.main import main
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+from tests._config_presets import (
+    default_target_transforms_ne_ni_te_phi,
+    runtime_table_plus_structure,
+)
+from tests._runtime_requirements import require_torch_runtime
+
+pytestmark = pytest.mark.torch_runtime
 
 
 def test_train_deeponet_pde_coupled_smoke(tmp_path: Path):
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime(enable_backend=False, refresh=False)
     run_dir = tmp_path / "deeponet_pde_train"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_plus_structure(feature_profile="geom_v1_mainline", adapter_mode="auto"),
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 9},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
+            "scalers": {
+                "target_transforms": default_target_transforms_ne_ni_te_phi(),
+            },
             "sampling": {
                 "deeponet": {
                     "tasks": {

@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.core.torch_backend import require_torch
+from plasma_surrogate.models._torch_spatial_common import _resolve_torch_device
 
 
 class DeepONetPoissonHeadTorch:
@@ -20,7 +21,14 @@ class DeepONetPoissonHeadTorch:
         freeze: bool = True,
     ) -> None:
         self._torch = require_torch()
+        self.device = _resolve_torch_device(self._torch)
         self.net = deeponet_poisson
+        if hasattr(self.net, "to"):
+            self.net.to(self.device)
+        elif hasattr(self.net, "device"):
+            self.net.device = self.device
+            if hasattr(self.net, "_move_modules_to_device"):
+                self.net._move_modules_to_device()
         self.sensor_indices = np.asarray(sensor_indices, dtype=np.int64).reshape(-1)
         self.query_indices = np.asarray(query_indices, dtype=np.int64).reshape(-1)
         self.flatten_order = str(flatten_order)
@@ -51,6 +59,16 @@ class DeepONetPoissonHeadTorch:
 
     def parameters(self):
         return self.net.parameters()
+
+    def to(self, device):
+        self.device = device
+        if hasattr(self.net, "to"):
+            self.net.to(device)
+        elif hasattr(self.net, "device"):
+            self.net.device = device
+            if hasattr(self.net, "_move_modules_to_device"):
+                self.net._move_modules_to_device()
+        return self
 
     def train(self) -> None:
         self.net.train()
@@ -96,10 +114,10 @@ class DeepONetPoissonHeadTorch:
         refine_iters: int = 0,
     ):
         torch = self._torch
-        rho = torch.as_tensor(rho_eff, dtype=torch.float32)
+        rho = torch.as_tensor(rho_eff, dtype=torch.float32, device=self.device)
         if rho.ndim == 3:
             rho = rho[:, None, ...]
-        cond_t = torch.as_tensor(cond_vec, dtype=torch.float32)
+        cond_t = torch.as_tensor(cond_vec, dtype=torch.float32, device=self.device)
         if cond_t.ndim == 1:
             cond_t = cond_t[None, :]
         if rho.shape[0] == 1 and cond_t.shape[0] > 1:
@@ -108,11 +126,15 @@ class DeepONetPoissonHeadTorch:
         if self.grid_shape is not None and (h, w) != self.grid_shape:
             raise ValueError(f"grid_shape mismatch: expected={self.grid_shape}, actual={(h, w)}")
 
-        coord_flat = torch.as_tensor(np.asarray(geom_ctx.coord_grid, dtype=np.float32).reshape(2, -1).T, dtype=torch.float32)
+        coord_flat = torch.as_tensor(
+            np.asarray(geom_ctx.coord_grid, dtype=np.float32).reshape(2, -1).T,
+            dtype=torch.float32,
+            device=self.device,
+        )
         rho_flat = rho.reshape(bsz, 1, -1).permute(0, 2, 1)
 
-        s_idx = torch.as_tensor(self.sensor_indices, dtype=torch.int64)
-        q_idx = torch.as_tensor(self.query_indices, dtype=torch.int64)
+        s_idx = torch.as_tensor(self.sensor_indices, dtype=torch.int64, device=self.device)
+        q_idx = torch.as_tensor(self.query_indices, dtype=torch.int64, device=self.device)
         x_s = coord_flat[s_idx][None, ...].expand(bsz, -1, -1)
         v_s = rho_flat[:, s_idx, :]
         x_q = coord_flat[q_idx][None, ...].expand(bsz, -1, -1)
@@ -123,19 +145,23 @@ class DeepONetPoissonHeadTorch:
         else:
             phi_q = pred["phi"]
 
-        phi_full = torch.zeros((bsz, h * w, 1), dtype=torch.float32)
+        phi_full = torch.zeros((bsz, h * w, 1), dtype=torch.float32, device=self.device)
         phi_full[:, q_idx, :] = phi_q
         phi = phi_full.permute(0, 2, 1).reshape(bsz, 1, h, w)
 
-        active = torch.as_tensor(np.asarray(geom_ctx.mask_plasma, dtype=np.float32), dtype=torch.float32)[None, None, ...]
+        active = torch.as_tensor(
+            np.asarray(geom_ctx.mask_plasma, dtype=np.float32),
+            dtype=torch.float32,
+            device=self.device,
+        )[None, None, ...]
         bc_mask_np = np.zeros_like(np.asarray(geom_ctx.mask_plasma, dtype=np.float32))
         bc_val_np = np.zeros_like(np.asarray(geom_ctx.mask_plasma, dtype=np.float32))
         if geom_ctx.bc_dir_mask is not None:
             bc_mask_np = np.asarray(geom_ctx.bc_dir_mask, dtype=np.float32)
         if geom_ctx.bc_dir_value is not None:
             bc_val_np = np.asarray(geom_ctx.bc_dir_value, dtype=np.float32)
-        bc_mask = torch.as_tensor(bc_mask_np, dtype=torch.float32)[None, None, ...]
-        bc_val = torch.as_tensor(bc_val_np, dtype=torch.float32)[None, None, ...]
+        bc_mask = torch.as_tensor(bc_mask_np, dtype=torch.float32, device=self.device)[None, None, ...]
+        bc_val = torch.as_tensor(bc_val_np, dtype=torch.float32, device=self.device)[None, None, ...]
         phi = active * ((1.0 - bc_mask) * phi + bc_mask * bc_val)
         phi = self._jacobi_refine(
             phi=phi,
@@ -146,4 +172,3 @@ class DeepONetPoissonHeadTorch:
             iters=int(refine_iters),
         )
         return phi
-

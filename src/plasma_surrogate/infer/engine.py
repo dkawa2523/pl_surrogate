@@ -11,12 +11,47 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
+from plasma_surrogate.core.input_modes import (
+    DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY,
+    DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+    DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY,
+    DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY,
+    GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY,
+    GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+    GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
+    HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY,
+    INPUT_MODE_FALLBACK_APPLIED_KEY,
+    INPUT_MODE_EFFECTIVE_KEY,
+    INPUT_MODES,
+    STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
+    STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+    STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+    TABLE_ONLY,
+    TABLE_PLUS_STRUCTURE,
+    normalize_strict_input_mode,
+    resolve_input_mode_metadata_contract,
+    input_mode_metadata_keys,
+)
+from plasma_surrogate.core.model_input_policy import (
+    ADAPTER_DESCRIPTOR_BRANCH,
+    ADAPTER_HYBRID_PACK_DESCRIPTOR,
+    ADAPTER_NONE,
+    validate_model_input_mode,
+)
+from plasma_surrogate.core.model_families import POD_DEEPONET_FAMILY_MODELS
+from plasma_surrogate.core.vector_pack import load_vector_from_pack
 from plasma_surrogate.data.geometry_context import GeometryContext
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.data.geometry_provider import GeometryProviderLike
 from plasma_surrogate.eval.metrics import bc_mae, boundary_band_mask, boundary_gamma_proxy, poisson_residual_norm, uniformity
-from plasma_surrogate.infer.optimize import OptimizeRunner
+from plasma_surrogate.features.structure_descriptors import build_structure_descriptor
+from plasma_surrogate.features.structure_feature_registry import validate_coord_feature_channels
+from plasma_surrogate.infer.optimize import OptimizeRunner, validate_optimize_geom_contract
+from plasma_surrogate.models.cno.operator_unet import CNOOperatorUNet
+from plasma_surrogate.models.cno.simple_cno import CNOBaseline
 from plasma_surrogate.models.fno.factorized_fno import FFNOBaseline
 from plasma_surrogate.models.fno.simple_fno import FNOBaseline
+from plasma_surrogate.models.uno.simple_uno import UNOBaseline
+from plasma_surrogate.models.deeponet.geom_deeponet_siren import GeomDeepONetSIREN
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import PODDeepONetTorch
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.models.mlp.coord_mlp_torch import CoordMLPTorch
@@ -27,18 +62,6 @@ from plasma_surrogate.preprocessing.scalers import ScalerFactory, TransformBundl
 from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 from plasma_surrogate.train.losses import boundary_operator_loss, boundary_operator_target, poisson_residual
 
-_ALLOWED_COORD_FEATURE_CHANNELS = (
-    "x",
-    "y",
-    "distance_signed",
-    "distance_any",
-    "mask_plasma",
-    "normal_x",
-    "normal_y",
-    "curvature_proxy",
-)
-
-
 @dataclass
 class InferenceResult:
     fields_model: dict[str, np.ndarray]
@@ -47,9 +70,35 @@ class InferenceResult:
     qoi: dict[str, float]
     diagnostics: dict[str, Any]
     warnings: list[str]
+    case_key: str = ""
 
 
 class InferenceEngine:
+    @staticmethod
+    def _normalize_effective_meta_value(*, key: str, value: Any) -> Any:
+        if key == HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY:
+            if isinstance(value, bool):
+                return value
+            text = str(value).strip().lower()
+            if text in {"1", "true", "t", "yes", "y", "on"}:
+                return True
+            if text in {"0", "false", "f", "no", "n", "off"}:
+                return False
+            raise ValueError(f"invalid boolean value for {key}: {value!r}")
+        text = str(value).strip().lower()
+        if not text:
+            raise ValueError(f"empty value for {key} is not allowed")
+        return text
+
+    @classmethod
+    def _normalize_effective_meta_dict(cls, raw: dict[str, Any] | None) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for key in input_mode_metadata_keys():
+            if raw is None or key not in raw:
+                continue
+            out[key] = cls._normalize_effective_meta_value(key=key, value=raw[key])
+        return out
+
     @staticmethod
     def _pick_uniformity_target(
         fields_phys: dict[str, np.ndarray],
@@ -142,7 +191,7 @@ class InferenceEngine:
         model: Any,
         cond_schema: CondSchema,
         axis_schema: AxisSchema,
-        geometry_provider: FixedGeometryProvider,
+        geometry_provider: GeometryProviderLike,
         output_dir: str | Path,
         transform_bundle: TransformBundle | None = None,
         cond_stats: dict[str, Any] | None = None,
@@ -160,6 +209,14 @@ class InferenceEngine:
         coord_input_features_cfg: dict[str, Any] | None = None,
         grid_input_features_cfg: dict[str, Any] | None = None,
         unet_input_features_cfg: dict[str, Any] | None = None,
+        input_mode: str = TABLE_PLUS_STRUCTURE,
+        strict_input_mode: str = "error",
+        allow_mode_fallback: bool = False,
+        input_mode_meta: dict[str, Any] | None = None,
+        checkpoint_input_mode_meta: dict[str, Any] | None = None,
+        checkpoint_meta: dict[str, Any] | None = None,
+        structure_descriptor_pack: dict[str, Any] | None = None,
+        latent_feature_pack: dict[str, Any] | None = None,
     ):
         self.model = model
         self.cond_schema = cond_schema
@@ -182,6 +239,334 @@ class InferenceEngine:
         self.coord_input_features_cfg = dict(coord_input_features_cfg or {})
         self.grid_input_features_cfg = dict(grid_input_features_cfg or unet_input_features_cfg or {})
         self.unet_input_features_cfg = dict(self.grid_input_features_cfg)
+        self.strict_input_mode = normalize_strict_input_mode(strict_input_mode, default="error")
+        self.allow_mode_fallback = bool(allow_mode_fallback)
+        self.input_mode_contract_warnings: list[str] = []
+        self.input_mode_fallback_applied = False
+        self.input_mode = str(input_mode or TABLE_PLUS_STRUCTURE).strip().lower()
+        if self.input_mode not in set(INPUT_MODES):
+            raise ValueError(f"inference input_mode must be one of {list(INPUT_MODES)}; got={self.input_mode!r}")
+        self.input_mode_meta = self._normalize_effective_meta_dict(input_mode_meta)
+        self._checkpoint_input_mode_meta_provided = checkpoint_input_mode_meta is not None
+        self.checkpoint_input_mode_meta = self._normalize_effective_meta_dict(checkpoint_input_mode_meta)
+        self.checkpoint_meta = dict(checkpoint_meta or {})
+        self.structure_descriptor_pack = dict(structure_descriptor_pack or {})
+        self.latent_feature_pack = dict(latent_feature_pack or {})
+        self._pod_descriptor_cache: dict[str, np.ndarray] = {}
+        self._geom_deeponet_siren_descriptor_cache: dict[str, np.ndarray] = {}
+        self.geom_deeponet_siren_descriptor_dim_effective = int(
+            self.checkpoint_meta.get(GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY, 0) or 0
+        )
+        if INPUT_MODE_EFFECTIVE_KEY not in self.input_mode_meta:
+            self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY] = self.input_mode
+        self._validate_input_mode_metadata_contract()
+        resolved_mode = str(self.input_mode_meta.get(INPUT_MODE_EFFECTIVE_KEY, self.input_mode)).strip().lower()
+        if resolved_mode and resolved_mode in set(INPUT_MODES) and resolved_mode != self.input_mode:
+            if self.allow_mode_fallback:
+                msg = (
+                    "inference input_mode arg differs from resolved metadata; "
+                    f"arg={self.input_mode!r}, resolved={resolved_mode!r}; fallback adopts resolved metadata mode"
+                )
+                self.input_mode_contract_warnings.append(msg)
+                self.input_mode_fallback_applied = True
+                self.input_mode = resolved_mode
+            else:
+                raise ValueError(
+                    "inference request input_mode metadata mismatch: "
+                    f"{INPUT_MODE_EFFECTIVE_KEY}={self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY]!r} "
+                    f"but input_mode arg={self.input_mode!r}"
+                )
+        if str(self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY]).strip().lower() != self.input_mode:
+            raise ValueError(
+                "inference request input_mode metadata mismatch: "
+                f"{INPUT_MODE_EFFECTIVE_KEY}={self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY]!r} "
+                f"but input_mode arg={self.input_mode!r}"
+            )
+        self.provider_mode_effective = str(
+            self.input_mode_meta.get(
+                GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
+                getattr(self.geometry_provider, "provider_mode", "fixed"),
+            )
+        ).strip().lower() or "fixed"
+        provider_mode_runtime = str(getattr(self.geometry_provider, "provider_mode", "fixed")).strip().lower() or "fixed"
+        if provider_mode_runtime != self.provider_mode_effective:
+            raise ValueError(
+                "inference provider mode mismatch between runtime metadata and provider instance: "
+                f"meta={self.provider_mode_effective!r}, provider={provider_mode_runtime!r}"
+            )
+        self.structure_adapter_mode_effective = str(
+            self.input_mode_meta.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "auto")
+        ).strip().lower() or "auto"
+        self.structure_descriptor_profile_effective = str(
+            self.input_mode_meta.get(STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY, "none")
+        ).strip().lower() or "none"
+        self.structure_latent_profile_effective = str(
+            self.input_mode_meta.get(STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY, "none")
+        ).strip().lower() or "none"
+        self.pod_descriptor_dim_effective = int(self.checkpoint_meta.get(DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY, 0) or 0)
+        self.pod_latent_hook_effective = bool(self.checkpoint_meta.get(DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY, False))
+        self._validate_model_input_mode_contract()
+        self._validate_pod_descriptor_and_latent_contract()
+        self._validate_geom_deeponet_siren_descriptor_contract()
+
+    def _validate_input_mode_metadata_contract(self) -> None:
+        if not self._checkpoint_input_mode_meta_provided:
+            return
+        resolved_meta, contract_warnings, fallback_applied = resolve_input_mode_metadata_contract(
+            request_meta=self.input_mode_meta,
+            checkpoint_meta=self.checkpoint_input_mode_meta,
+            strict_input_mode=self.strict_input_mode,
+            allow_mode_fallback=self.allow_mode_fallback,
+            keys=input_mode_metadata_keys(),
+            context="inference input-mode metadata",
+        )
+        self.input_mode_meta = self._normalize_effective_meta_dict(resolved_meta)
+        self.input_mode_contract_warnings.extend(contract_warnings)
+        if fallback_applied:
+            self.input_mode_fallback_applied = True
+
+    @staticmethod
+    def _resolve_model_type_name(model: Any) -> str:
+        if hasattr(model, "to_meta"):
+            meta = model.to_meta()
+            if not isinstance(meta, dict):
+                raise TypeError(f"{type(model).__name__}.to_meta() must return a dict")
+            name = str(meta.get("model_type", "")).strip().lower()
+            if name:
+                return name
+        model_type_attr = str(getattr(model, "model_type", "")).strip().lower()
+        if model_type_attr:
+            return model_type_attr
+        class_name = str(type(model).__name__).strip().lower()
+        aliases = {
+            "globalmlp": "global_mlp",
+            "unetbaseline": "unet",
+            "unetppbaseline": "unetpp",
+            "fnobaseline": "fno",
+            "ffnobaseline": "ffno",
+            "unobaseline": "u_no",
+            "cnobaseline": "cno",
+            "cnooperatorunet": "cno_operator_unet",
+            "coordmlptorch": "coord_mlp_fourier",
+            "poddeeponettorch": "deeponet_pod",
+            "geomdeeponetsiren": "geom_deeponet_siren",
+        }
+        return aliases.get(class_name, class_name)
+
+    def _validate_model_input_mode_contract(self) -> None:
+        if self.input_mode != TABLE_ONLY:
+            return
+        model_type = self._resolve_model_type_name(self.model)
+        try:
+            validate_model_input_mode(model_type, TABLE_ONLY)
+        except ValueError as exc:
+            msg = str(exc)
+            if "Unsupported model for input-mode policy" in msg:
+                return
+            raise ValueError(
+                "inference model/input_mode contract violation: "
+                f"model_type={model_type!r}, input_mode={TABLE_ONLY!r}; detail={msg}"
+            ) from exc
+
+    def _is_pod_model(self) -> bool:
+        if isinstance(self.model, PODDeepONetTorch):
+            return True
+        model_type = self._resolve_model_type_name(self.model)
+        return model_type in POD_DEEPONET_FAMILY_MODELS
+
+    def _validate_pod_descriptor_and_latent_contract(self) -> None:
+        if not self._is_pod_model():
+            return
+        mode = self.input_mode
+        adapter = self.structure_adapter_mode_effective
+        descriptor_profile = self.structure_descriptor_profile_effective
+        latent_profile = self.structure_latent_profile_effective
+        uses_descriptor_adapter = adapter in {ADAPTER_DESCRIPTOR_BRANCH, ADAPTER_HYBRID_PACK_DESCRIPTOR}
+
+        if mode == TABLE_ONLY:
+            if descriptor_profile != "none" or latent_profile != "none":
+                raise ValueError(
+                    "runtime.input_mode=table_only requires descriptor_profile/latent_profile to be none for deeponet_pod"
+                )
+            if adapter != ADAPTER_NONE:
+                raise ValueError(
+                    "runtime.input_mode=table_only requires adapter_mode_effective='none' for deeponet_pod"
+                )
+            self.pod_descriptor_dim_effective = 0
+            self.pod_latent_hook_effective = False
+            return
+
+        if descriptor_profile != "none":
+            if not uses_descriptor_adapter:
+                raise ValueError(
+                    "deeponet_pod descriptor profile requires adapter_mode_effective in "
+                    "{descriptor_branch, hybrid_pack_descriptor}"
+                )
+            if self.provider_mode_effective != "parametric_parts":
+                raise ValueError(
+                    "deeponet_pod descriptor lane requires geometry provider_mode_effective='parametric_parts' "
+                    f"for inference; got={self.provider_mode_effective!r}"
+                )
+            ckpt_descriptor_profile = str(
+                self.checkpoint_meta.get(DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY, descriptor_profile)
+            ).strip().lower()
+            if ckpt_descriptor_profile and ckpt_descriptor_profile != descriptor_profile:
+                raise ValueError(
+                    "descriptor profile mismatch between runtime request and checkpoint metadata: "
+                    f"request={descriptor_profile!r}, checkpoint={ckpt_descriptor_profile!r}"
+                )
+            if DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY not in self.checkpoint_meta:
+                raise ValueError(
+                    "checkpoint metadata missing required key for descriptor lane: "
+                    f"{DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY!r}"
+                )
+            descriptor_dim = int(self.checkpoint_meta[DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY])
+            if descriptor_dim <= 0:
+                raise ValueError(
+                    "checkpoint descriptor metadata is invalid: "
+                    f"{DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY}={descriptor_dim!r}"
+                )
+            self.pod_descriptor_dim_effective = int(descriptor_dim)
+        elif uses_descriptor_adapter:
+            raise ValueError(
+                "adapter_mode_effective requires runtime.structure.descriptor_profile != none for deeponet_pod"
+            )
+        else:
+            self.pod_descriptor_dim_effective = 0
+
+        if latent_profile != "none":
+            load_vector_from_pack(
+                pack=self.latent_feature_pack,
+                pack_name="latent_feature_pack",
+            )
+            ckpt_latent_profile = str(
+                self.checkpoint_meta.get(DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY, latent_profile)
+            ).strip().lower()
+            if ckpt_latent_profile and ckpt_latent_profile != latent_profile:
+                raise ValueError(
+                    "latent profile mismatch between runtime request and checkpoint metadata: "
+                    f"request={latent_profile!r}, checkpoint={ckpt_latent_profile!r}"
+                )
+            if DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY in self.checkpoint_meta:
+                if not bool(self.checkpoint_meta[DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY]):
+                    raise ValueError(
+                        "checkpoint metadata indicates latent hook disabled while runtime latent profile is enabled"
+                    )
+            self.pod_latent_hook_effective = True
+        else:
+            self.pod_latent_hook_effective = False
+
+    def _is_geom_deeponet_siren_model(self) -> bool:
+        if isinstance(self.model, GeomDeepONetSIREN):
+            return True
+        model_type = self._resolve_model_type_name(self.model)
+        return model_type == "geom_deeponet_siren"
+
+    def _validate_geom_deeponet_siren_descriptor_contract(self) -> None:
+        if not self._is_geom_deeponet_siren_model():
+            return
+        if self.input_mode != TABLE_PLUS_STRUCTURE:
+            raise ValueError("geom_deeponet_siren requires runtime.input_mode=table_plus_structure for inference")
+        if self.structure_adapter_mode_effective != ADAPTER_HYBRID_PACK_DESCRIPTOR:
+            raise ValueError(
+                "geom_deeponet_siren requires runtime.structure.adapter_mode_effective="
+                "'hybrid_pack_descriptor' for inference"
+            )
+        descriptor_profile = self.structure_descriptor_profile_effective
+        if descriptor_profile == "none":
+            raise ValueError("geom_deeponet_siren requires runtime.structure.descriptor_profile != none for inference")
+        if self.provider_mode_effective != "parametric_parts":
+            raise ValueError(
+                "geom_deeponet_siren descriptor lane requires geometry provider_mode_effective='parametric_parts' "
+                f"for inference; got={self.provider_mode_effective!r}"
+            )
+        ckpt_descriptor_profile = str(
+            self.checkpoint_meta.get(GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY, descriptor_profile)
+        ).strip().lower()
+        if ckpt_descriptor_profile and ckpt_descriptor_profile != descriptor_profile:
+            raise ValueError(
+                "geom_deeponet_siren descriptor profile mismatch between runtime request and checkpoint metadata: "
+                f"request={descriptor_profile!r}, checkpoint={ckpt_descriptor_profile!r}"
+            )
+        if GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY not in self.checkpoint_meta:
+            raise ValueError(
+                "checkpoint metadata missing required key for geom_deeponet_siren descriptor lane: "
+                f"{GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY!r}"
+            )
+        descriptor_dim = int(self.checkpoint_meta[GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY])
+        if descriptor_dim <= 0:
+            raise ValueError(
+                "checkpoint descriptor metadata is invalid for geom_deeponet_siren: "
+                f"{GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY}={descriptor_dim!r}"
+            )
+        self.geom_deeponet_siren_descriptor_dim_effective = int(descriptor_dim)
+
+    @staticmethod
+    def _descriptor_cache_key(geom_ref: dict[str, Any]) -> str:
+        return json.dumps(dict(geom_ref or {}), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+    def _resolve_pod_descriptor_vector(self, *, geom_ref: dict[str, Any], geom_ctx: GeometryContext) -> np.ndarray:
+        cache_key = self._descriptor_cache_key(geom_ref)
+        cached = self._pod_descriptor_cache.get(cache_key)
+        if cached is not None:
+            return np.asarray(cached, dtype=np.float32).reshape(-1)
+        descriptor = build_structure_descriptor(self.structure_descriptor_profile_effective, geom_ctx)
+        desc_vec = np.asarray(descriptor.vector, dtype=np.float32).reshape(-1)
+        expected_dim = int(self.pod_descriptor_dim_effective)
+        if expected_dim > 0 and int(desc_vec.shape[0]) != expected_dim:
+            raise ValueError(
+                "deeponet_pod descriptor dim mismatch between checkpoint and runtime geometry: "
+                f"checkpoint={expected_dim}, runtime={int(desc_vec.shape[0])}"
+            )
+        self._pod_descriptor_cache[cache_key] = np.asarray(desc_vec, dtype=np.float32).reshape(-1)
+        return desc_vec
+
+    def _augment_pod_cond_vector(
+        self,
+        cond_vec: np.ndarray,
+        *,
+        geom_ref: dict[str, Any],
+        geom_ctx: GeometryContext,
+    ) -> np.ndarray:
+        if not self._is_pod_model():
+            return np.asarray(cond_vec, dtype=np.float32)
+        if self.structure_descriptor_profile_effective == "none":
+            return np.asarray(cond_vec, dtype=np.float32)
+        desc_vec = self._resolve_pod_descriptor_vector(geom_ref=geom_ref, geom_ctx=geom_ctx)
+        return np.concatenate([np.asarray(cond_vec, dtype=np.float32), desc_vec], axis=0).astype(np.float32)
+
+    def _resolve_geom_deeponet_siren_descriptor_vector(
+        self,
+        *,
+        geom_ref: dict[str, Any],
+        geom_ctx: GeometryContext,
+    ) -> np.ndarray:
+        cache_key = self._descriptor_cache_key(geom_ref)
+        cached = self._geom_deeponet_siren_descriptor_cache.get(cache_key)
+        if cached is not None:
+            return np.asarray(cached, dtype=np.float32).reshape(-1)
+        descriptor = build_structure_descriptor(self.structure_descriptor_profile_effective, geom_ctx)
+        desc_vec = np.asarray(descriptor.vector, dtype=np.float32).reshape(-1)
+        expected_dim = int(self.geom_deeponet_siren_descriptor_dim_effective)
+        if expected_dim > 0 and int(desc_vec.shape[0]) != expected_dim:
+            raise ValueError(
+                "geom_deeponet_siren descriptor dim mismatch between checkpoint and runtime geometry: "
+                f"checkpoint={expected_dim}, runtime={int(desc_vec.shape[0])}"
+            )
+        self._geom_deeponet_siren_descriptor_cache[cache_key] = np.asarray(desc_vec, dtype=np.float32).reshape(-1)
+        return desc_vec
+
+    def _augment_geom_deeponet_siren_cond_vector(
+        self,
+        cond_vec: np.ndarray,
+        *,
+        geom_ref: dict[str, Any],
+        geom_ctx: GeometryContext,
+    ) -> np.ndarray:
+        if not self._is_geom_deeponet_siren_model():
+            return np.asarray(cond_vec, dtype=np.float32)
+        desc_vec = self._resolve_geom_deeponet_siren_descriptor_vector(geom_ref=geom_ref, geom_ctx=geom_ctx)
+        return np.concatenate([np.asarray(cond_vec, dtype=np.float32), desc_vec], axis=0).astype(np.float32)
 
     @staticmethod
     def _resolve_distance_transform_cfg(raw: dict[str, Any] | None) -> dict[str, Any]:
@@ -289,10 +674,10 @@ class InferenceEngine:
         if not isinstance(raw, list) or len(raw) == 0:
             return ["x", "y"]
         channels = [str(v) for v in raw]
-        unknown = [v for v in channels if v not in _ALLOWED_COORD_FEATURE_CHANNELS]
-        if unknown:
-            raise ValueError(f"Unsupported coord feature channels in checkpoint metadata: {unknown}")
-        return channels
+        try:
+            return list(validate_coord_feature_channels(channels))
+        except ValueError as exc:
+            raise ValueError(f"Unsupported coord feature channels in checkpoint metadata: {channels}") from exc
 
     def _build_coord_feature_rows(self, geom: GeometryContext, channels: list[str]) -> np.ndarray:
         h, w = geom.mask_plasma.shape
@@ -395,7 +780,7 @@ class InferenceEngine:
         h, w = geom.mask_plasma.shape
         pack = dict(self.coord_feature_pack or {})
         cfg = dict(self.grid_input_features_cfg or {})
-        mode = str(cfg.get("mode", "legacy_xy")).strip().lower()
+        mode = str(cfg.get("mode", "geom_feature_pack")).strip().lower()
         if mode not in {"legacy_xy", "geom_feature_pack"}:
             raise ValueError("train.<grid_model>.input_features.mode must be one of: legacy_xy, geom_feature_pack")
         if mode == "legacy_xy" and list(channels) == ["x", "y"]:
@@ -450,17 +835,37 @@ class InferenceEngine:
         pred = self.model.predict_fields(cond_vec[None, :])
         return {k: np.asarray(v[0], dtype=np.float32) for k, v in pred.items()}
 
-    @staticmethod
-    def _validate_geom_ref(geom: dict[str, Any]) -> dict[str, Any]:
+    def _validate_geom_ref(self, geom: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(geom, dict):
             raise TypeError("geom must be a dict with {'geom_id': ...} or {'geom_param': {...}}")
         if "geom_param" in geom:
+            if self.input_mode == TABLE_ONLY:
+                raise ValueError("runtime.input_mode=table_only does not allow geom_ref.geom_param")
+            if not bool(getattr(self.geometry_provider, "supports_geom_param", False)):
+                raise ValueError(
+                    "geom_ref.geom_param requires provider_mode=parametric_parts; "
+                    f"got provider_mode={getattr(self.geometry_provider, 'provider_mode', 'fixed')!r}"
+                )
             gp = geom["geom_param"]
             if not isinstance(gp, dict):
                 raise TypeError("geom_param must be dict")
-            norm = {k: float(v) for k, v in sorted(gp.items())}
+            norm: dict[str, float] = {}
+            for key, value in sorted(gp.items()):
+                fval = float(value)
+                if not np.isfinite(fval):
+                    raise ValueError(f"geom_param[{key!r}] must be finite; got={value!r}")
+                norm[str(key)] = fval
             return {"geom_id": str(geom.get("geom_id", "default")), "geom_param": norm}
-        return {"geom_id": str(geom.get("geom_id", "default"))}
+        out = {"geom_id": str(geom.get("geom_id", "default"))}
+        if (
+            (self._is_pod_model() or self._is_geom_deeponet_siren_model())
+            and self.input_mode == TABLE_PLUS_STRUCTURE
+            and self.structure_descriptor_profile_effective != "none"
+            and bool(getattr(self.geometry_provider, "supports_geom_param", False))
+        ):
+            # Force parametric_parts reconstruction so part_mask_stack is populated for descriptor lane.
+            out["geom_param"] = {}
+        return out
 
     @staticmethod
     def _case_key(cond: dict[str, Any], axis: dict[str, Any], geom: dict[str, Any]) -> str:
@@ -477,7 +882,20 @@ class InferenceEngine:
             pred = self.model.predict_fields(cond_vec[None, :])
             return {k: v[0] for k, v in pred.items()}
 
-        if isinstance(self.model, (UNetBaseline, UNetPPBaseline, FNOBaseline, FFNOBaseline, CoordMLPTorch)):
+        if isinstance(
+            self.model,
+            (
+                UNetBaseline,
+                UNetPPBaseline,
+                FNOBaseline,
+                FFNOBaseline,
+                UNOBaseline,
+                CNOBaseline,
+                CNOOperatorUNet,
+                CoordMLPTorch,
+                GeomDeepONetSIREN,
+            ),
+        ):
             return self._predict_grid_spatial_fields(cond_vec, geom)
 
         if isinstance(self.model, PODDeepONetTorch):
@@ -556,6 +974,10 @@ class InferenceEngine:
         return [{"mode": mode, "value": float(v)} for v in values.tolist()]
 
     @staticmethod
+    def _is_numeric_scalar(value: Any) -> bool:
+        return isinstance(value, (int, float, np.integer, np.floating))
+
+    @staticmethod
     def _aggregate_results(results: list[InferenceResult], mode: str) -> InferenceResult:
         if len(results) == 0:
             raise ValueError("No results to aggregate")
@@ -565,9 +987,13 @@ class InferenceEngine:
                 fields_model={k: np.asarray(v, dtype=np.float32) for k, v in best.fields_model.items()},
                 fields_phys={k: np.asarray(v, dtype=np.float32) for k, v in best.fields_phys.items()},
                 derived={k: np.asarray(v, dtype=np.float32) for k, v in best.derived.items()},
-                qoi={k: float(v) for k, v in best.qoi.items()},
+                qoi={
+                    k: (float(v) if InferenceEngine._is_numeric_scalar(v) else v)
+                    for k, v in best.qoi.items()
+                },
                 diagnostics={k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in best.diagnostics.items()},
                 warnings=sorted(set(best.warnings)),
+                case_key=str(best.case_key),
             )
 
         # window_mean
@@ -583,10 +1009,13 @@ class InferenceEngine:
             k: np.mean(np.stack([np.asarray(r.derived[k], dtype=np.float32) for r in results], axis=0), axis=0)
             for k in results[0].derived.keys()
         }
-        mean_qoi = {
-            k: float(np.mean([float(r.qoi[k]) for r in results]))
-            for k in results[0].qoi.keys()
-        }
+        mean_qoi: dict[str, Any] = {}
+        for key in results[0].qoi.keys():
+            first = results[0].qoi[key]
+            if InferenceEngine._is_numeric_scalar(first):
+                mean_qoi[key] = float(np.mean([float(r.qoi[key]) for r in results]))
+            else:
+                mean_qoi[key] = first
         mean_diag = {
             k: float(np.mean([float(r.diagnostics[k]) for r in results]))
             for k in results[0].diagnostics.keys()
@@ -600,6 +1029,7 @@ class InferenceEngine:
             qoi=mean_qoi,
             diagnostics=mean_diag,
             warnings=warnings,
+            case_key="",
         )
 
     def single_run_aggregated(self, cond: dict[str, Any], geom: dict[str, Any], axis: dict[str, Any]) -> InferenceResult:
@@ -614,6 +1044,8 @@ class InferenceEngine:
         geom_ref = self._validate_geom_ref(geom)
         geom_ctx = self._get_geom_ctx(geom_ref, axis=axis)
         cond_vec = self._build_cond_vector(cond, axis)
+        cond_vec = self._augment_pod_cond_vector(cond_vec, geom_ref=geom_ref, geom_ctx=geom_ctx)
+        cond_vec = self._augment_geom_deeponet_siren_cond_vector(cond_vec, geom_ref=geom_ref, geom_ctx=geom_ctx)
         raw_pred = self._predict_fields(cond_vec, geom_ctx)
 
         fields_model = {k: np.asarray(v, dtype=np.float32) for k, v in raw_pred.items() if k != "rho_eff"}
@@ -743,13 +1175,14 @@ class InferenceEngine:
         diagnostics["poisson_residual_map_l2"] = float(np.sqrt(np.mean(poisson_map**2)))
         diagnostics["boundary_operator_residual_map_l2"] = float(np.sqrt(np.mean(bo_residual**2)))
 
-        warnings = self._ood_warnings(cond=cond, diagnostics=diagnostics)
+        warnings = sorted(set([*self.input_mode_contract_warnings, *self._ood_warnings(cond=cond, diagnostics=diagnostics)]))
         cond_warnings = [w for w in warnings if w.startswith("ood:cond:")]
         physics_warnings = [w for w in warnings if not w.startswith("ood:cond:")]
         ood_report = {
             "warnings": warnings,
             "cond_warnings": cond_warnings,
             "physics_warnings": physics_warnings,
+            INPUT_MODE_FALLBACK_APPLIED_KEY: bool(self.input_mode_fallback_applied),
             "axis_context": {
                 "mode": str(axis.get("mode", self.axis_schema.mode)),
                 "value": float(axis.get("value", 0.0)),
@@ -788,6 +1221,7 @@ class InferenceEngine:
             qoi=qoi,
             diagnostics=diagnostics,
             warnings=warnings,
+            case_key=case_key,
         )
 
     def batch_run(self, conds: list[dict[str, Any]], geom: dict[str, Any], axis: dict[str, Any]) -> list[dict[str, Any]]:
@@ -806,6 +1240,7 @@ class InferenceEngine:
     def optimize_run(
         self,
         space: dict[str, tuple[float, float]],
+        geom_space: dict[str, tuple[float, float]] | None,
         n_trials: int,
         geom: dict[str, Any],
         axis: dict[str, Any],
@@ -813,9 +1248,18 @@ class InferenceEngine:
         backend: str = "random",
         backend_cfg: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        provider_mode = str(getattr(self.geometry_provider, "provider_mode", "fixed")).strip().lower()
+        geom_space_norm = validate_optimize_geom_contract(
+            input_mode=self.input_mode,
+            provider_mode=provider_mode,
+            geom_space=geom_space,
+            geom_ref=geom,
+            label_prefix="inference.optimize",
+        )
         runner = OptimizeRunner(self)
         result = runner.run(
             space=space,
+            geom_space=geom_space_norm,
             n_trials=n_trials,
             geom_ref=geom,
             axis=axis,
@@ -823,7 +1267,14 @@ class InferenceEngine:
             backend=backend,
             backend_cfg=backend_cfg,
         )
-        self.store.save_json("optimize/best.json", {"best_cond": result.best_cond, "best_value": result.best_value})
+        self.store.save_json(
+            "optimize/best.json",
+            {
+                "best_cond": result.best_cond,
+                "best_geom_param": result.best_geom_param,
+                "best_value": result.best_value,
+            },
+        )
         self.store.save_json(
             "optimize/summary.json",
             {
@@ -833,12 +1284,25 @@ class InferenceEngine:
                 "n_trials": int(n_trials),
                 "objective_key": result.objective_key,
                 "best_value": float(result.best_value),
+                "geom_space_enabled_effective": bool(len(geom_space_norm) > 0),
+                "geom_param_keys_effective": sorted(list(result.best_geom_param.keys())),
+                "invalid_trial_count": int(result.invalid_trial_count),
             },
         )
         rows = []
         for i, t in enumerate(result.trials):
-            row = {"trial": i, "value": t["value"], **t["cond"]}
+            row = {
+                "trial": i,
+                **{k: v for k, v in t.items() if k not in {"cond", "geom_param"}},
+                **dict(t.get("cond", {})),
+                **dict(t.get("geom_param", {})),
+            }
             rows.append(row)
         header = sorted({k for row in rows for k in row.keys()})
-        self.store.save_csv("optimize/trials.csv", header, [[r.get(k, "") for k in header] for r in rows])
-        return {"best_cond": result.best_cond, "best_value": result.best_value}
+        self.store.save_csv("optimize/trials.csv", header, [["" if r.get(k) is None else r.get(k, "") for k in header] for r in rows])
+        return {
+            "best_cond": result.best_cond,
+            "best_geom_param": result.best_geom_param,
+            "best_value": result.best_value,
+            "invalid_trial_count": int(result.invalid_trial_count),
+        }

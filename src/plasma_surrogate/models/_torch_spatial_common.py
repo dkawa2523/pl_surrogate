@@ -91,18 +91,26 @@ def _state_dict_numpy_torch(net: Any) -> dict[str, np.ndarray]:
     }
 
 
+def _resolve_torch_device(torch: Any) -> Any:
+    return torch.device("cuda" if bool(torch.cuda.is_available()) else "cpu")
+
+
 def _load_state_dict_numpy_torch(
     state: dict[str, np.ndarray],
     *,
     torch: Any,
     net: Any,
     empty_message: str,
+    device: Any | None = None,
 ) -> None:
-    state_t = {
-        k.split("torch::", 1)[1]: torch.from_numpy(np.asarray(v, dtype=np.float32))
-        for k, v in state.items()
-        if str(k).startswith("torch::")
-    }
+    state_t = {}
+    for k, v in state.items():
+        if not str(k).startswith("torch::"):
+            continue
+        tensor = torch.from_numpy(np.asarray(v, dtype=np.float32))
+        if device is not None:
+            tensor = tensor.to(device)
+        state_t[k.split("torch::", 1)[1]] = tensor
     if not state_t:
         raise ValueError(empty_message)
     net.load_state_dict(state_t, strict=True)
@@ -159,6 +167,7 @@ __all__ = [
     "_build_unit_coord_grid",
     "_load_state_dict_numpy_torch",
     "_resolve_batched_spatial_features",
+    "_resolve_torch_device",
     "_state_dict_numpy_torch",
     "_validate_static_spatial_features",
 ]

@@ -26,7 +26,7 @@ SIREN は Fourier 版の API と builder / dispatch が安定してから追加�
 - `src/plasma_surrogate/models/mlp/coord_mlp_torch.py`
 
 ### 変更
-- `src/plasma_surrogate/models/mlp/io.py`
+- `src/plasma_surrogate/models/checkpoint.py`
 - `src/plasma_surrogate/train/model_dispatch.py`
 - unit / integration tests
 - 必要なら `docs/04_training_models.md` など仕様追記
@@ -146,7 +146,7 @@ siren:
 - 初期化は SIREN 用の初期化を実装する
 - `coord_mlp_fourier` と同じ wrapper API を維持する
 
-## 6. `models/mlp/io.py` 実装
+## 6. `models/checkpoint.py` 実装
 
 ### `build_model_from_name`
 
@@ -181,7 +181,7 @@ if name in {"coord_mlp_fourier", "coord_mlp_siren"}:
 }
 ```
 
-`load_mlp_checkpoint` に追加する。
+`models/checkpoint.py` の公開 API に save/load 対応を追加する。
 
 ## 7. `model_dispatch.py` 実装
 

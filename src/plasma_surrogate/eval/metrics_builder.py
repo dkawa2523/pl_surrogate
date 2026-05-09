@@ -62,6 +62,26 @@ def _continuity_ratios(
     return grad_ratio, lap_ratio
 
 
+def _safe_ratio(num: float | None, den: float | None) -> float:
+    if num is None or den is None:
+        return float("nan")
+    num_f = float(num)
+    den_f = float(den)
+    if not np.isfinite(num_f) or not np.isfinite(den_f) or abs(den_f) <= 1.0e-12:
+        return float("nan")
+    return float(num_f / den_f)
+
+
+def _safe_diff(left: float | None, right: float | None) -> float:
+    if left is None or right is None:
+        return float("nan")
+    left_f = float(left)
+    right_f = float(right)
+    if not np.isfinite(left_f) or not np.isfinite(right_f):
+        return float("nan")
+    return float(left_f - right_f)
+
+
 def _load_json(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
@@ -283,11 +303,24 @@ def build_benchmark_eval_row(
                 continuity_lap_ratios.append(float(l_ratio))
     continuity_grad_ratio_all = float(np.mean(np.asarray(continuity_grad_ratios, dtype=np.float64))) if continuity_grad_ratios else float("nan")
     continuity_lap_ratio_all = float(np.mean(np.asarray(continuity_lap_ratios, dtype=np.float64))) if continuity_lap_ratios else float("nan")
+    boundary_deep_rmse_ratio: dict[str, float] = {}
+    boundary_deep_r2_gap: dict[str, float] = {}
+    for name in core_eval_keys:
+        boundary_deep_rmse_ratio[name] = _safe_ratio(boundary_rmse.get(name), deep_rmse.get(name))
+        boundary_deep_r2_gap[name] = _safe_diff(boundary_r2.get(name), deep_r2.get(name))
+
+    def _finite_mean(values: list[float]) -> float:
+        arr = np.asarray([float(v) for v in values if np.isfinite(float(v))], dtype=np.float64)
+        if arr.size == 0:
+            return float("nan")
+        return float(np.mean(arr))
 
     row: dict[str, float | str] = {
         "model_id": model_id,
         "continuity_grad_ratio_all_plasma": float(continuity_grad_ratio_all),
         "continuity_lap_ratio_all_plasma": float(continuity_lap_ratio_all),
+        "sdf_boundary_to_deep_rmse_ratio_mean": _finite_mean(list(boundary_deep_rmse_ratio.values())),
+        "sdf_boundary_minus_deep_r2_mean": _finite_mean(list(boundary_deep_r2_gap.values())),
         "test_poisson_phi": float(poisson_residual_loss(pred_eval["phi"][:, 0])) if "phi" in pred_eval else 0.0,
         "qoi_uniformity": float(single_qoi["uniformity"]),
         "qoi_boundary_gamma_uniformity": float(single_qoi.get("boundary_gamma_uniformity", 0.0)),
@@ -310,6 +343,8 @@ def build_benchmark_eval_row(
         row[f"test_r2_{name}_boundary_in"] = _metric_val(boundary_r2, name)
         row[f"test_rmse_{name}_plasma_deep"] = _metric_val(deep_rmse, name)
         row[f"test_r2_{name}_plasma_deep"] = _metric_val(deep_r2, name)
+        row[f"test_rmse_{name}_boundary_to_deep_ratio"] = _metric_val(boundary_deep_rmse_ratio, name)
+        row[f"test_r2_{name}_boundary_minus_deep"] = _metric_val(boundary_deep_r2_gap, name)
         row[f"test_rmse_{name}_chamber_near"] = _metric_val(chamber_near_rmse, name)
         row[f"test_neg_ratio_{name}_plasma"] = _metric_val(neg_ratio_plasma, name)
         for boundary_type in ("interface", "bc_dir", "wafer"):

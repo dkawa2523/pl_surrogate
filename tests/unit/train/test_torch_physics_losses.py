@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import pytest
-
-from plasma_surrogate.core.torch_backend import require_torch, torch_runtime_available
+from plasma_surrogate.core.torch_backend import require_torch
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.deeponet.boundary_operator_torch import BoundaryOperatorTorch
 from plasma_surrogate.train.loss_composer import compose_torch
 from plasma_surrogate.train.torch_losses import (
@@ -13,10 +13,11 @@ from plasma_surrogate.train.torch_losses import (
     sdf_continuous_weight_map_torch,
 )
 
+pytestmark = pytest.mark.torch_runtime
+
 
 def test_poisson_residual_fd_torch_shape():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     phi = torch.zeros((2, 1, 8, 8), dtype=torch.float32)
     res = poisson_residual_fd_torch(phi)
@@ -24,8 +25,7 @@ def test_poisson_residual_fd_torch_shape():
 
 
 def test_poisson_residual_fd_torch_accepts_2d_eps_mask():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     phi = torch.zeros((2, 1, 8, 8), dtype=torch.float32)
     eps = torch.ones((8, 8), dtype=torch.float32)
@@ -35,8 +35,7 @@ def test_poisson_residual_fd_torch_accepts_2d_eps_mask():
 
 
 def test_physics_terms_torch_with_boundary_operator():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     pred = {
         "log_ne": torch.ones((2, 1, 8, 8), dtype=torch.float32),
@@ -66,8 +65,7 @@ def test_physics_terms_torch_with_boundary_operator():
 
 
 def test_physics_terms_torch_uses_pred_rho_eff_when_present():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     phi = torch.zeros((1, 1, 8, 8), dtype=torch.float32)
     pred_zero = {
@@ -102,8 +100,7 @@ def test_physics_terms_torch_uses_pred_rho_eff_when_present():
 
 
 def test_compose_torch_returns_common_component_keys():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     pred = {
         "log_ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
@@ -121,8 +118,7 @@ def test_compose_torch_returns_common_component_keys():
 
 
 def test_compose_torch_disabled_accepts_noncanonical_field_set():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     pred = {
         "custom_target": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
@@ -138,8 +134,7 @@ def test_compose_torch_disabled_accepts_noncanonical_field_set():
 
 
 def test_masked_huber_loss_torch_respects_mask():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     pred = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]]]], dtype=torch.float32)
     tgt = torch.zeros_like(pred)
@@ -152,8 +147,7 @@ def test_masked_huber_loss_torch_respects_mask():
 
 
 def test_masked_region_huber_loss_torch_boundary_weighting():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     pred = torch.tensor([[[[4.0, 4.0], [1.0, 1.0]]]], dtype=torch.float32)
     tgt = torch.zeros_like(pred)
@@ -169,8 +163,7 @@ def test_masked_region_huber_loss_torch_boundary_weighting():
 
 
 def test_sdf_continuous_weight_map_torch_orders_weights():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     mask = torch.tensor([[1.0, 1.0], [0.0, 0.0]], dtype=torch.float32)
     signed = torch.tensor([[0.0, 4.0], [-0.2, -5.0]], dtype=torch.float32)

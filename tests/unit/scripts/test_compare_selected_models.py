@@ -25,6 +25,7 @@ def test_compare_selected_models_supports_auto_primary_and_dynamic_headers(tmp_p
     ffno_csv = tmp_path / "ffno" / "leaderboard.csv"
     header = [
         "model_id",
+        "input_mode_effective",
         "primary_metric",
         "primary_metric_value",
         "target_family_effective",
@@ -37,14 +38,14 @@ def test_compare_selected_models_supports_auto_primary_and_dynamic_headers(tmp_p
         global_csv,
         header,
         [
-            ["global_mlp", "score_total_dual", 0.42, "allvars", 0.11, 0.22, 0.42, 0.0],
+            ["global_mlp", "table_plus_structure", "score_total_dual", 0.42, "allvars", 0.11, 0.22, 0.42, 0.0],
         ],
     )
     _write_csv(
         ffno_csv,
         header,
         [
-            ["ffno", "test_r2_plasma_mean_dual", 0.71, "allvars", 0.09, 0.18, 0.0, 0.71],
+            ["ffno", "table_plus_structure", "test_r2_plasma_mean_dual", 0.71, "allvars", 0.09, 0.18, 0.0, 0.71],
         ],
     )
     cfg = {
@@ -82,8 +83,8 @@ def test_compare_selected_models_frozen_requires_global_row(tmp_path: Path) -> N
     ffno_csv = tmp_path / "ffno" / "leaderboard.csv"
     _write_csv(
         ffno_csv,
-        ["model_id", "primary_metric", "primary_metric_value"],
-        [["ffno", "score_total_dual", 0.5]],
+        ["model_id", "input_mode_effective", "primary_metric", "primary_metric_value"],
+        [["ffno", "table_only", "score_total_dual", 0.5]],
     )
     cfg = {
         "compare": {

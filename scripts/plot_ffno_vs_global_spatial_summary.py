@@ -17,7 +17,7 @@ from plasma_surrogate.core.dataset_io import load_dataset
 from plasma_surrogate.core.run_bundle import RunBundleLoader
 from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
 from plasma_surrogate.infer.engine import InferenceEngine
-from plasma_surrogate.models.mlp.io import load_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import load_checkpoint
 
 
 DISPLAY_VARS = ("ne", "ni", "Te", "phi")
@@ -45,7 +45,7 @@ def _make_engine(
     geometry_root: Path,
 ) -> InferenceEngine:
     ckpt_dir = run_root / "models" / model_name / "eval_protocol" / split / "checkpoints"
-    model = load_mlp_checkpoint(ckpt_dir)
+    model = load_checkpoint(ckpt_dir)
     bundle = RunBundleLoader.load(run_root, model=model)
     cond_schema = bundle.cond_schema_obj()
     axis_schema = bundle.axis_schema_obj()

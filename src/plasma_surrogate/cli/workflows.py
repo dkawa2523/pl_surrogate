@@ -15,8 +15,22 @@ from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.model_families import COND_ONLY_TORCH_MODELS, GRID_TORCH_MODELS
 from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.data_cleaning_audit import run_data_audit
+from plasma_surrogate.core.input_modes import (
+    GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
+    INPUT_MODE_FALLBACK_APPLIED_KEY,
+    INPUT_MODE_EFFECTIVE_KEY,
+    STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
+    STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+    STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+    build_input_mode_effective_metadata,
+    extract_descriptor_latent_metadata,
+    load_checkpoint_metadata_with_input_mode,
+    merge_effective_runtime_metadata,
+    resolve_runtime_controls,
+)
+from plasma_surrogate.core.model_input_policy import resolve_effective_input_mode_metadata_for_model
 from plasma_surrogate.core.physics_contract import build_physics_cfg
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.data.geometry_provider import build_geometry_provider
 from plasma_surrogate.eval.metrics_builder import (
     build_eval_metrics_payload,
     build_region_metrics,
@@ -24,15 +38,23 @@ from plasma_surrogate.eval.metrics_builder import (
     build_viz_tables_payload,
 )
 from plasma_surrogate.infer.engine import InferenceEngine
+from plasma_surrogate.infer.engine_builder import build_inference_engine
+from plasma_surrogate.infer.cases import InferenceCase, parse_batch_cases, parse_single_case
+from plasma_surrogate.infer.optimize import cond_space_from_stats, validate_optimize_geom_contract
 from plasma_surrogate.models.heads.plasma_head import PlasmaHead
-from plasma_surrogate.models.mlp.io import save_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import save_checkpoint
 from plasma_surrogate.pipeline.runtime_context import (
     build_infer_context,
     build_preprocess_context,
     build_train_context,
 )
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
-from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
+from plasma_surrogate.train.model_dispatch import (
+    TrainDispatchContext,
+    normalize_model_name,
+    run_model_train_predict,
+    validate_runtime_model_policy,
+)
 from plasma_surrogate.viz.runner import VizRunner
 
 DEFAULT_TASK_SPEC: dict[str, Any] = {}
@@ -75,15 +97,25 @@ def _build_inference_engine_from_bundle(
     dataset_root: Path,
     feature_store: Any,
     output_dir: Path,
+    input_mode_meta: dict[str, Any] | None = None,
+    checkpoint_input_mode_meta: dict[str, Any] | None = None,
+    checkpoint_meta: dict[str, Any] | None = None,
+    model_name: str | None = None,
 ) -> InferenceEngine:
     cfg = dict(bundle.cfg or {})
+    strict_input_mode, allow_mode_fallback = resolve_runtime_controls(cfg)
+    effective_input_mode_meta = dict(input_mode_meta or build_input_mode_effective_metadata(cfg))
+    effective_checkpoint_input_mode_meta = dict(checkpoint_input_mode_meta or {})
     model_cfg = cfg.get("model", {})
     inf_cfg = cfg.get("inference", {})
-    return InferenceEngine(
+    resolved_model_name = str(model_name or model_cfg.get("name", "unet"))
+    provider_mode = str(effective_input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")).strip().lower() or "fixed"
+    geometry_provider = build_geometry_provider(dataset_root, provider_mode=provider_mode)
+    return build_inference_engine(
         model=bundle.model,
         cond_schema=bundle.cond_schema_obj(),
         axis_schema=bundle.axis_schema_obj(),
-        geometry_provider=FixedGeometryProvider(dataset_root),
+        geometry_provider=geometry_provider,
         output_dir=output_dir,
         transform_bundle=bundle.transform_bundle(),
         cond_stats=bundle.schemas.get("cond_stats", {}),
@@ -96,13 +128,20 @@ def _build_inference_engine_from_bundle(
         coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
         coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
         coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
+        input_mode_meta=effective_input_mode_meta,
+        strict_input_mode=strict_input_mode,
+        allow_mode_fallback=allow_mode_fallback,
+        checkpoint_meta=dict(checkpoint_meta or {}),
+        checkpoint_input_mode_meta=effective_checkpoint_input_mode_meta,
+        structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
+        latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
         deeponet_head=(
             getattr(bundle.model, "poisson_head", None)
             if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson"
             else None
         )
         or (bundle.model if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson" else None),
-        grid_input_features_cfg=dict(cfg.get("train", {}).get(str(model_cfg.get("name", "unet")), {}).get("input_features", {})),
+        grid_input_features_cfg=dict(cfg.get("train", {}).get(resolved_model_name, {}).get("input_features", {})),
     )
 
 
@@ -164,7 +203,9 @@ def _validate_output_layout(layout: dict[str, Any], y_shape: tuple[int, int, int
 def _resolve_physics_cfg(cfg: dict[str, Any], dataset_root: Path) -> dict[str, Any]:
     train_cfg = cfg.get("train", {})
     phys = train_cfg.get("physics", {})
-    geom_ctx = FixedGeometryProvider(dataset_root).get()
+    input_mode_meta = build_input_mode_effective_metadata(cfg)
+    provider_mode = str(input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")).strip().lower() or "fixed"
+    geom_ctx = build_geometry_provider(dataset_root, provider_mode=provider_mode).get()
     return build_physics_cfg(
         raw_cfg=phys,
         geom_ctx=geom_ctx,
@@ -195,6 +236,96 @@ def _resolve_optimize_backend(opt_cfg: dict[str, Any]) -> str:
     )
 
 
+def _parse_box_space(raw_space: dict[str, Any], *, cfg_key: str) -> dict[str, tuple[float, float]]:
+    out: dict[str, tuple[float, float]] = {}
+    for key, bounds in dict(raw_space or {}).items():
+        name = str(key).strip()
+        if not name:
+            raise ValueError(f"{cfg_key} keys must be non-empty strings")
+        if not isinstance(bounds, (list, tuple)) or len(bounds) != 2:
+            raise ValueError(f"{cfg_key}.{name} must be [lo, hi]")
+        lo = float(bounds[0])
+        hi = float(bounds[1])
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            raise ValueError(f"{cfg_key}.{name} bounds must be finite; got={bounds!r}")
+        if lo > hi:
+            raise ValueError(f"{cfg_key}.{name} requires lo <= hi; got={bounds!r}")
+        out[name] = (lo, hi)
+    return {k: out[k] for k in sorted(out.keys())}
+
+
+def _inference_case_summary_row(*, role: str, case: InferenceCase, result: Any) -> dict[str, Any]:
+    qoi = dict(getattr(result, "qoi", {}) or {})
+    diagnostics = dict(getattr(result, "diagnostics", {}) or {})
+    warnings = list(getattr(result, "warnings", []) or [])
+    return {
+        "role": str(role),
+        "case_id": str(case.case_id),
+        "case_key": str(getattr(result, "case_key", "") or ""),
+        "geom_id": str(case.geom.get("geom_id", "default")),
+        "axis_mode": str(case.axis.get("mode", "")),
+        "axis_value": float(case.axis.get("value", 0.0)),
+        "uniformity": _summary_float(qoi.get("uniformity")),
+        "boundary_gamma_uniformity": _summary_float(qoi.get("boundary_gamma_uniformity")),
+        "poisson_residual_norm": _summary_float(diagnostics.get("poisson_residual_norm")),
+        "bc_phi_mae": _summary_float(diagnostics.get("bc_phi_mae")),
+        "boundary_operator_proxy_loss": _summary_float(diagnostics.get("boundary_operator_proxy_loss")),
+        "warnings": ";".join(str(w) for w in warnings),
+        "cond": dict(case.cond),
+        "geom": dict(case.geom),
+        "axis": dict(case.axis),
+        "qoi": qoi,
+        "diagnostics": diagnostics,
+        "warning_list": warnings,
+    }
+
+
+def _summary_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out if np.isfinite(out) else None
+
+
+def _write_inference_case_summaries(run_dir: Path, rows: list[dict[str, Any]]) -> tuple[Path, Path] | None:
+    if not rows:
+        return None
+    store = ArtifactStore(run_dir / "inference")
+    csv_header = [
+        "role",
+        "case_id",
+        "case_key",
+        "geom_id",
+        "axis_mode",
+        "axis_value",
+        "uniformity",
+        "boundary_gamma_uniformity",
+        "poisson_residual_norm",
+        "bc_phi_mae",
+        "boundary_operator_proxy_loss",
+        "warnings",
+    ]
+    csv_rows = [["" if row.get(key) is None else row.get(key, "") for key in csv_header] for row in rows]
+    csv_path = store.save_csv("cases_summary.csv", csv_header, csv_rows)
+    json_path = store.save_json("cases_summary.json", {"cases": rows})
+    return csv_path, json_path
+
+
+def _write_batch_summary_from_case_rows(engine: InferenceEngine, rows: list[dict[str, Any]]) -> None:
+    batch_rows: list[dict[str, Any]] = []
+    for row in rows:
+        out = dict(row.get("cond", {}) or {})
+        out.update(dict(row.get("qoi", {}) or {}))
+        batch_rows.append(out)
+    if not batch_rows:
+        return
+    header = sorted({key for row in batch_rows for key in row.keys()})
+    engine.store.save_csv("batch/summary.csv", header, [[row.get(key, "") for key in header] for row in batch_rows])
+
+
 def run_preprocess(config_path: str | Path) -> dict[str, Any]:
     ctx = build_preprocess_context(config_path)
     cfg = ctx.cfg
@@ -209,8 +340,14 @@ def run_preprocess(config_path: str | Path) -> dict[str, Any]:
     pre_cfg.setdefault("cond_order", dataset.cond_order)
     pre_cfg.setdefault("axis_schema", {"mode": "steady", "harmonics": 1})
     pre_cfg.setdefault("featurization_root", str(run_dir / "featurization"))
+    input_mode_meta = build_input_mode_effective_metadata(cfg)
 
-    pre = PreprocessRunner(pre_cfg, run_dir / "preprocessing")
+    pre = PreprocessRunner(
+        pre_cfg,
+        run_dir / "preprocessing",
+        runtime_input_mode_meta=input_mode_meta,
+        runtime_cfg=dict(cfg.get("runtime", {})),
+    )
     output = pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
     audit = run_data_audit(
         cases=dataset.cases,
@@ -304,6 +441,7 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     y_vars = _resolve_y_vars(dataset.cases)
     if bundle is None:
         raise RuntimeError("RuntimeContext missing RunBundle for train")
+    input_mode_meta = build_input_mode_effective_metadata(cfg)
 
     _write_run_metadata(run_dir, cfg, dataset.shape, y_vars)
     split = bundle.split_random()
@@ -321,7 +459,16 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     te = np.array([case_to_idx[cid] for cid in split["test"]], dtype=np.int64)
 
     model_cfg = cfg.get("model", {})
-    model_name = str(model_cfg.get("name", "global_mlp"))
+    model_name = normalize_model_name(model_cfg.get("name", "global_mlp"))
+    input_mode_meta_effective = resolve_effective_input_mode_metadata_for_model(
+        model_name=model_name,
+        input_mode_meta=input_mode_meta,
+    )
+    provider_mode_effective = str(
+        input_mode_meta_effective.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")
+    ).strip().lower() or "fixed"
+    geometry_provider = build_geometry_provider(dataset.geometry_root, provider_mode=provider_mode_effective)
+    input_mode_effective = str(input_mode_meta_effective.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower()
     phi_mode = str(model_cfg.get("phi_mode", "direct"))
     phi_hybrid_steps = int(model_cfg.get("phi_hybrid_steps", 1))
     train_cfg = cfg.get("train", {})
@@ -337,14 +484,14 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
             geom_ref={"geom_id": "default"},
             axis_value=0.0,
             axis_mode=axis_mode,
-            geometry_provider=FixedGeometryProvider(dataset.geometry_root),
+            geometry_provider=geometry_provider,
         )
     if model_name == "deeponet_plasma" and geom_ctx is None:
         geom_ctx = feat_store.get_context(
             geom_ref={"geom_id": "default"},
             axis_value=0.0,
             axis_mode=axis_mode,
-            geometry_provider=FixedGeometryProvider(dataset.geometry_root),
+            geometry_provider=geometry_provider,
         )
     supervised_mask = np.asarray(geom_ctx.mask_plasma, dtype=np.float32) if (geom_ctx is not None and use_plasma_mask) else None
     supervised_distance = np.asarray(geom_ctx.distance_any, dtype=np.float32) if (geom_ctx is not None and use_plasma_mask) else None
@@ -420,6 +567,18 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
             coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
             coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
             coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
+            structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
+            latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
+            input_mode_effective=input_mode_effective,
+            structure_adapter_mode_effective=str(
+                input_mode_meta_effective.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "")
+            ),
+            structure_descriptor_profile_effective=str(
+                input_mode_meta_effective.get(STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY, "none")
+            ),
+            structure_latent_profile_effective=str(
+                input_mode_meta_effective.get(STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY, "none")
+            ),
         )
     )
     model = dispatch.model
@@ -456,7 +615,11 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     r2_plasma = dict(eval_payload.get("r2_plasma", {}))
 
     ArtifactStore(run_dir / "eval").save_json("test_metrics.json", eval_payload)
-    save_mlp_checkpoint(model, run_dir / "checkpoints")
+    checkpoint_input_mode_meta = merge_effective_runtime_metadata(
+        runtime_meta=input_mode_meta_effective,
+        dispatch_meta=dict(dispatch.extra_artifacts or {}),
+    )
+    save_checkpoint(model, run_dir / "checkpoints", extra_meta=checkpoint_input_mode_meta)
     _write_stage_manifest(
         run_dir=run_dir,
         stage="train",
@@ -494,66 +657,91 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
     feat_store = ctx.feature_store
     if bundle is None:
         raise RuntimeError("RuntimeContext missing RunBundle for infer")
+    input_mode_meta = build_input_mode_effective_metadata(cfg)
+    checkpoint_meta_path = run_dir / "checkpoints" / "meta.json"
+    checkpoint_meta, checkpoint_input_mode_meta = load_checkpoint_metadata_with_input_mode(checkpoint_meta_path)
 
     model = bundle.model
     if model is None:
         raise FileNotFoundError(f"Missing model checkpoint metadata under {run_dir / 'checkpoints'}")
     model_cfg = cfg.get("model", {})
-    model_name = str(model_cfg.get("name", "global_mlp"))
+    model_name = validate_runtime_model_policy(
+        input_mode_effective=str(input_mode_meta.get("input_mode_effective", "")),
+        model_name=model_cfg.get("name", "global_mlp"),
+    )
+    input_mode_meta = resolve_effective_input_mode_metadata_for_model(
+        model_name=model_name,
+        input_mode_meta=input_mode_meta,
+    )
+    input_mode_effective = str(input_mode_meta.get(INPUT_MODE_EFFECTIVE_KEY, "")).strip().lower()
+    provider_mode_effective = str(
+        input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")
+    ).strip().lower() or "fixed"
     inf_cfg = cfg.get("inference", {})
     cond_schema = bundle.cond_schema_obj()
     axis_schema = bundle.axis_schema_obj()
-    transforms = bundle.transform_bundle()
-    dataset_root = dataset.geometry_root
-    engine = InferenceEngine(
-        model=model,
-        cond_schema=cond_schema,
-        axis_schema=axis_schema,
-        geometry_provider=FixedGeometryProvider(dataset_root),
-        output_dir=run_dir / "inference",
-        transform_bundle=transforms,
-        cond_stats=bundle.schemas.get("cond_stats", {}),
-        phi_mode=str(model_cfg.get("phi_mode", "direct")),
-        phi_hybrid_steps=int(model_cfg.get("phi_hybrid_steps", 1)),
-        poisson_refine_iters=int(inf_cfg.get("poisson_refine", {}).get("iters", 0)),
-        ood_cfg=inf_cfg.get("ood", {"poisson_residual_limit": 1e2}),
+    engine = _build_inference_engine_from_bundle(
+        bundle=bundle,
+        dataset_root=dataset.geometry_root,
         feature_store=feat_store,
-        coord_scaler=bundle.transforms.get("coord_scaler", {}),
-        coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
-        coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
-        coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
-        deeponet_head=(
-            getattr(model, "poisson_head", None)
-            if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson"
-            else None
-        )
-        or (model if str(model_cfg.get("phi_mode", "direct")) == "deeponet_poisson" else None),
-        grid_input_features_cfg=dict(cfg.get("train", {}).get(model_name, {}).get("input_features", {})),
+        output_dir=run_dir / "inference",
+        input_mode_meta=input_mode_meta,
+        checkpoint_input_mode_meta=checkpoint_input_mode_meta,
+        checkpoint_meta=checkpoint_meta,
+        model_name=model_name,
     )
 
     results: dict[str, Any] = {}
+    case_summary_rows: list[dict[str, Any]] = []
     single_cfg = inf_cfg.get("single", {})
     if single_cfg.get("enabled", True):
-        cond = single_cfg.get("cond", {k: 0.5 for k in cond_schema.order})
-        axis = single_cfg.get("axis", {"mode": axis_schema.mode, "value": 0.0})
-        geom = single_cfg.get("geom", {"geom_id": "default"})
-        single = engine.single_run_aggregated(cond=cond, geom=geom, axis=axis)
+        single_case = parse_single_case(single_cfg, cond_schema=cond_schema, axis_schema=axis_schema)
+        single = engine.single_run_aggregated(cond=single_case.cond, geom=single_case.geom, axis=single_case.axis)
         results["single_qoi"] = single.qoi
         results["single_warnings"] = list(single.warnings)
+        case_summary_rows.append(_inference_case_summary_row(role="single", case=single_case, result=single))
 
     batch_cfg = inf_cfg.get("batch", {})
     if batch_cfg.get("enabled", False):
-        conds = batch_cfg.get("conds", [{k: 0.2 for k in cond_schema.order}, {k: 0.8 for k in cond_schema.order}])
-        axis = batch_cfg.get("axis", {"mode": axis_schema.mode, "value": 0.0})
-        geom = batch_cfg.get("geom", {"geom_id": "default"})
-        rows = engine.batch_run(conds=conds, geom=geom, axis=axis)
-        results["batch_count"] = len(rows)
+        batch_cases = parse_batch_cases(
+            batch_cfg,
+            cond_schema=cond_schema,
+            axis_schema=axis_schema,
+            config_dir=Path(config_path).resolve().parent,
+        )
+        batch_summary_rows = []
+        for case in batch_cases:
+            result = engine.single_run_aggregated(cond=case.cond, geom=case.geom, axis=case.axis)
+            row = _inference_case_summary_row(role="batch", case=case, result=result)
+            batch_summary_rows.append(row)
+            case_summary_rows.append(row)
+        _write_batch_summary_from_case_rows(engine, batch_summary_rows)
+        results["batch_count"] = len(batch_cases)
 
     opt_cfg = inf_cfg.get("optimize", {})
     if opt_cfg.get("enabled", False):
         axis = opt_cfg.get("axis", {"mode": axis_schema.mode, "value": 0.0})
-        space_cfg = opt_cfg.get("space", {k: [0.0, 1.0] for k in cond_schema.order})
-        space = {k: (float(v[0]), float(v[1])) for k, v in space_cfg.items()}
+        space_cfg = opt_cfg.get("space")
+        if space_cfg is None:
+            space = cond_space_from_stats(
+                list(cond_schema.order),
+                bundle.schemas.get("cond_stats", {}),
+                cfg_key="inference.optimize.space",
+            )
+        else:
+            space = _parse_box_space(space_cfg, cfg_key="inference.optimize.space")
+        geom_space_raw = _parse_box_space(
+            dict(opt_cfg.get("geom_space", {}) or {}),
+            cfg_key="inference.optimize.geom_space",
+        )
+        geom_cfg = dict(opt_cfg.get("geom", {"geom_id": "default"}))
+        geom_space = validate_optimize_geom_contract(
+            input_mode=input_mode_effective,
+            provider_mode=provider_mode_effective,
+            geom_space=geom_space_raw,
+            geom_ref=geom_cfg,
+            label_prefix="inference.optimize",
+        )
         backend = _resolve_optimize_backend(opt_cfg)
         backend_cfg = dict(opt_cfg.get("backend_cfg", {}) or {})
         if backend == "csv" and "csv_path" in backend_cfg:
@@ -563,24 +751,40 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
             backend_cfg["csv_path"] = str(csv_path)
         best = engine.optimize_run(
             space=space,
+            geom_space=geom_space if geom_space else None,
             n_trials=int(opt_cfg.get("n_trials", 10)),
-            geom=opt_cfg.get("geom", {"geom_id": "default"}),
+            geom=geom_cfg,
             axis=axis,
             seed=int(opt_cfg.get("seed", 0)),
             backend=backend,
             backend_cfg=backend_cfg,
         )
         results["optimize"] = best
+    case_summary_paths = _write_inference_case_summaries(run_dir, case_summary_rows)
+    if case_summary_paths is not None:
+        results["cases_summary"] = {
+            "csv": str(case_summary_paths[0]),
+            "json": str(case_summary_paths[1]),
+            "count": len(case_summary_rows),
+        }
+    infer_summary = {
+        **input_mode_meta,
+        **extract_descriptor_latent_metadata(checkpoint_meta),
+        INPUT_MODE_FALLBACK_APPLIED_KEY: bool(getattr(engine, "input_mode_fallback_applied", False)),
+        "result_keys": sorted(list(results.keys())),
+        "inference_case_count": len(case_summary_rows),
+    }
+    infer_summary_path = ArtifactStore(run_dir / "inference").save_json("summary.json", infer_summary)
 
     _write_stage_manifest(
         run_dir=run_dir,
         stage="infer",
         config_path=config_path,
         depends_on=["train"],
-        produced=[str(run_dir / "inference")],
+        produced=[str(run_dir / "inference"), str(infer_summary_path)],
         extras={"keys": sorted(list(results.keys()))},
     )
-    return {"run_dir": str(run_dir), **results}
+    return {"run_dir": str(run_dir), "summary": str(infer_summary_path), **results}
 
 
 def run_evaluate(config_path: str | Path) -> dict[str, Any]:
@@ -593,9 +797,20 @@ def run_evaluate(config_path: str | Path) -> dict[str, Any]:
     metrics_path = eval_dir / "test_metrics.json"
     if not metrics_path.exists():
         run_train(config_path)
-    payload = {}
+    payload: dict[str, Any] = {}
     if metrics_path.exists():
-        payload = json.loads(metrics_path.read_text(encoding="utf-8"))
+        payload = dict(json.loads(metrics_path.read_text(encoding="utf-8")))
+    ckpt_meta_path = run_dir / "checkpoints" / "meta.json"
+    if ckpt_meta_path.exists():
+        ckpt_meta = json.loads(ckpt_meta_path.read_text(encoding="utf-8"))
+        payload.update(extract_descriptor_latent_metadata(ckpt_meta))
+    model_name = normalize_model_name(dict(ctx.cfg.get("model", {})).get("name", "global_mlp"))
+    payload.update(
+        resolve_effective_input_mode_metadata_for_model(
+            model_name=model_name,
+            input_mode_meta=build_input_mode_effective_metadata(ctx.cfg),
+        )
+    )
     out_path = ArtifactStore(eval_dir).save_json("summary.json", payload)
     _write_stage_manifest(
         run_dir=run_dir,
@@ -680,7 +895,9 @@ def run_viz(config_path: str | Path) -> dict[str, Any]:
     if single_root.exists():
         diag_rows: list[dict[str, float | str]] = []
         region_rows: list[dict[str, float | str]] = []
-        geom_ctx = FixedGeometryProvider(run_dir / "dataset").get()
+        input_mode_meta = build_input_mode_effective_metadata(cfg)
+        provider_mode = str(input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")).strip().lower() or "fixed"
+        geom_ctx = build_geometry_provider(run_dir / "dataset", provider_mode=provider_mode).get()
         mask_plasma = geom_ctx.mask_plasma > 0.5
         mask_bulk = geom_ctx.regions.get("mask_bulk")
         if mask_bulk is None:

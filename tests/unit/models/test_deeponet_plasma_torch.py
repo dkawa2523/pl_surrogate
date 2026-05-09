@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import numpy as np
 import pytest
+import numpy as np
 
-from plasma_surrogate.core.torch_backend import require_torch, torch_runtime_available
+from plasma_surrogate.core.torch_backend import require_torch
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.deeponet.plasma_operator_torch import DeepONetPlasmaOperatorTorch
+
+pytestmark = pytest.mark.torch_runtime
 
 
 def test_deeponet_plasma_torch_forward_shapes():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     model = DeepONetPlasmaOperatorTorch(cond_dim=5, grid_shape=(8, 8), output_keys=["log_ne", "Te", "phi"])
     cond = torch.rand((2, 5), dtype=torch.float32)
@@ -21,8 +23,7 @@ def test_deeponet_plasma_torch_forward_shapes():
 
 
 def test_deeponet_plasma_torch_forward_geom_set_pool_shapes():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     model = DeepONetPlasmaOperatorTorch(
         cond_dim=5,
@@ -42,8 +43,7 @@ def test_deeponet_plasma_torch_forward_geom_set_pool_shapes():
 
 
 def test_deeponet_plasma_torch_forward_fused_path_shapes():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     model = DeepONetPlasmaOperatorTorch(
         cond_dim=5,
@@ -64,8 +64,7 @@ def test_deeponet_plasma_torch_forward_fused_path_shapes():
 
 
 def test_deeponet_plasma_torch_forward_fused_global_local_shapes():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     model = DeepONetPlasmaOperatorTorch(
         cond_dim=5,
@@ -89,9 +88,78 @@ def test_deeponet_plasma_torch_forward_fused_global_local_shapes():
     assert torch.isfinite(vals).all()
 
 
+def test_deeponet_plasma_torch_rejects_invalid_dot_skip_mode():
+    require_torch_runtime()
+    with pytest.raises(ValueError, match="output_path_dot_skip_mode"):
+        DeepONetPlasmaOperatorTorch(
+            cond_dim=5,
+            grid_shape=(8, 8),
+            output_keys=["ne", "ni", "Te", "phi"],
+            output_path_mode="fused",
+            output_path_dot_skip_mode="invalid",
+        )
+
+
+def test_deeponet_plasma_torch_forward_fused_learned_per_var_dot_skip_shapes():
+    require_torch_runtime()
+    torch = require_torch()
+    model = DeepONetPlasmaOperatorTorch(
+        cond_dim=5,
+        grid_shape=(8, 8),
+        output_keys=["ne", "ni", "Te", "phi"],
+        trunk_input_mode="geom_feature_pack",
+        branch_mode="cond_only",
+        output_path_mode="fused",
+        output_path_dot_skip=0.25,
+        output_path_dot_skip_mode="learned_per_var",
+        output_path_fused_hidden_dim=32,
+    )
+    cond = torch.rand((2, 5), dtype=torch.float32)
+    x = torch.rand((2, 16, 2), dtype=torch.float32)
+    f = torch.rand((2, 16, 3), dtype=torch.float32)
+    out = model.forward(sensors={"x": None, "v": None}, query={"x": x, "f": f}, cond=cond)
+    assert set(out.keys()) == {"ne", "ni", "Te", "phi"}
+    assert tuple(out["phi"].shape) == (2, 16, 1)
+    assert model.output_path_dot_skip_logits is not None
+    assert model.to_meta()["output_path_dot_skip_mode"] == "learned_per_var"
+    vals = torch.cat([out["ne"], out["ni"], out["Te"], out["phi"]], dim=2)
+    assert torch.isfinite(vals).all()
+
+
+def test_deeponet_plasma_torch_learned_per_var_dot_skip_state_roundtrip():
+    require_torch_runtime()
+    torch = require_torch()
+    kwargs = {
+        "cond_dim": 5,
+        "grid_shape": (8, 8),
+        "output_keys": ["ne", "ni", "Te", "phi"],
+        "trunk_input_mode": "geom_feature_pack",
+        "branch_mode": "cond_only",
+        "output_path_mode": "fused",
+        "output_path_dot_skip": 0.25,
+        "output_path_dot_skip_mode": "learned_per_var",
+        "output_path_fused_hidden_dim": 32,
+    }
+    model_a = DeepONetPlasmaOperatorTorch(**kwargs, seed=3)
+    model_b = DeepONetPlasmaOperatorTorch(**kwargs, seed=19)
+    cond = torch.rand((2, 5), dtype=torch.float32)
+    x = torch.rand((2, 16, 2), dtype=torch.float32)
+    f = torch.rand((2, 16, 3), dtype=torch.float32)
+    pred_a = model_a.forward(sensors={"x": None, "v": None}, query={"x": x, "f": f}, cond=cond)
+    state = model_a.state_dict_numpy()
+    model_b.load_state_dict_numpy(state)
+    pred_b = model_b.forward(sensors={"x": None, "v": None}, query={"x": x, "f": f}, cond=cond)
+    for key in ("ne", "ni", "Te", "phi"):
+        np.testing.assert_allclose(
+            pred_a[key].detach().cpu().numpy(),
+            pred_b[key].detach().cpu().numpy(),
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+
 def test_deeponet_plasma_cond_only_skips_sensor_value_build():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     model = DeepONetPlasmaOperatorTorch(
         cond_dim=5,
@@ -124,3 +192,55 @@ def test_deeponet_plasma_cond_only_skips_sensor_value_build():
     cond = torch.rand((2, 5), dtype=torch.float32)
     out = model.predict_fields_torch(cond, geom_ctx=geom)
     assert set(out.keys()) == {"ne", "ni", "Te", "phi"}
+
+
+def test_deeponet_plasma_missing_query_features_policy_error_raises():
+    require_torch_runtime()
+    torch = require_torch()
+    model = DeepONetPlasmaOperatorTorch(
+        cond_dim=5,
+        grid_shape=(8, 8),
+        output_keys=["ne", "ni", "Te", "phi"],
+        trunk_input_mode="geom_feature_pack",
+        branch_mode="cond_only",
+        missing_geom_feature_policy="error",
+    )
+    cond = torch.rand((2, 5), dtype=torch.float32)
+    x = torch.rand((2, 16, 2), dtype=torch.float32)
+    with pytest.raises(ValueError, match="query.f"):
+        model.forward(sensors={"x": None, "v": None}, query={"x": x}, cond=cond)
+
+
+def test_deeponet_plasma_missing_query_features_policy_warn_zero_runs():
+    require_torch_runtime()
+    torch = require_torch()
+    model = DeepONetPlasmaOperatorTorch(
+        cond_dim=5,
+        grid_shape=(8, 8),
+        output_keys=["ne", "ni", "Te", "phi"],
+        trunk_input_mode="geom_feature_pack",
+        branch_mode="cond_only",
+        missing_geom_feature_policy="warn_zero",
+    )
+    cond = torch.rand((2, 5), dtype=torch.float32)
+    x = torch.rand((2, 16, 2), dtype=torch.float32)
+    with pytest.warns(RuntimeWarning, match="query.f"):
+        out = model.forward(sensors={"x": None, "v": None}, query={"x": x}, cond=cond)
+    vals = torch.cat([out["ne"], out["ni"], out["Te"], out["phi"]], dim=2)
+    assert torch.isfinite(vals).all()
+
+
+def test_deeponet_plasma_missing_sensor_features_policy_error_raises():
+    require_torch_runtime()
+    torch = require_torch()
+    model = DeepONetPlasmaOperatorTorch(
+        cond_dim=5,
+        grid_shape=(8, 8),
+        output_keys=["ne", "ni", "Te", "phi"],
+        branch_mode="moments",
+        missing_geom_feature_policy="error",
+    )
+    cond = torch.rand((2, 5), dtype=torch.float32)
+    x = torch.rand((2, 16, 2), dtype=torch.float32)
+    with pytest.raises(ValueError, match="sensors.v"):
+        model.forward(sensors={"x": x, "v": None}, query={"x": x}, cond=cond)

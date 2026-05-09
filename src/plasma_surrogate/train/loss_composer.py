@@ -855,9 +855,9 @@ def compose_supervised_numpy(
         if spatial_consistency_enabled and name in spatial_consistency_vars and spatial_consistency_lambda > 0.0:
             if mask_arr is None:
                 raise ValueError("supervised.spatial_consistency requires supervised.mask=plasma_only")
-            m_sp = m if "m" in locals() else mask_arr
-            d_sp = d_map if "d_map" in locals() else distance_arr
-            ds_sp = d_signed if "d_signed" in locals() else signed_arr
+            m_sp = m
+            d_sp = d_map
+            ds_sp = d_signed
             if d_sp is None and ds_sp is None:
                 raise ValueError("supervised.spatial_consistency requires distance_any or distance_signed")
             if ds_sp is None:
@@ -995,9 +995,9 @@ def compose_supervised_numpy(
     return float(total), grads, per_var_loss
 
 
-def _as_bchw(x: Any, *, key: str):
+def _as_bchw(x: Any, *, key: str, device: Any | None = None):
     torch = require_torch()
-    t = torch.as_tensor(x, dtype=torch.float32)
+    t = torch.as_tensor(x, dtype=torch.float32, device=device)
     if t.ndim == 2:
         t = t[None, None, ...]
     if t.ndim == 3:
@@ -1100,7 +1100,9 @@ def compose_supervised_torch(
 
     torch = require_torch()
     cfg = _resolve_supervised_cfg(loss_cfg)
-    tgt = torch.as_tensor(target_fields, dtype=torch.float32)
+    first_pred = pred_fields[str(y_order[0])] if y_order else None
+    pred_device = torch.as_tensor(first_pred, dtype=torch.float32).device if first_pred is not None else None
+    tgt = torch.as_tensor(target_fields, dtype=torch.float32, device=pred_device)
     if tgt.ndim != 4:
         raise ValueError(f"target_fields must be [B,C,H,W], got {tuple(tgt.shape)}")
     if int(tgt.shape[1]) != len(y_order):
@@ -1110,12 +1112,12 @@ def compose_supervised_torch(
         m = None
         d_any = None
     else:
-        m = _as_bchw(mask, key="mask")
+        m = _as_bchw(mask, key="mask", device=tgt.device)
         if int(m.shape[0]) == 1 and int(tgt.shape[0]) > 1:
             m = m.expand(int(tgt.shape[0]), -1, -1, -1)
         d_any = None
         if distance_any is not None:
-            d_any = _as_bchw(distance_any, key="distance_any")
+            d_any = _as_bchw(distance_any, key="distance_any", device=tgt.device)
             if int(d_any.shape[0]) == 1 and int(tgt.shape[0]) > 1:
                 d_any = d_any.expand(int(tgt.shape[0]), -1, -1, -1)
 
@@ -1248,7 +1250,7 @@ def compose_supervised_torch(
         }
 
     for i, name in enumerate(y_order):
-        pred = _as_bchw(pred_fields[name], key=f"pred_{name}")
+        pred = _as_bchw(pred_fields[name], key=f"pred_{name}", device=tgt.device)
         err = pred - tgt[:, i : i + 1]
         var_delta = float(delta_by_var.get(name, cfg["delta"])) if delta_by_var else float(cfg["delta"])
         if cfg["type"] == "huber":

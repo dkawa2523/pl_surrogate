@@ -6,12 +6,15 @@ from pathlib import Path
 import yaml
 
 from plasma_surrogate.benchmark.runner import BenchmarkRunner
+from plasma_surrogate.core.input_modes import input_mode_metadata_keys
+from tests._config_presets import runtime_table_only
 
 
 def test_benchmark_runner_smoke(tmp_path: Path):
     cfg = {
         "benchmark": {
             "output_dir": str(tmp_path / "bench"),
+            "runtime": runtime_table_only(),
             "dataset": {"n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 0},
             "profile": "m7_global_frozen_ref",
             "seed": 7,
@@ -43,3 +46,5 @@ def test_benchmark_runner_smoke(tmp_path: Path):
     assert "artifact_hashes" in resolved
     assert "feature_hash" in resolved["artifact_hashes"]
     assert "sampling_hash" in resolved["artifact_hashes"]
+    for key in input_mode_metadata_keys():
+        assert key in resolved

@@ -5,8 +5,15 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import warnings
 
 from plasma_surrogate.core.torch_backend import require_torch
+from plasma_surrogate.models._torch_spatial_common import _resolve_torch_device
+
+
+def _safe_logit(prob: float) -> float:
+    p = float(np.clip(float(prob), 1.0e-4, 1.0 - 1.0e-4))
+    return float(np.log(p / (1.0 - p)))
 
 
 class DeepONetPlasmaOperatorTorch:
@@ -41,13 +48,16 @@ class DeepONetPlasmaOperatorTorch:
         latent_layer_norm: bool = False,
         output_path_mode: str = "dot",
         output_path_dot_skip: float = 0.25,
+        output_path_dot_skip_mode: str = "fixed",
         output_path_fused_hidden_dim: int = 96,
         output_path_global_local_enabled: bool = False,
         output_path_global_hidden_dim: int = 64,
+        missing_geom_feature_policy: str = "warn_zero",
         seed: int = 0,
     ) -> None:
         torch = require_torch()
         self._torch = torch
+        self.device = _resolve_torch_device(torch)
         self.cond_dim = int(cond_dim)
         self.grid_shape = (int(grid_shape[0]), int(grid_shape[1]))
         self.flatten_order = str(flatten_order)
@@ -90,9 +100,15 @@ class DeepONetPlasmaOperatorTorch:
         self.output_path_dot_skip = float(output_path_dot_skip)
         if not np.isfinite(self.output_path_dot_skip):
             raise ValueError("output_path_dot_skip must be finite")
+        self.output_path_dot_skip_mode = str(output_path_dot_skip_mode).strip().lower()
+        if self.output_path_dot_skip_mode not in {"fixed", "learned_per_var"}:
+            raise ValueError("output_path_dot_skip_mode must be one of: fixed, learned_per_var")
         self.output_path_fused_hidden_dim = int(max(int(output_path_fused_hidden_dim), 8))
         self.output_path_global_local_enabled = bool(output_path_global_local_enabled)
         self.output_path_global_hidden_dim = int(max(int(output_path_global_hidden_dim), 8))
+        self.missing_geom_feature_policy = str(missing_geom_feature_policy).strip().lower()
+        if self.missing_geom_feature_policy not in {"warn_zero", "error"}:
+            raise ValueError("missing_geom_feature_policy must be one of: warn_zero, error")
         self.branch_mode = str(branch_mode).strip().lower()
         if self.branch_mode not in {"moments", "set_mlp_pool", "cond_only"}:
             raise ValueError("branch_mode must be one of: moments, set_mlp_pool, cond_only")
@@ -148,8 +164,20 @@ class DeepONetPlasmaOperatorTorch:
                 nn.Tanh(),
                 nn.Linear(self.output_path_fused_hidden_dim, 1),
             )
+            if self.output_path_dot_skip_mode == "learned_per_var":
+                self.output_path_dot_skip_logits = nn.Parameter(
+                    self._torch.full(
+                        (self.out_dim,),
+                        _safe_logit(self.output_path_dot_skip),
+                        dtype=self._torch.float32,
+                        device=self.device,
+                    )
+                )
+            else:
+                self.output_path_dot_skip_logits = None
         else:
             self.fused_head = None
+            self.output_path_dot_skip_logits = None
         if self.output_path_global_local_enabled:
             self.global_head = nn.Sequential(
                 nn.Linear(self.cond_dim, self.output_path_global_hidden_dim),
@@ -184,7 +212,12 @@ class DeepONetPlasmaOperatorTorch:
             )
             if self.residual_head_gain_mode == "learned":
                 self.residual_scale = nn.Parameter(
-                    self._torch.full((1,), float(self.residual_head_scale_init), dtype=self._torch.float32)
+                    self._torch.full(
+                        (1,),
+                        float(self.residual_head_scale_init),
+                        dtype=self._torch.float32,
+                        device=self.device,
+                    )
                 )
             else:
                 self.residual_scale = None
@@ -192,11 +225,13 @@ class DeepONetPlasmaOperatorTorch:
             self.residual_cond = None
             self.residual_head = None
             self.residual_scale = None
-        self.out_bias = nn.Parameter(self._torch.zeros((self.out_dim,), dtype=self._torch.float32))
+        self.out_bias = nn.Parameter(self._torch.zeros((self.out_dim,), dtype=self._torch.float32, device=self.device))
         self._attached_poisson_head: Any | None = None
         self._attached_boundary_operator: Any | None = None
         self._static_feature_rows: np.ndarray | None = None
         self._static_feature_channels: list[str] = []
+        self._missing_geom_warned_keys: set[tuple[str, tuple[str, ...]]] = set()
+        self._move_modules_to_device()
 
     @staticmethod
     def _build_coord_flat(shape: tuple[int, int], order: str) -> np.ndarray:
@@ -212,6 +247,22 @@ class DeepONetPlasmaOperatorTorch:
             raise ValueError(f"{name} must be non-empty")
         if int(np.min(idx)) < 0 or int(np.max(idx)) >= self.n_points:
             raise ValueError(f"{name} out of range for n_points={self.n_points}")
+
+    def _handle_missing_geom_features(self, *, role: str, missing_names: list[str]) -> None:
+        names = tuple(sorted(str(v) for v in list(missing_names) if str(v)))
+        if len(names) == 0:
+            return
+        msg = (
+            f"DeepONet geom-feature missing for {role}: missing={list(names)}; "
+            f"policy={self.missing_geom_feature_policy}"
+        )
+        if self.missing_geom_feature_policy == "error":
+            raise ValueError(msg)
+        warn_key = (str(role), names)
+        if warn_key in self._missing_geom_warned_keys:
+            return
+        warnings.warn(msg + " -> zero fill applied", RuntimeWarning, stacklevel=2)
+        self._missing_geom_warned_keys.add(warn_key)
 
     def named_parameters(self):
         seen: set[int] = set()
@@ -255,6 +306,11 @@ class DeepONetPlasmaOperatorTorch:
         if pid not in seen:
             seen.add(pid)
             yield "out_bias", self.out_bias
+        if self.output_path_dot_skip_logits is not None:
+            pid = id(self.output_path_dot_skip_logits)
+            if pid not in seen:
+                seen.add(pid)
+                yield "output_path_dot_skip_logits", self.output_path_dot_skip_logits
         if self._attached_poisson_head is not None and hasattr(self._attached_poisson_head, "named_parameters"):
             yield from _yield_named(self._attached_poisson_head, "poisson_head.")
         if self._attached_boundary_operator is not None and hasattr(self._attached_boundary_operator, "named_parameters"):
@@ -263,6 +319,37 @@ class DeepONetPlasmaOperatorTorch:
     def parameters(self):
         for _, p in self.named_parameters():
             yield p
+
+    def _move_modules_to_device(self) -> None:
+        module_names = (
+            "sensor_encoder",
+            "branch",
+            "trunk",
+            "fused_head",
+            "global_head",
+            "branch_latent_norm",
+            "trunk_latent_norm",
+            "trunk_film",
+            "residual_cond",
+            "residual_head",
+        )
+        for name in module_names:
+            module = getattr(self, name, None)
+            if module is not None and hasattr(module, "to"):
+                module.to(self.device)
+        for name in ("residual_scale", "out_bias", "output_path_dot_skip_logits"):
+            param = getattr(self, name, None)
+            if param is not None and hasattr(param, "data"):
+                param.data = param.data.to(self.device)
+        for name in ("_attached_poisson_head", "_attached_boundary_operator"):
+            obj = getattr(self, name, None)
+            if obj is not None and hasattr(obj, "to"):
+                obj.to(self.device)
+
+    def to(self, device):
+        self.device = device
+        self._move_modules_to_device()
+        return self
 
     def train(self) -> None:
         if self.sensor_encoder is not None:
@@ -314,9 +401,13 @@ class DeepONetPlasmaOperatorTorch:
 
     def attach_poisson_head(self, head: Any) -> None:
         self._attached_poisson_head = head
+        if hasattr(head, "to"):
+            head.to(self.device)
 
     def attach_boundary_operator(self, op: Any) -> None:
         self._attached_boundary_operator = op
+        if hasattr(op, "to"):
+            op.to(self.device)
 
     def set_static_spatial_features(self, rows: np.ndarray, *, channels: list[str]) -> None:
         arr = np.asarray(rows, dtype=np.float32)
@@ -374,6 +465,10 @@ class DeepONetPlasmaOperatorTorch:
             return base
         qf = query.get("f")
         if qf is None:
+            self._handle_missing_geom_features(
+                role="query.f",
+                missing_names=list(self.query_feature_names),
+            )
             qf = self._torch.zeros((int(x_q.shape[0]), int(x_q.shape[1]), 3), dtype=x_q.dtype, device=x_q.device)
         else:
             qf = self._torch.as_tensor(qf, dtype=x_q.dtype, device=x_q.device)
@@ -384,6 +479,10 @@ class DeepONetPlasmaOperatorTorch:
             if int(qf.shape[-1]) > 3:
                 qf = qf[..., :3]
             elif int(qf.shape[-1]) < 3:
+                self._handle_missing_geom_features(
+                    role="query.f",
+                    missing_names=list(self.query_feature_names[int(qf.shape[-1]) :]),
+                )
                 pad = self._torch.zeros((int(qf.shape[0]), int(qf.shape[1]), 3 - int(qf.shape[-1])), dtype=qf.dtype, device=qf.device)
                 qf = self._torch.cat([qf, pad], dim=2)
         return self._torch.cat([base, qf], dim=-1)
@@ -393,18 +492,27 @@ class DeepONetPlasmaOperatorTorch:
             return cond
         sv = sensors.get("v")
         if sv is None:
+            self._handle_missing_geom_features(
+                role="sensors.v",
+                missing_names=list(self.sensor_feature_names),
+            )
             bsz = cond.shape[0]
             if self.sensor_pool_mode == "set_mlp_pool":
                 pooled = self._torch.zeros((bsz, 2 * self.sensor_embed_dim), dtype=cond.dtype, device=cond.device)
             else:
                 pooled = self._torch.zeros((bsz, 4 * self.sensor_feature_dim), dtype=cond.dtype, device=cond.device)
         else:
+            sv = self._torch.as_tensor(sv, dtype=cond.dtype, device=cond.device)
             if sv.ndim == 2:
                 sv = sv[:, :, None]
             if int(sv.shape[-1]) != self.sensor_feature_dim:
                 if int(sv.shape[-1]) > self.sensor_feature_dim:
                     sv = sv[:, :, : self.sensor_feature_dim]
                 else:
+                    self._handle_missing_geom_features(
+                        role="sensors.v",
+                        missing_names=list(self.sensor_feature_names[int(sv.shape[-1]) :]),
+                    )
                     pad_dim = int(self.sensor_feature_dim - int(sv.shape[-1]))
                     pad = self._torch.zeros((int(sv.shape[0]), int(sv.shape[1]), pad_dim), dtype=sv.dtype, device=sv.device)
                     sv = self._torch.cat([sv, pad], dim=2)
@@ -453,6 +561,8 @@ class DeepONetPlasmaOperatorTorch:
             hw_arr = self._as_hw_array(raw, h=h, w=w)
             if hw_arr is not None:
                 feature_map[key] = hw_arr.reshape(-1).astype(np.float32)
+        missing = [name for name in self.sensor_feature_names if name not in feature_map]
+        self._handle_missing_geom_features(role="geom_ctx.sensor_features", missing_names=missing)
         cols = []
         for name in self.sensor_feature_names:
             cols.append(np.asarray(feature_map.get(name, np.zeros((self.n_points,), dtype=np.float32)), dtype=np.float32))
@@ -471,6 +581,8 @@ class DeepONetPlasmaOperatorTorch:
             hw_arr = self._as_hw_array(raw, h=h, w=w)
             if hw_arr is not None:
                 feature_map[key] = hw_arr.reshape(-1).astype(np.float32)
+        missing = [name for name in self.query_feature_names if name not in feature_map]
+        self._handle_missing_geom_features(role="geom_ctx.query_features", missing_names=missing)
         cols = [np.asarray(feature_map.get(name, np.zeros((self.n_points,), dtype=np.float32)), dtype=np.float32) for name in self.query_feature_names]
         stacked = np.stack(cols, axis=1)
         sampled = stacked[np.asarray(query_indices, dtype=np.int64)]
@@ -479,8 +591,9 @@ class DeepONetPlasmaOperatorTorch:
 
     def forward(self, sensors: dict[str, Any], query: dict[str, Any], cond):
         torch = self._torch
-        cond_t = torch.as_tensor(cond, dtype=torch.float32)
-        x_q = torch.as_tensor(query["x"], dtype=torch.float32)
+        self._move_modules_to_device()
+        cond_t = torch.as_tensor(cond, dtype=torch.float32, device=self.device)
+        x_q = torch.as_tensor(query["x"], dtype=torch.float32, device=self.device)
         if x_q.ndim == 2:
             x_q = x_q[None, ...].expand(cond_t.shape[0], -1, -1)
         branch_in = self._branch_features(sensors, cond_t)
@@ -517,7 +630,11 @@ class DeepONetPlasmaOperatorTorch:
                 f_in = torch.cat([b_ctx, q_ctx, b_ctx * q_ctx], dim=3)
                 pred = self.fused_head(f_in.reshape(-1, int(f_in.shape[-1]))).reshape(bsz, q_len, out_dim)
                 out_fused[:, start:stop, :] = pred
-            out = float(self.output_path_dot_skip) * out_dot + out_fused
+            if self.output_path_dot_skip_logits is not None:
+                dot_skip = torch.sigmoid(self.output_path_dot_skip_logits).reshape(1, 1, out_dim)
+            else:
+                dot_skip = out_dot.new_full((1, 1, out_dim), float(self.output_path_dot_skip))
+            out = dot_skip * out_dot + out_fused
         else:
             out = out_dot
         if self.global_head is not None:
@@ -541,8 +658,13 @@ class DeepONetPlasmaOperatorTorch:
 
     def predict_fields_torch(self, cond_t, geom_ctx: Any) -> dict[str, Any]:
         torch = self._torch
+        cond_t = cond_t.to(self.device)
         bsz = int(cond_t.shape[0])
-        coord = torch.as_tensor(np.asarray(geom_ctx.coord_grid, dtype=np.float32).reshape(2, -1).T, dtype=torch.float32)
+        coord = torch.as_tensor(
+            np.asarray(geom_ctx.coord_grid, dtype=np.float32).reshape(2, -1).T,
+            dtype=torch.float32,
+            device=self.device,
+        )
         x_q = coord[None, ...].expand(bsz, -1, -1)
         query_idx_np = np.arange(int(coord.shape[0]), dtype=np.int64)
         v_s = None
@@ -560,8 +682,14 @@ class DeepONetPlasmaOperatorTorch:
                 xy_norm = (xy - xy_min) / xy_span
                 x_q = xy_norm[None, ...].expand(int(bsz), -1, -1)
             sensor_pos = [ch_pos[name] for name in self.sensor_feature_names if name in ch_pos]
+            missing_sensor_names = [name for name in self.sensor_feature_names if name not in ch_pos]
             query_pos = [ch_pos[name] for name in self.query_feature_names if name in ch_pos]
+            missing_query_names = [name for name in self.query_feature_names if name not in ch_pos]
             if self.branch_mode != "cond_only":
+                self._handle_missing_geom_features(
+                    role="static_feature_rows.sensor",
+                    missing_names=missing_sensor_names,
+                )
                 sensor_idx_np = np.asarray(self.sensor_indices, dtype=np.int64).reshape(-1)
                 sensor_idx = torch.as_tensor(sensor_idx_np, dtype=torch.int64, device=coord.device)
                 x_s = x_q[:, sensor_idx, :]
@@ -572,13 +700,25 @@ class DeepONetPlasmaOperatorTorch:
                     if int(sampled.shape[1]) > self.sensor_feature_dim:
                         sampled = sampled[:, : self.sensor_feature_dim]
                     else:
+                        self._handle_missing_geom_features(
+                            role="static_feature_rows.sensor",
+                            missing_names=missing_sensor_names,
+                        )
                         pad_dim = int(self.sensor_feature_dim - int(sampled.shape[1]))
                         pad = self._torch.zeros((int(sampled.shape[0]), pad_dim), dtype=sampled.dtype, device=sampled.device)
                         sampled = self._torch.cat([sampled, pad], dim=1)
                 v_s = sampled[None, ...].expand(int(bsz), -1, -1)
             if query_pos:
+                self._handle_missing_geom_features(
+                    role="static_feature_rows.query",
+                    missing_names=missing_query_names,
+                )
                 q = rows[:, query_pos]
                 if int(q.shape[1]) < 3:
+                    self._handle_missing_geom_features(
+                        role="static_feature_rows.query",
+                        missing_names=missing_query_names,
+                    )
                     pad = self._torch.zeros((int(q.shape[0]), 3 - int(q.shape[1])), dtype=q.dtype, device=q.device)
                     q = self._torch.cat([q, pad], dim=1)
                 elif int(q.shape[1]) > 3:
@@ -616,7 +756,7 @@ class DeepONetPlasmaOperatorTorch:
     def predict_fields(self, cond_vec: np.ndarray, geom_ctx: Any | None = None, cache_key: str = "poisson_head_v1") -> dict[str, np.ndarray]:
         del cache_key
         torch = self._torch
-        cond_t = torch.as_tensor(np.asarray(cond_vec, dtype=np.float32), dtype=torch.float32)
+        cond_t = torch.as_tensor(np.asarray(cond_vec, dtype=np.float32), dtype=torch.float32, device=self.device)
         if cond_t.ndim == 1:
             cond_t = cond_t[None, :]
         if geom_ctx is None:
@@ -671,6 +811,7 @@ class DeepONetPlasmaOperatorTorch:
             "residual_head_gain_value": float(self.residual_head_gain_value),
             "output_path_mode": str(self.output_path_mode),
             "output_path_dot_skip": float(self.output_path_dot_skip),
+            "output_path_dot_skip_mode": str(self.output_path_dot_skip_mode),
             "output_path_fused_hidden_dim": int(self.output_path_fused_hidden_dim),
             "output_path_global_local_enabled": bool(self.output_path_global_local_enabled),
             "output_path_global_hidden_dim": int(self.output_path_global_hidden_dim),
@@ -679,6 +820,7 @@ class DeepONetPlasmaOperatorTorch:
             "sensor_embed_dim": int(self.sensor_embed_dim),
             "query_feature_names": list(self.query_feature_names),
             "latent_layer_norm": bool(self.latent_layer_norm),
+            "missing_geom_feature_policy": str(self.missing_geom_feature_policy),
         }
         if self._attached_poisson_head is not None:
             meta["poisson_head"] = self._attached_poisson_head.to_meta()
@@ -712,6 +854,8 @@ class DeepONetPlasmaOperatorTorch:
                 out[f"residual_head::{k}"] = v.detach().cpu().numpy()
         if self.residual_scale is not None:
             out["residual_scale"] = self.residual_scale.detach().cpu().numpy()
+        if self.output_path_dot_skip_logits is not None:
+            out["output_path_dot_skip_logits"] = self.output_path_dot_skip_logits.detach().cpu().numpy()
         out["out_bias"] = self.out_bias.detach().cpu().numpy()
         if self._attached_poisson_head is not None:
             for k, v in self._attached_poisson_head.state_dict_numpy().items():
@@ -723,31 +867,44 @@ class DeepONetPlasmaOperatorTorch:
 
     def load_state_dict_numpy(self, weights: dict[str, np.ndarray]) -> None:
         torch = self._torch
-        branch_state = {k.split("branch::", 1)[1]: torch.as_tensor(v) for k, v in weights.items() if k.startswith("branch::")}
-        sensor_state = {k.split("sensor_encoder::", 1)[1]: torch.as_tensor(v) for k, v in weights.items() if k.startswith("sensor_encoder::")}
-        trunk_state = {k.split("trunk::", 1)[1]: torch.as_tensor(v) for k, v in weights.items() if k.startswith("trunk::")}
+        device = self.device
+        branch_state = {
+            k.split("branch::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
+            for k, v in weights.items()
+            if k.startswith("branch::")
+        }
+        sensor_state = {
+            k.split("sensor_encoder::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
+            for k, v in weights.items()
+            if k.startswith("sensor_encoder::")
+        }
+        trunk_state = {
+            k.split("trunk::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
+            for k, v in weights.items()
+            if k.startswith("trunk::")
+        }
         fused_head_state = {
-            k.split("fused_head::", 1)[1]: torch.as_tensor(v)
+            k.split("fused_head::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
             for k, v in weights.items()
             if k.startswith("fused_head::")
         }
         global_head_state = {
-            k.split("global_head::", 1)[1]: torch.as_tensor(v)
+            k.split("global_head::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
             for k, v in weights.items()
             if k.startswith("global_head::")
         }
         trunk_film_state = {
-            k.split("trunk_film::", 1)[1]: torch.as_tensor(v)
+            k.split("trunk_film::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
             for k, v in weights.items()
             if k.startswith("trunk_film::")
         }
         residual_cond_state = {
-            k.split("residual_cond::", 1)[1]: torch.as_tensor(v)
+            k.split("residual_cond::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
             for k, v in weights.items()
             if k.startswith("residual_cond::")
         }
         residual_head_state = {
-            k.split("residual_head::", 1)[1]: torch.as_tensor(v)
+            k.split("residual_head::", 1)[1]: torch.as_tensor(v, dtype=torch.float32, device=device)
             for k, v in weights.items()
             if k.startswith("residual_head::")
         }
@@ -766,6 +923,11 @@ class DeepONetPlasmaOperatorTorch:
         if self.residual_head is not None and residual_head_state:
             self.residual_head.load_state_dict(residual_head_state, strict=True)
         if self.residual_scale is not None and "residual_scale" in weights:
-            self.residual_scale.data.copy_(torch.as_tensor(weights["residual_scale"], dtype=torch.float32))
+            self.residual_scale.data.copy_(torch.as_tensor(weights["residual_scale"], dtype=torch.float32, device=device))
+        if self.output_path_dot_skip_logits is not None and "output_path_dot_skip_logits" in weights:
+            self.output_path_dot_skip_logits.data.copy_(
+                torch.as_tensor(weights["output_path_dot_skip_logits"], dtype=torch.float32, device=device)
+            )
         if "out_bias" in weights:
-            self.out_bias.data.copy_(torch.as_tensor(weights["out_bias"], dtype=torch.float32))
+            self.out_bias.data.copy_(torch.as_tensor(weights["out_bias"], dtype=torch.float32, device=device))
+        self._move_modules_to_device()

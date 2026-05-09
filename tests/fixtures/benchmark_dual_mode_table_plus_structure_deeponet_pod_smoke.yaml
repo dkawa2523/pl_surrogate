@@ -1,0 +1,65 @@
+runtime:
+  input_mode: table_plus_structure
+  strict_input_mode: error
+  allow_mode_fallback: false
+  structure:
+    feature_profile: geom_v1_mainline
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: auto
+    provider_mode: fixed
+
+benchmark:
+  output_dir: runs/benchmark_dual_mode_table_plus_structure_deeponet_pod_smoke
+  runtime:
+    input_mode: table_plus_structure
+    strict_input_mode: error
+    allow_mode_fallback: false
+    structure:
+      feature_profile: geom_v1_mainline
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: auto
+      provider_mode: fixed
+  dataset:
+    type: synthetic
+    n_cases: 8
+    height: 8
+    width: 8
+    cond_dim: 3
+    seed: 6
+  profile: m7_deeponet_pod_experimental
+  phi_mode: direct
+  split:
+    seed: 3
+    ratios: [0.6, 0.2, 0.2]
+  preprocessing:
+    axis_schema:
+      mode: steady
+      harmonics: 1
+    scalers:
+      target_transforms:
+        ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        phi: {value_transform: identity, scaler: zscore, fit_scope: all, clip: {mode: none}}
+  train:
+    unet_like:
+      batch_size_cases: 4
+      shuffle_cases: true
+    deeponet_pod:
+      epochs: 1
+      lr: 0.001
+      target_family: allvars
+      target_vars: [ne, ni, Te, phi]
+      model_cfg:
+        hidden_dim: 16
+        latent_dim: 12
+        coeff_loss_weight: 0.1
+        basis:
+          rank: 8
+          fit_scope: train_only
+          per_var: true
+          center: true
+  physics:
+    enabled: false

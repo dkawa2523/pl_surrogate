@@ -7,12 +7,14 @@ import yaml
 import json
 
 from plasma_surrogate.cli.main import main
+from tests._config_presets import csv_npz_targets_with_ne_te_phi, runtime_table_only
 
 
 def test_cli_pipeline_smoke(tmp_path: Path):
     run_dir = tmp_path / "cycle1_run"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_only(),
         "dataset": {"type": "synthetic", "n_cases": 12, "height": 8, "width": 8, "cond_dim": 3, "seed": 7},
         "preprocessing": {
             "split": {"seed": 0, "ratios": [0.7, 0.15, 0.15]},
@@ -92,6 +94,40 @@ def test_cli_pipeline_smoke(tmp_path: Path):
     assert "duplicate_case_keys" in report
     assert "cond_range_summary" in report
 
+    cases_summary = json.loads((run_dir / "inference" / "cases_summary.json").read_text(encoding="utf-8"))
+    assert len(cases_summary["cases"]) == 3
+    assert (run_dir / "inference" / "cases_summary.csv").exists()
+    assert (run_dir / "inference" / "batch" / "summary.csv").exists()
+
+    cfg_cases = json.loads(json.dumps(cfg))
+    cfg_cases["inference"] = {
+        "single": {"enabled": False},
+        "batch": {
+            "enabled": True,
+            "cases": [
+                {
+                    "case_id": "case_a",
+                    "cond": {"c0": 0.15, "c1": 0.25, "c2": 0.35},
+                    "geom": {"geom_id": "default"},
+                    "axis": {"mode": "steady", "value": 0.0},
+                },
+                {
+                    "case_id": "case_b",
+                    "cond": {"c0": 0.45, "c1": 0.55, "c2": 0.65},
+                    "geom": {"geom_id": "default"},
+                },
+            ],
+        },
+        "optimize": {"enabled": False},
+    }
+    cfg_cases_path = tmp_path / "pipeline_cases.yaml"
+    with cfg_cases_path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(cfg_cases, f)
+
+    assert main(["infer", "--config", str(cfg_cases_path)]) == 0
+    cases_summary = json.loads((run_dir / "inference" / "cases_summary.json").read_text(encoding="utf-8"))
+    assert [row["case_id"] for row in cases_summary["cases"]] == ["case_a", "case_b"]
+
 
 def test_cli_pipeline_csv_npz_smoke(tmp_path: Path):
     dataset_root = tmp_path / "csv_dataset"
@@ -115,16 +151,13 @@ def test_cli_pipeline_csv_npz_smoke(tmp_path: Path):
     run_dir = tmp_path / "csv_run"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_only(),
         "dataset": {
             "type": "csv_npz",
             "root": str(dataset_root),
             "index_csv": "index.csv",
             "cond_columns": ["c0", "c1", "c2"],
-            "targets": [
-                {"id": "ne", "source_key": "log_ne", "value_transform": "pow10"},
-                {"id": "Te", "source_key": "Te", "value_transform": "identity"},
-                {"id": "phi", "source_key": "phi", "value_transform": "identity"},
-            ],
+            "targets": csv_npz_targets_with_ne_te_phi(),
             "axis_column": "axis",
             "fields_npz_column": "fields_npz",
             "case_id_column": "case_id",
@@ -204,16 +237,13 @@ def test_cli_preprocess_csv_npz_group_split_no_leak(tmp_path: Path):
     run_dir = tmp_path / "csv_group_run"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_only(),
         "dataset": {
             "type": "csv_npz",
             "root": str(dataset_root),
             "index_csv": "index.csv",
             "cond_columns": ["c0", "c1", "c2"],
-            "targets": [
-                {"id": "ne", "source_key": "log_ne", "value_transform": "pow10"},
-                {"id": "Te", "source_key": "Te", "value_transform": "identity"},
-                {"id": "phi", "source_key": "phi", "value_transform": "identity"},
-            ],
+            "targets": csv_npz_targets_with_ne_te_phi(),
             "axis_column": "axis",
             "fields_npz_column": "fields_npz",
             "case_id_column": "case_id",

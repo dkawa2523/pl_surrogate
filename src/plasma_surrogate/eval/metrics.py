@@ -97,8 +97,14 @@ def r2_masked(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> float
 
 def uniformity(values: np.ndarray) -> float:
     vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    if vals.size == 0:
+        return float("nan")
+    if not np.all(np.isfinite(vals)):
+        return float("nan")
     mean = float(np.mean(vals))
     std = float(np.std(vals))
+    if (not np.isfinite(mean)) or (not np.isfinite(std)):
+        return float("nan")
     return float(std / (abs(mean) + 1e-12))
 
 

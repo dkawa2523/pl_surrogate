@@ -123,13 +123,14 @@ def convert_outputs_merged_td(
     files_by_case: dict[str, dict[str, Path]] = {}
     for row in index_rows:
         rel = str(row["relative_path"])
-        if not rel.startswith(f"{group}/"):
+        rel_norm = rel.replace("\\", "/")
+        if not rel_norm.startswith(f"{group}/"):
             continue
         out_key = str(row["output_key"])
         for var, expected in keys.items():
             if out_key == expected:
                 cid = str(row["case_id"])
-                files_by_case.setdefault(cid, {})[var] = src / rel
+                files_by_case.setdefault(cid, {})[var] = src / Path(rel_norm)
 
     missing_cases = sorted([cid for cid in conditions.keys() if cid not in files_by_case])
     if missing_cases:

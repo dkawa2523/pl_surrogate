@@ -196,9 +196,7 @@ class PlasmaHead:
                 phi0 = _to_numpy_f32(phi_pred)
                 if phi0.ndim == 4:
                     phi0 = phi0[:, 0]
-                elif phi0.ndim == 3:
-                    pass
-                else:
+                elif phi0.ndim != 3:
                     raise ValueError(f"deeponet_head.predict_phi returned invalid shape: {phi0.shape}")
             else:
                 if not hasattr(deeponet_head, "predict_fields"):
@@ -212,11 +210,9 @@ class PlasmaHead:
                 phi0 = np.asarray(pred["phi"], dtype=np.float32)
                 if phi0.ndim == 4:
                     phi0 = phi0[:, 0]
-                elif phi0.ndim == 3:
-                    pass
                 elif phi0.ndim == 2:
                     phi0 = phi0[None, ...]
-                else:
+                elif phi0.ndim != 3:
                     raise ValueError(f"deeponet_head phi has invalid shape: {phi0.shape}")
 
             if phi0.shape[0] == 1 and bsz > 1:

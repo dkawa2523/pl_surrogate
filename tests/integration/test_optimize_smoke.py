@@ -22,6 +22,7 @@ def test_optimize_runner_smoke(tmp_path: Path, geometry_root: Path):
 
     result = engine.optimize_run(
         space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+        geom_space=None,
         n_trials=5,
         geom={"geom_id": "default"},
         axis={"mode": "steady", "value": 0.0},

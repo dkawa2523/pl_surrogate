@@ -21,6 +21,7 @@ preprocessing:
 
 train:
   models: [deeponet_pod]
+  # deeponet_pod dual-mode example: table_plus_structure with descriptor-aware adapter.
   deeponet_pod:
     target_family: allvars
     target_vars: [log_ne, Te, phi]

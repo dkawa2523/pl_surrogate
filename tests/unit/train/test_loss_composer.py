@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import os
 import numpy as np
 import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.core.spatial_regions import build_region_masks
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy, compose_supervised_torch
 
 
@@ -108,21 +107,22 @@ def test_compose_supervised_numpy_with_mask_and_uncertainty():
     mask[0:3, :] = 1.0
     dist = np.ones((6, 6), dtype=np.float32) * 5.0
     dist[0:2, :] = 0.5
-    loss, grads, per_var = compose_supervised_numpy(
-        pred,
-        tgt,
-        y_order=["log_ne", "log_ni", "Te", "phi"],
-        loss_cfg={
-            "supervised": {
-                "type": "huber",
-                "delta": 1.0,
-                "region_weighting": {"enabled": True, "boundary_delta": 2.0, "w_bulk": 1.0, "w_boundary": 3.0},
+    with pytest.warns(DeprecationWarning, match="region_weighting"):
+        loss, grads, per_var = compose_supervised_numpy(
+            pred,
+            tgt,
+            y_order=["log_ne", "log_ni", "Te", "phi"],
+            loss_cfg={
+                "supervised": {
+                    "type": "huber",
+                    "delta": 1.0,
+                    "region_weighting": {"enabled": True, "boundary_delta": 2.0, "w_bulk": 1.0, "w_boundary": 3.0},
+                },
+                "multitask": {"weighting": "uncertainty", "sigma_init": {"phi": -0.5}},
             },
-            "multitask": {"weighting": "uncertainty", "sigma_init": {"phi": -0.5}},
-        },
-        mask=mask,
-        distance_any=dist,
-    )
+            mask=mask,
+            distance_any=dist,
+        )
     assert loss > 0.0
     assert set(grads.keys()) == {"log_ne", "log_ni", "Te", "phi"}
     assert set(per_var.keys()) == {"log_ne", "log_ni", "Te", "phi"}
@@ -340,22 +340,24 @@ def test_compose_supervised_numpy_sample_mean_count_denominator_preserves_bounda
             "region_weighting": {"enabled": True, "boundary_delta": 2.0, "w_boundary": 3.0, "w_bulk": 1.0},
         }
     }
-    loss_weighted, _, _ = compose_supervised_numpy(
-        pred,
-        tgt,
-        y_order=["phi"],
-        loss_cfg=cfg_weighted,
-        mask=mask,
-        distance_any=dist,
-    )
-    loss_count, _, _ = compose_supervised_numpy(
-        pred,
-        tgt,
-        y_order=["phi"],
-        loss_cfg=cfg_count,
-        mask=mask,
-        distance_any=dist,
-    )
+    with pytest.warns(DeprecationWarning, match="region_weighting"):
+        loss_weighted, _, _ = compose_supervised_numpy(
+            pred,
+            tgt,
+            y_order=["phi"],
+            loss_cfg=cfg_weighted,
+            mask=mask,
+            distance_any=dist,
+        )
+    with pytest.warns(DeprecationWarning, match="region_weighting"):
+        loss_count, _, _ = compose_supervised_numpy(
+            pred,
+            tgt,
+            y_order=["phi"],
+            loss_cfg=cfg_count,
+            mask=mask,
+            distance_any=dist,
+        )
     assert loss_count > loss_weighted
 
 
@@ -1560,9 +1562,7 @@ def test_build_region_masks_signed_quantile_monotonic():
 
 
 def test_compose_supervised_torch_region_balance_changes_loss():
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     pred = {
         "Te": np.array([[[2.0, 2.0], [0.5, 0.5]]], dtype=np.float32),
@@ -1608,9 +1608,7 @@ def test_compose_supervised_torch_region_balance_changes_loss():
 
 
 def test_compose_supervised_torch_region_weighting_alias_warns():
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     pred = {"phi": np.ones((1, 2, 2), dtype=np.float32)}
     tgt = np.zeros((1, 1, 2, 2), dtype=np.float32)

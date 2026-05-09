@@ -1,16 +1,15 @@
-"""MLP model package with lazy exports to avoid import-time cycles."""
+"""MLP model package."""
 
 from __future__ import annotations
 
 from importlib import import_module
 
-__all__ = ["CoordMLPTorch", "GlobalMLP", "save_mlp_checkpoint", "load_mlp_checkpoint"]
+__all__ = ["CoordMLPPODResidual", "CoordMLPTorch", "GlobalMLP"]
 
 _EXPORT_MAP = {
+    "CoordMLPPODResidual": "plasma_surrogate.models.mlp.coord_mlp_pod_residual",
     "CoordMLPTorch": "plasma_surrogate.models.mlp.coord_mlp_torch",
     "GlobalMLP": "plasma_surrogate.models.mlp.global_mlp",
-    "save_mlp_checkpoint": "plasma_surrogate.models.mlp.io",
-    "load_mlp_checkpoint": "plasma_surrogate.models.mlp.io",
 }
 
 

@@ -15,4 +15,3 @@ def test_build_time_adjacent_pairs_sorted_by_axis():
     axis_values = [0.50, 0.10, 0.30, 0.20]
     pairs = build_time_adjacent_pairs(sample_ids, axis_values=axis_values)
     assert pairs == [(21, 23), (23, 22), (22, 20)]
-

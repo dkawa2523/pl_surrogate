@@ -41,6 +41,8 @@ benchmark row に少なくとも以下を追加する。
 - table_only / global_mlp train smoke
 - table_only / deeponet_pod train+infer smoke
 - table_plus_structure / ffno train+infer smoke
+- table_plus_structure / u_no train+infer smoke
+- table_plus_structure / cno train+infer smoke
 - table_plus_structure / coord_mlp_fourier smoke
 - table_plus_structure / deeponet_pod descriptor smoke
 - optimize with geom_space smoke
@@ -64,3 +66,20 @@ benchmark row に少なくとも以下を追加する。
 - mode metadata が欠けていない
 - compare / benchmark が同一 mode で再現可能
 - 運用コストが profile 数の増殖を招かない
+
+## Phase 5 Addendum (Implemented)
+
+- Benchmark train path now merges runtime effective metadata and dispatch artifacts before checkpoint save.
+- `models/*/checkpoints/meta.json` includes both input-mode keys and `deeponet_pod_*` descriptor/latent keys.
+- This removes workflow/benchmark contract drift for checkpoint metadata.
+
+## Phase 6 Addendum (Final Sync)
+
+- benchmark eval scope now supports `cno_isolated` in the same way as `u_no_isolated`.
+- isolated scopes are validated via shared constants to avoid drift between profile lock, scope check, and resolved summary.
+
+## Phase 7 Addendum (Strict Benchmark Runtime)
+
+- benchmark runtime now requires `runtime.strict_input_mode = error`.
+- benchmark runtime now requires `runtime.allow_mode_fallback = false`.
+- `benchmark.runtime` and top-level `runtime` conflicts are treated as configuration errors (fail-fast).

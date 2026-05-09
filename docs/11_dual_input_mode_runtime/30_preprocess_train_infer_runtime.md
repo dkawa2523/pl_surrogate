@@ -1,4 +1,4 @@
-# 30. Preprocess / Train / Infer Runtime
+﻿# 30. Preprocess / Train / Infer Runtime
 
 ## Phase 1 の中心目標
 
@@ -87,7 +87,7 @@ train では、model dispatch の前に mode を解決する。
 - `src/plasma_surrogate/preprocessing/runner.py`
 - `src/plasma_surrogate/train/model_dispatch.py`
 - `src/plasma_surrogate/infer/engine.py`
-- `src/plasma_surrogate/models/mlp/io.py`
+- `src/plasma_surrogate/models/checkpoint.py`
 - `src/plasma_surrogate/cli/workflows.py`
 
 ## fail-fast ルール
@@ -95,3 +95,16 @@ train では、model dispatch の前に mode を解決する。
 - mode と profile が矛盾したら preprocess 前に落とす
 - mode と model が矛盾したら train 入口で落とす
 - checkpoint meta と infer request が矛盾したら infer 入口で落とす
+
+## Phase 5 Addendum (Implemented)
+
+- `table_plus_structure` and `descriptor_profile=struct_desc_v1` now write:
+  - `preprocessing/features/structure_descriptor_pack.npz`
+  - `preprocessing/features/structure_descriptor_pack_meta.json`
+- `latent_profile != none` stays hook-only in v1 and requires:
+  - `dataset/geometry/latent_feature_pack.npz` (or pre-existing `preprocessing/features/latent_feature_pack.npz`)
+  - missing latent artifact is fail-fast.
+- `deeponet_pod_*` descriptor/latent effective metadata is persisted in:
+  - train checkpoint `checkpoints/meta.json`
+  - benchmark checkpoint `models/*/checkpoints/meta.json`
+  - infer/evaluate summary JSON.

@@ -1,0 +1,51 @@
+runtime:
+  input_mode: table_only
+  strict_input_mode: error
+  allow_mode_fallback: false
+  structure:
+    feature_profile: none
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: none
+    provider_mode: fixed
+
+benchmark:
+  output_dir: runs/benchmark_dual_mode_table_only_global_mlp_smoke
+  runtime:
+    input_mode: table_only
+    strict_input_mode: error
+    allow_mode_fallback: false
+    structure:
+      feature_profile: none
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: none
+      provider_mode: fixed
+  dataset:
+    type: synthetic
+    n_cases: 8
+    height: 8
+    width: 8
+    cond_dim: 3
+    seed: 4
+  profile: m7_global_frozen_ref
+  phi_mode: direct
+  split:
+    seed: 2
+    ratios: [0.6, 0.2, 0.2]
+  preprocessing:
+    axis_schema:
+      mode: steady
+      harmonics: 1
+    scalers:
+      target_transforms:
+        ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        phi: {value_transform: identity, scaler: zscore, fit_scope: all, clip: {mode: none}}
+  train:
+    global_mlp:
+      epochs: 1
+      lr: 0.001
+  physics:
+    enabled: false

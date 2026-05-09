@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import csv
 import itertools
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,13 +13,22 @@ from typing import Any
 import yaml
 import numpy as np
 
-from plasma_surrogate.benchmark.runtime_context import build_benchmark_data_context
+from plasma_surrogate.benchmark.runtime_context import (
+    build_benchmark_data_context,
+    resolve_effective_benchmark_cfg,
+)
 from plasma_surrogate.benchmark.profiles import resolve_profile_lock
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.density_contract import (
     resolve_allvars_order,
     resolve_density_key,
     resolve_family_vars,
+)
+from plasma_surrogate.core.input_modes import (
+    build_input_mode_effective_metadata,
+    input_mode_metadata_keys,
+    merge_effective_runtime_metadata,
+    resolve_benchmark_runtime_controls,
 )
 from plasma_surrogate.core.model_families import (
     COORD_MLP_FAMILY_MODELS,
@@ -28,6 +38,7 @@ from plasma_surrogate.core.model_families import (
     UNET_FAMILY_MODELS,
     resolve_single_family_model,
 )
+from plasma_surrogate.core.model_input_policy import resolve_effective_input_mode_metadata_for_model
 from plasma_surrogate.core.physics_contract import build_physics_cfg
 from plasma_surrogate.eval.metrics import r2_masked, rmse_masked
 from plasma_surrogate.eval.metrics_builder import (
@@ -36,8 +47,11 @@ from plasma_surrogate.eval.metrics_builder import (
     build_spatial_error_summary_rows,
 )
 from plasma_surrogate.infer.engine import InferenceEngine
+from plasma_surrogate.infer.engine_builder import build_inference_engine
+from plasma_surrogate.infer.optimize import cond_space_from_stats, validate_optimize_geom_contract
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import normalize_pod_deeponet_model_cfg
-from plasma_surrogate.models.mlp.io import save_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import save_checkpoint
+from plasma_surrogate.models.mlp.coord_mlp_pod_residual import normalize_coord_mlp_pod_residual_cfg
 from plasma_surrogate.models.mlp.coord_mlp_torch import _normalize_coord_mlp_model_cfg
 from plasma_surrogate.benchmark.model_dispatch import BenchmarkModelContext, run_model_train_eval
 from plasma_surrogate.preprocessing.split import build_group_kfold_splits
@@ -61,12 +75,20 @@ class SweepResult:
 
 _ISOLATED_SCOPE_MODEL_NAMES: dict[str, list[str]] = {
     "global_frozen": ["global_mlp"],
-    "unet_isolated": [UNET_FAMILY_MODELS[0]],
-    "unetpp_isolated": [UNET_FAMILY_MODELS[1]],
-    "unetpp_attn_isolated": [UNET_FAMILY_MODELS[2]],
+    "unet_isolated": ["unet"],
+    "unetpp_isolated": ["unetpp"],
+    "unetpp_attn_isolated": ["unetpp_attn"],
+    "unet_operator_v2_isolated": ["unet_operator_v2"],
     "fno_isolated": [SPECTRAL_FAMILY_MODELS[0]],
     "ffno_isolated": [SPECTRAL_FAMILY_MODELS[1]],
     "deeponet_isolated": ["deeponet_plasma"],
+    "u_no_isolated": ["u_no"],
+    "cno_isolated": ["cno"],
+    "cno_operator_unet_isolated": ["cno_operator_unet"],
+    "geom_deeponet_siren_isolated": ["geom_deeponet_siren"],
+    "coord_mlp_fourier_isolated": ["coord_mlp_fourier"],
+    "coord_mlp_siren_isolated": ["coord_mlp_siren"],
+    "coord_mlp_pod_residual_isolated": ["coord_mlp_pod_residual"],
 }
 
 _MAINLINE_ISOLATED_SECTION_NAMES: tuple[str, ...] = (
@@ -74,18 +96,124 @@ _MAINLINE_ISOLATED_SECTION_NAMES: tuple[str, ...] = (
     *UNET_FAMILY_MODELS,
     *SPECTRAL_FAMILY_MODELS,
     "deeponet_plasma",
+    "u_no",
+    "cno",
+    "cno_operator_unet",
+    "geom_deeponet_siren",
+    *COORD_MLP_FAMILY_MODELS,
 )
 
 _ISOLATED_SCOPE_FORBIDDEN_SECTIONS: dict[str, list[str]] = {
     scope: [name for name in _MAINLINE_ISOLATED_SECTION_NAMES if name not in set(active)]
     for scope, active in _ISOLATED_SCOPE_MODEL_NAMES.items()
 }
+_EVAL_PROTOCOL_SCOPES: tuple[str, ...] = ("common", *_ISOLATED_SCOPE_MODEL_NAMES.keys())
+_FROZEN_REFERENCE_SCOPES: set[str] = set(_ISOLATED_SCOPE_MODEL_NAMES.keys())
+_UNET_CONTRACT_OPTIONAL_SCOPES: set[str] = {
+    "fno_isolated",
+    "ffno_isolated",
+    "deeponet_isolated",
+    "u_no_isolated",
+    "cno_isolated",
+    "cno_operator_unet_isolated",
+    "unet_operator_v2_isolated",
+    "geom_deeponet_siren_isolated",
+    "coord_mlp_fourier_isolated",
+    "coord_mlp_siren_isolated",
+    "coord_mlp_pod_residual_isolated",
+}
+
+
+def _inject_input_mode_metadata_into_row(
+    *,
+    row: dict[str, Any],
+    input_mode_meta: dict[str, Any],
+) -> None:
+    missing = [key for key in input_mode_metadata_keys() if key not in input_mode_meta]
+    if missing:
+        raise ValueError(
+            "benchmark row metadata is missing required input_mode keys: "
+            f"{missing}"
+        )
+    for key in input_mode_metadata_keys():
+        row[key] = input_mode_meta[key]
+
+
+def _primary_metric_value(row: dict[str, Any], *, primary_metric: str, model_name: str) -> float:
+    if primary_metric not in row:
+        keys = sorted(str(key) for key in row.keys())
+        preview = keys[:30]
+        suffix = "" if len(keys) <= len(preview) else f", ... (+{len(keys) - len(preview)} more)"
+        raise ValueError(
+            f"benchmark.eval.primary_metric={primary_metric!r} is not present for model {model_name!r}; "
+            f"available row keys include: {preview}{suffix}"
+        )
+    try:
+        return float(row[primary_metric])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"benchmark.eval.primary_metric={primary_metric!r} for model {model_name!r} must be numeric; "
+            f"got {row[primary_metric]!r}"
+        ) from exc
+
+
+def _build_benchmark_inference_engine(
+    *,
+    model: Any,
+    cond_schema: Any,
+    axis_schema: Any,
+    geometry_provider: Any,
+    output_dir: Path,
+    transform_bundle: Any,
+    cond_stats: dict[str, Any],
+    phi_mode: str,
+    phi_hybrid_steps: int,
+    poisson_refine_iters: int,
+    ood_cfg: dict[str, Any],
+    feature_store: Any,
+    coord_scaler: dict[str, Any],
+    coord_feature_scaler: dict[str, Any],
+    coord_feature_pack: dict[str, Any] | None,
+    coord_distance_transform_stats: dict[str, Any],
+    input_mode_meta: dict[str, Any],
+    strict_input_mode: str = "error",
+    allow_mode_fallback: bool = False,
+    checkpoint_meta_path: Path,
+    deeponet_head: Any | None = None,
+    grid_input_features_cfg: dict[str, Any] | None = None,
+) -> InferenceEngine:
+    return build_inference_engine(
+        model=model,
+        cond_schema=cond_schema,
+        axis_schema=axis_schema,
+        geometry_provider=geometry_provider,
+        output_dir=output_dir,
+        transform_bundle=transform_bundle,
+        cond_stats=cond_stats,
+        phi_mode=phi_mode,
+        phi_hybrid_steps=phi_hybrid_steps,
+        poisson_refine_iters=poisson_refine_iters,
+        ood_cfg=ood_cfg,
+        feature_store=feature_store,
+        coord_scaler=coord_scaler,
+        coord_feature_scaler=coord_feature_scaler,
+        coord_feature_pack=coord_feature_pack,
+        coord_distance_transform_stats=coord_distance_transform_stats,
+        strict_input_mode=str(strict_input_mode),
+        allow_mode_fallback=bool(allow_mode_fallback),
+        input_mode_meta=input_mode_meta,
+        checkpoint_meta_path=checkpoint_meta_path,
+        deeponet_head=deeponet_head,
+        grid_input_features_cfg=dict(grid_input_features_cfg or {}),
+    )
 
 
 class BenchmarkRunner:
     def __init__(self, cfg: dict[str, Any]):
-        self.cfg = cfg
-        self.benchmark_cfg = cfg.get("benchmark", cfg)
+        self.cfg = copy.deepcopy(dict(cfg or {}))
+        self.benchmark_cfg = resolve_effective_benchmark_cfg(self.cfg)
+        self.input_mode_meta = build_input_mode_effective_metadata(self.benchmark_cfg)
+        self.strict_input_mode, self.allow_mode_fallback = resolve_benchmark_runtime_controls(self.benchmark_cfg)
         self.output_root = Path(self.benchmark_cfg.get("output_dir", "runs/benchmark_mainline"))
         self.store = ArtifactStore(self.output_root)
 
@@ -140,14 +268,16 @@ class BenchmarkRunner:
         )
         profile_lock = context.profile_lock
         resolved = context.resolved
+        resolved.update(self.input_mode_meta)
         eval_protocol_cfg = dict(self.benchmark_cfg.get("eval_protocol", {}))
         eval_protocol_mode = str(eval_protocol_cfg.get("mode", "single")).strip().lower()
         if eval_protocol_mode not in {"single", "dual_axis"}:
             raise ValueError("benchmark.eval_protocol.mode must be one of: single, dual_axis")
         eval_protocol_scope = str(eval_protocol_cfg.get("scope", "common")).strip().lower()
-        if eval_protocol_scope not in {"common", "global_frozen", "unet_isolated", "unetpp_isolated", "unetpp_attn_isolated", "fno_isolated", "ffno_isolated", "deeponet_isolated"}:
+        if eval_protocol_scope not in set(_EVAL_PROTOCOL_SCOPES):
             raise ValueError(
-                "benchmark.eval_protocol.scope must be one of: common, global_frozen, unet_isolated, unetpp_isolated, unetpp_attn_isolated, fno_isolated, ffno_isolated, deeponet_isolated"
+                "benchmark.eval_protocol.scope must be one of: "
+                f"{', '.join(_EVAL_PROTOCOL_SCOPES)}"
             )
         frozen_ref_tag = str(eval_protocol_cfg.get("frozen_ref_tag", "")).strip()
         self._validate_eval_scope_models(scope=eval_protocol_scope, model_names=profile_lock["models"])
@@ -312,6 +442,7 @@ class BenchmarkRunner:
             "extrap": self._tuple_overlap_ratio(split_extrap, cond_tuple_by_case),
         }
         test_holdout_ratio = float(len(split_extrap.get("test", [])) / float(max(n_cases, 1)))
+        strict_input_mode, allow_mode_fallback = self.strict_input_mode, self.allow_mode_fallback
         interp_overlap_ratio = float(resolved["tuple_overlap_ratio"]["interp"])
         extrapolation_severity = float(np.clip((1.0 - interp_overlap_ratio) * 0.7 + test_holdout_ratio * 0.3, 0.0, 1.0))
         resolved["eval_protocol"]["extrapolation_severity"] = {
@@ -449,6 +580,10 @@ class BenchmarkRunner:
             va_idx: np.ndarray,
             te_idx: np.ndarray,
         ) -> dict[str, Any]:
+            effective_input_mode_meta = resolve_effective_input_mode_metadata_for_model(
+                model_name=model_name,
+                input_mode_meta=self.input_mode_meta,
+            )
             dispatch = run_model_train_eval(
                 BenchmarkModelContext(
                     benchmark_cfg=self.benchmark_cfg,
@@ -483,6 +618,9 @@ class BenchmarkRunner:
                     coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
                     coord_feature_pack=coord_feature_pack,
                     coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
+                    structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
+                    latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
+                    input_mode_meta=effective_input_mode_meta,
                 )
             )
             model = dispatch["model"]
@@ -493,7 +631,11 @@ class BenchmarkRunner:
             r2_scores = dispatch.get("r2_scores", {})
             extra_artifacts = dict(dispatch.get("extra_artifacts", {}))
 
-            save_mlp_checkpoint(model, model_dir / "checkpoints")
+            checkpoint_meta = merge_effective_runtime_metadata(
+                runtime_meta=effective_input_mode_meta,
+                dispatch_meta=extra_artifacts,
+            )
+            save_checkpoint(model, model_dir / "checkpoints", extra_meta=checkpoint_meta)
 
             viz = VizRunner(model_dir / "eval")
             viz.plot_loss_curve(history, rel_path="plots/loss_curve.png")
@@ -506,7 +648,7 @@ class BenchmarkRunner:
                 viz.plot_parity(true_eval["phi"].reshape(-1), pred_eval["phi"].reshape(-1), rel_path="plots/parity_phi.png")
                 viz.plot_field_triplet(true_eval["phi"][0, 0], pred_eval["phi"][0, 0], rel_path="plots/phi_triplet.png")
 
-                infer_engine = InferenceEngine(
+                infer_engine = _build_benchmark_inference_engine(
                     model=model,
                     cond_schema=cond_schema,
                     axis_schema=axis_schema,
@@ -523,6 +665,10 @@ class BenchmarkRunner:
                     coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
                     coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
                     coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
+                    input_mode_meta=effective_input_mode_meta,
+                    strict_input_mode=strict_input_mode,
+                    allow_mode_fallback=allow_mode_fallback,
+                    checkpoint_meta_path=model_dir / "checkpoints" / "meta.json",
                     deeponet_head=(
                         getattr(model, "poisson_head", None)
                         if model_name == "deeponet_plasma"
@@ -548,7 +694,19 @@ class BenchmarkRunner:
                     axis=infer_axis,
                 )
                 best = infer_engine.optimize_run(
-                    space={k: (0.0, 1.0) for k in cond_order},
+                    # Keep benchmark optimize contract aligned with CLI/engine validation entrypoint.
+                    space=cond_space_from_stats(
+                        list(cond_order),
+                        bundle.schemas.get("cond_stats", {}),
+                        cfg_key="benchmark.inference.optimize.space",
+                    ),
+                    geom_space=validate_optimize_geom_contract(
+                        input_mode=str(effective_input_mode_meta.get("input_mode_effective", "")),
+                        provider_mode=str(effective_input_mode_meta.get("geometry_provider_mode_effective", "fixed")),
+                        geom_space=None,
+                        geom_ref={"geom_id": "default"},
+                        label_prefix="inference.optimize",
+                    ),
                     n_trials=8,
                     geom={"geom_id": "default"},
                     axis=infer_axis,
@@ -592,6 +750,10 @@ class BenchmarkRunner:
                 single_qoi=single_qoi,
                 single_diagnostics=single_diagnostics,
                 opt_best_uniformity=float(best_uniformity),
+            )
+            _inject_input_mode_metadata_into_row(
+                row=row,
+                input_mode_meta=effective_input_mode_meta,
             )
             spatial_audit_cfg = dict(self.benchmark_cfg.get("eval", {}).get("spatial_error_audit", {}))
             boundary_type_breakdown = bool(spatial_audit_cfg.get("boundary_type_breakdown", False))
@@ -676,10 +838,17 @@ class BenchmarkRunner:
                         ]
                         for r in spatial_case_rows
                     ],
-                )
+            )
             row["protocol_variant"] = protocol_variant if protocol_variant else "default"
             row["primary_metric"] = primary_metric
-            row["primary_metric_value"] = float(row.get(primary_metric, 0.0))
+            if eval_protocol_mode == "dual_axis" and primary_metric not in row:
+                row["primary_metric_value"] = float("nan")
+            else:
+                row["primary_metric_value"] = _primary_metric_value(
+                    row,
+                    primary_metric=primary_metric,
+                    model_name=model_name,
+                )
             return {
                 "model_obj": model,
                 "row": row,
@@ -771,7 +940,11 @@ class BenchmarkRunner:
                     interp_weight * row["test_r2_plasma_mean_interp"] + extrap_weight * row["test_r2_plasma_mean_extrap"]
                 )
                 row["primary_metric"] = primary_metric
-                row["primary_metric_value"] = float(row.get(primary_metric, 0.0))
+                row["primary_metric_value"] = _primary_metric_value(
+                    row,
+                    primary_metric=primary_metric,
+                    model_name=model_name,
+                )
                 leaderboard.append(row)
                 effective_steps_per_model[model_name] = {
                     "interp": int(split_steps.get("interp", 0)),
@@ -798,6 +971,10 @@ class BenchmarkRunner:
                 te_fold = np.array([id_to_idx[c] for c in split_fold["test"]], dtype=np.int64)
                 for model_idx, model_name in enumerate(profile_lock["models"]):
                     fold_model_dir = self.output_root / "models" / model_name / "cv_folds" / f"fold_{fold_idx:02d}"
+                    effective_input_mode_meta = resolve_effective_input_mode_metadata_for_model(
+                        model_name=model_name,
+                        input_mode_meta=self.input_mode_meta,
+                    )
                     dispatch = run_model_train_eval(
                         BenchmarkModelContext(
                             benchmark_cfg=self.benchmark_cfg,
@@ -832,6 +1009,9 @@ class BenchmarkRunner:
                             coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
                             coord_feature_pack=coord_feature_pack,
                             coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
+                            structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
+                            latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
+                            input_mode_meta=effective_input_mode_meta,
                         )
                     )
                     pred_eval = dispatch["pred_eval"]
@@ -938,7 +1118,7 @@ class BenchmarkRunner:
         resolved["effective_steps_per_model"] = effective_steps_per_model
         resolved["comparison_contract"] = {
             "global_reference_mode": "frozen"
-            if eval_protocol_scope in {"global_frozen", "unet_isolated", "unetpp_isolated", "unetpp_attn_isolated", "fno_isolated", "ffno_isolated", "deeponet_isolated"}
+            if eval_protocol_scope in _FROZEN_REFERENCE_SCOPES
             else "common",
             "active_model_scope": eval_protocol_scope,
             "target_family_mode": target_family_for_score_raw,
@@ -946,7 +1126,7 @@ class BenchmarkRunner:
         guard_cfg = dict(self.benchmark_cfg.get("guardrails", {}))
         checks = dict(guard_cfg.get("checks", {}))
         guard_mode = str(guard_cfg.get("mode", "warn")).strip().lower()
-        emit_unet_contract = bool(unet_contract_samples) or eval_protocol_scope not in {"fno_isolated", "ffno_isolated", "deeponet_isolated"}
+        emit_unet_contract = bool(unet_contract_samples) or eval_protocol_scope not in _UNET_CONTRACT_OPTIONAL_SCOPES
         if emit_unet_contract:
             unet_contract_effective = self._aggregate_unet_contract_effective(
                 train_cfg=train_cfg,
@@ -1077,6 +1257,9 @@ class BenchmarkRunner:
             resolved["deeponet_output_path_dot_skip_effective"] = float(
                 deeponet_contract_effective.get("output_path_dot_skip_effective", 0.25)
             )
+            resolved["deeponet_output_path_dot_skip_mode_effective"] = str(
+                deeponet_contract_effective.get("output_path_dot_skip_mode_effective", "fixed")
+            )
             resolved["deeponet_output_path_fused_hidden_dim_effective"] = int(
                 deeponet_contract_effective.get("output_path_fused_hidden_dim_effective", 96)
             )
@@ -1085,6 +1268,9 @@ class BenchmarkRunner:
             )
             resolved["deeponet_output_path_global_hidden_dim_effective"] = int(
                 deeponet_contract_effective.get("output_path_global_hidden_dim_effective", 64)
+            )
+            resolved["deeponet_missing_geom_feature_policy_effective"] = str(
+                deeponet_contract_effective.get("missing_geom_feature_policy_effective", "warn_zero")
             )
             resolved["deeponet_trunk_fourier_mode_effective"] = str(
                 deeponet_contract_effective.get("trunk_fourier_mode_effective", "legacy")
@@ -1356,6 +1542,10 @@ class BenchmarkRunner:
         unet_input_cfg = dict(unet_cfg.get("input_features", {}))
         raw_feat = unet_input_cfg.get("features", ["x", "y"])
         feat_list = [str(v) for v in raw_feat] if isinstance(raw_feat, list) and raw_feat else ["x", "y"]
+        unet_selection_cfg = dict(unet_cfg.get("selection", {}))
+        unet_optimizer_cfg = dict(unet_cfg.get("optimizer", {}))
+        unet_model_cfg = dict(unet_cfg.get("model_cfg", {}))
+        unet_operator_cfg = dict(unet_model_cfg.get("unet_operator_v2_cfg", {}))
         sup_cfg = dict(dict(train_cfg.get("loss", {})).get("supervised", {}))
         bt_cfg = dict(sup_cfg.get("boundary_type_weighting", {}))
         bp_cfg = dict(sup_cfg.get("boundary_profile_weighting", {}))
@@ -1365,21 +1555,31 @@ class BenchmarkRunner:
             "target_vars_effective": target_vars_default,
             "target_family_effective": unet_family,
             "merge_role": "single",
-            "unet_backend_effective": str(dict(unet_cfg.get("model_cfg", {})).get("backend", "numpy")).strip().lower(),
-            "unet_input_channels_effective": ["x", "y"],
-            "unet_selection_mode_effective": str(dict(unet_cfg.get("selection", {})).get("mode", "last")).strip().lower(),
-            "boundary_bonus_weight_effective": float(dict(unet_cfg.get("selection", {})).get("boundary_bonus_weight", 0.0)),
-            "unet_optimizer_effective": dict(unet_cfg.get("optimizer", {})),
+            "unet_backend_effective": str(unet_model_cfg.get("backend", "numpy")).strip().lower(),
+            "unet_input_channels_effective": feat_list,
+            "unet_selection_mode_effective": str(unet_selection_cfg.get("mode", "last")).strip().lower(),
+            "selection_weights_effective": dict(unet_selection_cfg.get("weights", {})),
+            "boundary_bonus_weight_effective": float(unet_selection_cfg.get("boundary_bonus_weight", 0.0)),
+            "unet_optimizer_effective": {
+                "type": str(unet_optimizer_cfg.get("type", "adamw")).strip().lower(),
+                "lr": float(unet_optimizer_cfg.get("lr", unet_cfg.get("lr", train_cfg.get("lr", 1e-3)))),
+                "weight_decay": float(unet_optimizer_cfg.get("weight_decay", 0.0)),
+                "schedule": str(unet_optimizer_cfg.get("schedule", "none")).strip().lower(),
+                "warmup_epochs": int(max(int(unet_optimizer_cfg.get("warmup_epochs", 0)), 0)),
+            },
             "unet_output_heads_mode_effective": str(
-                dict(dict(unet_cfg.get("model_cfg", {})).get("output_heads", {})).get("mode", "shared")
+                dict(unet_model_cfg.get("output_heads", {})).get(
+                    "mode",
+                    unet_operator_cfg.get("head_mode", "shared"),
+                )
             ).strip().lower(),
             "unet_feature_contract_effective": {
-                "input_features_mode": str(unet_input_cfg.get("mode", "legacy_xy")).strip().lower(),
+                "input_features_mode": str(unet_input_cfg.get("mode", "geom_feature_pack")).strip().lower(),
                 "input_feature_channels": feat_list,
                 "upsample_mode": str(
-                    dict(dict(unet_cfg.get("model_cfg", {})).get("conv_cfg", {})).get(
+                    dict(unet_model_cfg.get("conv_cfg", {})).get(
                         "upsample_mode",
-                        dict(unet_cfg.get("model_cfg", {})).get("upsample_mode", "deconv"),
+                        unet_operator_cfg.get("upsample", unet_model_cfg.get("upsample_mode", "deconv")),
                     )
                 ).strip().lower(),
                 "distance_transform_mode": str(
@@ -1419,9 +1619,18 @@ class BenchmarkRunner:
                 "ramp_epochs": int(max(int(rb_schedule_cfg.get("ramp_epochs", 0)), 0)),
             },
             "density_head_loss_weights_effective": {
-                "enabled": bool(dict(dict(unet_cfg.get("model_cfg", {})).get("output_heads", {}).get("loss_weights", {})).get("enabled", False)),
-                "density": float(dict(dict(unet_cfg.get("model_cfg", {})).get("output_heads", {}).get("loss_weights", {})).get("density", 1.0)),
-                "field": float(dict(dict(unet_cfg.get("model_cfg", {})).get("output_heads", {}).get("loss_weights", {})).get("field", 1.0)),
+                "enabled": bool(dict(unet_model_cfg.get("output_heads", {}).get("loss_weights", {})).get("enabled", False)),
+                "density": float(dict(unet_model_cfg.get("output_heads", {}).get("loss_weights", {})).get("density", 1.0)),
+                "field": float(dict(unet_model_cfg.get("output_heads", {}).get("loss_weights", {})).get("field", 1.0)),
+            },
+            "unet_operator_v2_contract_effective": {
+                "enabled": str(model_key) == "unet_operator_v2",
+                "depth": int(unet_operator_cfg.get("depth", 0)),
+                "width": int(unet_operator_cfg.get("width", 0)),
+                "blocks_per_level": int(unet_operator_cfg.get("blocks_per_level", 0)),
+                "downsample": str(unet_operator_cfg.get("downsample", "")).strip().lower(),
+                "use_film": bool(unet_operator_cfg.get("use_film", False)),
+                "head_mode": str(unet_operator_cfg.get("head_mode", "shared")).strip().lower(),
             },
             "unet_spatial_consistency_effective": bool(dict(sup_cfg.get("spatial_consistency", {})).get("enabled", False)),
         }
@@ -1443,13 +1652,23 @@ class BenchmarkRunner:
         v = self._first_str(unet_contract_samples, "unet_selection_mode_effective")
         if v is not None:
             out["unet_selection_mode_effective"] = v
+        d = self._first_dict(unet_contract_samples, "selection_weights_effective")
+        if d is not None:
+            out["selection_weights_effective"] = d
         for sample in unet_contract_samples:
             if isinstance(sample, dict) and "boundary_bonus_weight_effective" in sample:
                 out["boundary_bonus_weight_effective"] = float(sample["boundary_bonus_weight_effective"])
                 break
         d = self._first_dict(unet_contract_samples, "unet_optimizer_effective")
         if d is not None:
-            out["unet_optimizer_effective"] = d
+            merged_optimizer = dict(out.get("unet_optimizer_effective", {}))
+            merged_optimizer.update(dict(d))
+            out["unet_optimizer_effective"] = merged_optimizer
+        if isinstance(out.get("unet_optimizer_effective"), dict):
+            if "weight_decay" not in out["unet_optimizer_effective"]:
+                out["unet_optimizer_effective"]["weight_decay"] = float(
+                    dict(unet_cfg.get("optimizer", {})).get("weight_decay", 0.0)
+                )
         v = self._first_str(unet_contract_samples, "unet_output_heads_mode_effective")
         if v is not None:
             out["unet_output_heads_mode_effective"] = v
@@ -1471,6 +1690,9 @@ class BenchmarkRunner:
         d = self._first_dict(unet_contract_samples, "density_head_loss_weights_effective")
         if d is not None:
             out["density_head_loss_weights_effective"] = d
+        d = self._first_dict(unet_contract_samples, "unet_operator_v2_contract_effective")
+        if d is not None:
+            out["unet_operator_v2_contract_effective"] = d
         for sample in unet_contract_samples:
             if isinstance(sample, dict) and "unet_spatial_consistency_effective" in sample:
                 out["unet_spatial_consistency_effective"] = bool(sample.get("unet_spatial_consistency_effective", False))
@@ -1482,6 +1704,7 @@ class BenchmarkRunner:
             "region_balance_bands_effective",
             "region_balance_schedule_effective",
             "density_head_loss_weights_effective",
+            "unet_operator_v2_contract_effective",
         ]:
             payload = out.get(key)
             if isinstance(payload, dict) and not bool(payload.get("enabled", False)):
@@ -1668,10 +1891,13 @@ class BenchmarkRunner:
         ) or "coord_mlp_fourier"
         cfg = dict(train_cfg.get(coord_model_key, {}))
         input_features_cfg = dict(cfg.get("input_features", {}))
-        _, model_cfg = _normalize_coord_mlp_model_cfg(
-            model_name=str(coord_model_key),
-            raw_cfg=dict(cfg.get("model_cfg", {})),
-        )
+        if coord_model_key == "coord_mlp_pod_residual":
+            model_cfg = normalize_coord_mlp_pod_residual_cfg(dict(cfg.get("model_cfg", {})))
+        else:
+            _, model_cfg = _normalize_coord_mlp_model_cfg(
+                model_name=str(coord_model_key),
+                raw_cfg=dict(cfg.get("model_cfg", {})),
+            )
         out = {
             "model_type_effective": str(coord_model_key),
             "backend_effective": "torch",
@@ -1687,6 +1913,13 @@ class BenchmarkRunner:
             "embedding": dict(model_cfg.get("embedding", {})),
             "siren": dict(model_cfg.get("siren", {})),
         }
+        if coord_model_key == "coord_mlp_pod_residual":
+            out["pod_residual"] = {
+                "basis": dict(model_cfg.get("basis", {})),
+                "coeff_loss_weight": float(model_cfg.get("coeff_loss_weight", 0.0)),
+                "residual_scale_init": float(model_cfg.get("residual_scale_init", 0.0)),
+                "point_encoder": dict(model_cfg.get("point_encoder", {})),
+            }
         sample = coord_mlp_contract_samples[0] if coord_mlp_contract_samples else {}
         for key in (
             "model_type_effective",
@@ -1701,6 +1934,7 @@ class BenchmarkRunner:
             "selection_weights_effective",
             "embedding",
             "siren",
+            "pod_residual",
         ):
             if key in sample:
                 out[key] = sample[key]
@@ -1713,14 +1947,16 @@ class BenchmarkRunner:
         y_vars: list[str],
         deeponet_pod_contract_samples: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        cfg = dict(train_cfg.get("deeponet_pod", {}))
+        sample = deeponet_pod_contract_samples[0] if deeponet_pod_contract_samples else {}
+        model_type = str(sample.get("model_type_effective", "deeponet_pod")).strip().lower() or "deeponet_pod"
+        cfg = dict(train_cfg.get(model_type, train_cfg.get("deeponet_pod", {})))
         model_cfg = normalize_pod_deeponet_model_cfg(
             dict(cfg.get("model_cfg", {})),
-            model_type="deeponet_pod",
+            model_type=model_type,
         )
         basis_cfg = dict(model_cfg.get("basis", {}))
         out = {
-            "model_type_effective": "deeponet_pod",
+            "model_type_effective": model_type,
             "target_family_effective": str(cfg.get("target_family", "allvars")).strip().lower(),
             "target_vars_effective": list(cfg.get("target_vars", y_vars)),
             "basis_rank_by_var": {str(v): int(basis_cfg.get("rank", 32)) for v in list(cfg.get("target_vars", y_vars))},
@@ -1731,7 +1967,6 @@ class BenchmarkRunner:
             "selection_weights_effective": dict(dict(cfg.get("selection", {})).get("weights", {})),
             "model_cfg_effective": dict(model_cfg),
         }
-        sample = deeponet_pod_contract_samples[0] if deeponet_pod_contract_samples else {}
         for key in (
             "model_type_effective",
             "target_family_effective",
@@ -1794,6 +2029,9 @@ class BenchmarkRunner:
             "output_path_dot_skip_effective": float(
                 dict(dict(deeponet_cfg.get("model_cfg", {})).get("output_path", {})).get("dot_skip", 0.25)
             ),
+            "output_path_dot_skip_mode_effective": str(
+                dict(dict(deeponet_cfg.get("model_cfg", {})).get("output_path", {})).get("dot_skip_mode", "fixed")
+            ).strip().lower(),
             "output_path_fused_hidden_dim_effective": int(
                 dict(dict(deeponet_cfg.get("model_cfg", {})).get("output_path", {})).get("fused_hidden_dim", 96)
             ),
@@ -1809,6 +2047,9 @@ class BenchmarkRunner:
                 dict(deeponet_cfg.get("model_cfg", {})).get("sensor_pool_mode", "moments")
             ),
             "branch_mode_effective": str(dict(deeponet_cfg.get("model_cfg", {})).get("branch_mode", "moments")),
+            "missing_geom_feature_policy_effective": str(
+                dict(deeponet_cfg.get("model_cfg", {})).get("missing_geom_feature_policy", "warn_zero")
+            ).strip().lower(),
             "latent_layer_norm_effective": bool(dict(deeponet_cfg.get("model_cfg", {})).get("latent_layer_norm", False)),
             "optimizer_effective": {
                 "type": str(dict(deeponet_cfg.get("optimizer", {})).get("type", "adamw")).strip().lower(),
@@ -1837,88 +2078,64 @@ class BenchmarkRunner:
         d = self._first_dict(deeponet_contract_samples, "selection_weights_effective")
         if d is not None:
             out["selection_weights_effective"] = d
+
+        def _set_cast_value(key: str, caster: Any) -> None:
+            raw = self._first_str(deeponet_contract_samples, key)
+            if raw is None:
+                return
+            try:
+                out[key] = caster(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"invalid deeponet contract value for {key}: {raw!r}") from exc
+
         v = self._first_str(deeponet_contract_samples, "operator_mode_effective")
         if v is not None:
             out["operator_mode_effective"] = v
         v = self._first_str(deeponet_contract_samples, "trunk_input_mode_effective")
         if v is not None:
             out["trunk_input_mode_effective"] = v
-        v = self._first_str(deeponet_contract_samples, "trunk_fourier_n_freq_effective")
-        if v is not None:
-            try:
-                out["trunk_fourier_n_freq_effective"] = int(v)
-            except Exception:
-                pass
+        _set_cast_value("trunk_fourier_n_freq_effective", int)
         v = self._first_str(deeponet_contract_samples, "trunk_fourier_mode_effective")
         if v is not None:
             out["trunk_fourier_mode_effective"] = v
         v = self._first_str(deeponet_contract_samples, "trunk_cond_modulation_effective")
         if v is not None:
             out["trunk_cond_modulation_effective"] = v
-        v = self._first_str(deeponet_contract_samples, "trunk_cond_mod_hidden_effective")
-        if v is not None:
-            try:
-                out["trunk_cond_mod_hidden_effective"] = int(v)
-            except Exception:
-                pass
+        _set_cast_value("trunk_cond_mod_hidden_effective", int)
         for sample in deeponet_contract_samples:
             if isinstance(sample, dict) and "residual_head_enabled_effective" in sample:
                 out["residual_head_enabled_effective"] = bool(sample.get("residual_head_enabled_effective", False))
                 break
-        v = self._first_str(deeponet_contract_samples, "residual_head_hidden_dim_effective")
-        if v is not None:
-            try:
-                out["residual_head_hidden_dim_effective"] = int(v)
-            except Exception:
-                pass
-        v = self._first_str(deeponet_contract_samples, "residual_head_scale_init_effective")
-        if v is not None:
-            try:
-                out["residual_head_scale_init_effective"] = float(v)
-            except Exception:
-                pass
+        _set_cast_value("residual_head_hidden_dim_effective", int)
+        _set_cast_value("residual_head_scale_init_effective", float)
         v = self._first_str(deeponet_contract_samples, "residual_head_gain_mode_effective")
         if v is not None:
             out["residual_head_gain_mode_effective"] = v
-        v = self._first_str(deeponet_contract_samples, "residual_head_gain_value_effective")
-        if v is not None:
-            try:
-                out["residual_head_gain_value_effective"] = float(v)
-            except Exception:
-                pass
+        _set_cast_value("residual_head_gain_value_effective", float)
         v = self._first_str(deeponet_contract_samples, "output_path_mode_effective")
         if v is not None:
             out["output_path_mode_effective"] = v
-        v = self._first_str(deeponet_contract_samples, "output_path_dot_skip_effective")
+        _set_cast_value("output_path_dot_skip_effective", float)
+        v = self._first_str(deeponet_contract_samples, "output_path_dot_skip_mode_effective")
         if v is not None:
-            try:
-                out["output_path_dot_skip_effective"] = float(v)
-            except Exception:
-                pass
-        v = self._first_str(deeponet_contract_samples, "output_path_fused_hidden_dim_effective")
-        if v is not None:
-            try:
-                out["output_path_fused_hidden_dim_effective"] = int(v)
-            except Exception:
-                pass
+            out["output_path_dot_skip_mode_effective"] = v
+        _set_cast_value("output_path_fused_hidden_dim_effective", int)
         for sample in deeponet_contract_samples:
             if isinstance(sample, dict) and "output_path_global_local_enabled_effective" in sample:
                 out["output_path_global_local_enabled_effective"] = bool(
                     sample.get("output_path_global_local_enabled_effective", False)
                 )
                 break
-        v = self._first_str(deeponet_contract_samples, "output_path_global_hidden_dim_effective")
-        if v is not None:
-            try:
-                out["output_path_global_hidden_dim_effective"] = int(v)
-            except Exception:
-                pass
+        _set_cast_value("output_path_global_hidden_dim_effective", int)
         v = self._first_str(deeponet_contract_samples, "sensor_pool_mode_effective")
         if v is not None:
             out["sensor_pool_mode_effective"] = v
         v = self._first_str(deeponet_contract_samples, "branch_mode_effective")
         if v is not None:
             out["branch_mode_effective"] = v
+        v = self._first_str(deeponet_contract_samples, "missing_geom_feature_policy_effective")
+        if v is not None:
+            out["missing_geom_feature_policy_effective"] = v
         for sample in deeponet_contract_samples:
             if isinstance(sample, dict) and "latent_layer_norm_effective" in sample:
                 out["latent_layer_norm_effective"] = bool(sample.get("latent_layer_norm_effective", False))

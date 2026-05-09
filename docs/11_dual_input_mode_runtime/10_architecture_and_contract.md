@@ -91,3 +91,8 @@ runtime:
   - spatial pack と descriptor の両方を使う
 
 この internal adapter を切り出すことで、mode と model family を直交させる。
+
+## Benchmark Runtime Guardrail (Implemented)
+
+- Benchmark execution enforces strict mode contract checks (`strict_input_mode=error`).
+- Benchmark execution forbids metadata fallback (`allow_mode_fallback=false`).

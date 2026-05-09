@@ -13,8 +13,32 @@ def test_optimize_csv_backend_smoke(tmp_path: Path):
     run_dir = tmp_path / "pipeline_csv_run"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": {
+            "input_mode": "table_only",
+            "strict_input_mode": "error",
+            "allow_mode_fallback": False,
+            "structure": {
+                "feature_profile": "none",
+                "descriptor_profile": "none",
+                "latent_profile": "none",
+                "adapter_mode": "none",
+                "provider_mode": "fixed",
+            },
+        },
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 2, "seed": 5},
-        "preprocessing": {"split": {"seed": 0, "ratios": [0.7, 0.15, 0.15]}, "axis_schema": {"mode": "steady"}},
+        "preprocessing": {
+            "split": {"seed": 0, "ratios": [0.7, 0.15, 0.15]},
+            "axis_schema": {"mode": "steady"},
+            "coord_features": {"enabled": False},
+            "scalers": {
+                "target_transforms": {
+                    "ne": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
+                    "ni": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
+                    "Te": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
+                    "phi": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "all", "clip": {"mode": "none"}},
+                }
+            },
+        },
         "model": {"name": "global_mlp"},
         "train": {"epochs": 3, "lr": 0.01},
         "inference": {

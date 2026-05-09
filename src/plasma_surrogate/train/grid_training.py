@@ -1,0 +1,792 @@
+"""Grid-family train/eval lane for shared model dispatch."""
+
+from __future__ import annotations
+
+import copy
+from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
+
+from plasma_surrogate.core.input_modes import (
+    GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY,
+    GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+    TABLE_PLUS_STRUCTURE,
+)
+from plasma_surrogate.core.model_families import (
+    COORD_MLP_FAMILY_MODELS,
+    GEOM_DEEPONET_SIREN_FAMILY_MODELS,
+    GRID_TORCH_MODELS,
+    MAINLINE_GEOM_PACK_MODELS,
+    SPECTRAL_FAMILY_MODELS,
+    UNET_FAMILY_MODELS,
+)
+from plasma_surrogate.core.model_input_policy import ADAPTER_AUTO, ADAPTER_HYBRID_PACK_DESCRIPTOR
+from plasma_surrogate.core.vector_pack import load_vector_from_pack
+from plasma_surrogate.models.checkpoint import build_model_from_name
+from plasma_surrogate.models.deeponet.pod_deeponet_torch import fit_pod_basis_from_targets
+from plasma_surrogate.models.mlp.coord_mlp_pod_residual import normalize_coord_mlp_pod_residual_cfg
+from plasma_surrogate.models.mlp.coord_mlp_torch import _normalize_coord_mlp_model_cfg
+from plasma_surrogate.train.spatial_features import (
+    apply_coord_feature_scaling,
+    apply_distance_transform,
+    build_coord_feature_rows,
+    resolve_coord_feature_channels,
+    resolve_distance_transform_cfg,
+    resolve_distance_transform_effective,
+)
+from plasma_surrogate.train.target_contracts import (
+    resolve_allvars_target_family,
+    resolve_allvars_target_vars_for_family,
+    resolve_mainline_selection_weights,
+    to_true_eval,
+)
+
+
+@dataclass
+class GridTorchTrainResult:
+    model: Any
+    history: list[dict[str, float]]
+    pred_eval: dict[str, np.ndarray]
+    true_eval: dict[str, np.ndarray]
+    eval_vars: list[str]
+
+
+def _normalize_profile_name(value: Any, *, default: str = "none") -> str:
+    text = str(value if value is not None else default).strip().lower()
+    return text if text else default
+
+
+def _validate_unet_like_mainline_contract(
+    *,
+    model_name: str,
+    model_cfg: dict[str, Any],
+    selection_cfg: dict[str, Any],
+    loss_cfg: dict[str, Any],
+    y_vars: list[str],
+    target_family: str,
+    target_vars: list[str],
+    require_shared_output_head: bool,
+    input_features_mode: str | None = None,
+    input_feature_channels: list[str] | None = None,
+) -> None:
+    model_key = str(model_name).strip().lower()
+    if model_key not in GRID_TORCH_MODELS:
+        raise ValueError(f"unsupported unet-like model for mainline validation: {model_name}")
+    cfg_prefix = f"train.{model_key}"
+    if str(target_family).strip().lower() != "allvars":
+        raise ValueError(f"{cfg_prefix}.target_family must be allvars for mainline; got={target_family}")
+    expected = list(y_vars)
+    if list(target_vars) != expected:
+        raise ValueError(f"{cfg_prefix}.target_vars must match allvars order: expected={expected}, got={target_vars}")
+    if require_shared_output_head:
+        head_mode = str(dict(dict(model_cfg or {}).get("output_heads", {})).get("mode", "shared")).strip().lower()
+        if head_mode != "shared":
+            raise ValueError(f"{cfg_prefix}.model_cfg.output_heads.mode must be shared for mainline")
+    if model_key in MAINLINE_GEOM_PACK_MODELS:
+        mode = str(input_features_mode or "").strip().lower()
+        if mode != "geom_feature_pack":
+            raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack for mainline")
+        required_channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
+        channels = [str(v) for v in list(input_feature_channels or [])]
+        if channels != required_channels:
+            raise ValueError(
+                f"{cfg_prefix}.input_features.features must be {required_channels} for mainline; got={channels}"
+            )
+    sel_mode = str(selection_cfg.get("mode", "last")).strip().lower()
+    if sel_mode != "best_val_allvars_balance":
+        raise ValueError(f"{cfg_prefix}.selection.mode must be best_val_allvars_balance for mainline")
+    resolve_mainline_selection_weights(
+        selection_cfg=selection_cfg,
+        target_vars=target_vars,
+        cfg_prefix=cfg_prefix,
+    )
+    if "density_guard" in selection_cfg:
+        raise ValueError(f"{cfg_prefix}.selection.density_guard is removed from mainline")
+    if "boundary_bonus_weight" in selection_cfg and float(selection_cfg.get("boundary_bonus_weight", 0.0)) != 0.0:
+        raise ValueError(f"{cfg_prefix}.selection.boundary_bonus_weight must be 0.0 for mainline")
+    sup_cfg = dict(loss_cfg.get("supervised", {}))
+    for forbidden_key in ("density_positivity_penalty", "density_relative_weighting"):
+        if forbidden_key in sup_cfg:
+            raise ValueError(f"train.loss.supervised.{forbidden_key} is removed from {model_key} mainline")
+
+
+def _validate_coord_mlp_experimental_contract(
+    *,
+    model_name: str,
+    y_vars: list[str],
+    target_family: str,
+    target_vars: list[str],
+    input_features_cfg: dict[str, Any],
+    input_feature_channels: list[str],
+) -> None:
+    model_key = str(model_name).strip().lower()
+    if model_key not in COORD_MLP_FAMILY_MODELS:
+        raise ValueError(f"unsupported coord-mlp model: {model_name}")
+    cfg_prefix = f"train.{model_key}"
+    if str(target_family).strip().lower() != "allvars":
+        raise ValueError(f"{cfg_prefix}.target_family must be allvars for coord-mlp experimental")
+    expected = list(y_vars)
+    if list(target_vars) != expected:
+        raise ValueError(f"{cfg_prefix}.target_vars must match output_layout.vars order: expected={expected}, got={target_vars}")
+    mode = str(dict(input_features_cfg).get("mode", "")).strip().lower()
+    if mode != "geom_feature_pack":
+        raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack")
+    if len(set(str(v) for v in input_feature_channels)) != len(list(input_feature_channels)):
+        raise ValueError(f"{cfg_prefix}.input_features.features must not contain duplicates")
+
+
+def _validate_geom_deeponet_siren_experimental_contract(
+    *,
+    y_vars: list[str],
+    target_family: str,
+    target_vars: list[str],
+    input_features_cfg: dict[str, Any],
+    input_feature_channels: list[str],
+) -> None:
+    cfg_prefix = "train.geom_deeponet_siren"
+    if str(target_family).strip().lower() != "allvars":
+        raise ValueError(f"{cfg_prefix}.target_family must be allvars")
+    expected = list(y_vars)
+    if list(target_vars) != expected:
+        raise ValueError(f"{cfg_prefix}.target_vars must match output_layout.vars order: expected={expected}, got={target_vars}")
+    mode = str(dict(input_features_cfg).get("mode", "")).strip().lower()
+    if mode != "geom_feature_pack":
+        raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack")
+    if len(set(str(v) for v in input_feature_channels)) != len(list(input_feature_channels)):
+        raise ValueError(f"{cfg_prefix}.input_features.features must not contain duplicates")
+
+
+def _resolve_geom_deeponet_siren_descriptor_contract(
+    *,
+    input_mode: str,
+    adapter_mode: str,
+    descriptor_profile: str,
+    descriptor_pack: dict[str, Any] | None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    mode = _normalize_profile_name(input_mode, default=TABLE_PLUS_STRUCTURE)
+    adapter = _normalize_profile_name(adapter_mode, default=ADAPTER_AUTO)
+    desc_profile = _normalize_profile_name(descriptor_profile, default="none")
+    if mode != TABLE_PLUS_STRUCTURE:
+        raise ValueError("geom_deeponet_siren requires runtime.input_mode=table_plus_structure")
+    if adapter != ADAPTER_HYBRID_PACK_DESCRIPTOR:
+        raise ValueError(
+            "geom_deeponet_siren requires runtime.structure.adapter_mode_effective='hybrid_pack_descriptor'"
+        )
+    if desc_profile == "none":
+        raise ValueError("geom_deeponet_siren requires runtime.structure.descriptor_profile != none")
+    descriptor_vector, descriptor_names = load_vector_from_pack(
+        pack=descriptor_pack,
+        pack_name="structure_descriptor_pack",
+    )
+    return descriptor_vector, {
+        GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: str(desc_profile),
+        GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(descriptor_vector.shape[0]),
+        "descriptor_feature_names_effective": list(descriptor_names),
+        "adapter_mode_effective": str(adapter),
+    }
+
+
+def _grid_contract_warning_key(model_name: str) -> str:
+    model_key = str(model_name).strip().lower()
+    if model_key in COORD_MLP_FAMILY_MODELS:
+        return "coord_mlp_contract_warnings"
+    if model_key in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
+        return "geom_deeponet_siren_contract_warnings"
+    if model_key in SPECTRAL_FAMILY_MODELS:
+        return "grid_contract_warnings"
+    return "unet_contract_warnings"
+
+
+def _build_spectral_contract_effective(
+    *,
+    prefix: str,
+    cfg: dict[str, Any],
+    selection_cfg: dict[str, Any],
+    optimizer_cfg: dict[str, Any],
+    input_features_mode: str,
+    input_feature_channels: list[str],
+    target_family: str,
+    target_vars: list[str],
+    loss_cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    spectral_cfg = dict(dict(cfg.get("model_cfg", {})).get("spectral_cfg", {}))
+    out = {
+        f"{prefix}_backend_effective": "torch",
+        f"{prefix}_input_channels_effective": list(input_feature_channels),
+        f"{prefix}_input_features_mode_effective": str(input_features_mode),
+        f"{prefix}_selection_mode_effective": str(selection_cfg.get("mode", "last")).strip().lower(),
+        "selection_weights_effective": dict(selection_cfg.get("weights", {})),
+        f"{prefix}_optimizer_effective": {
+            "type": str(optimizer_cfg.get("type", "adamw")).strip().lower(),
+            "lr": float(optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3)))),
+            "schedule": str(optimizer_cfg.get("schedule", "none")).strip().lower(),
+            "warmup_epochs": int(optimizer_cfg.get("warmup_epochs", 0)),
+        },
+        f"{prefix}_feature_contract_effective": {
+            "input_features_mode": str(input_features_mode),
+            "input_feature_channels": list(input_feature_channels),
+            "distance_transform_mode": str(
+                dict(dict(cfg.get("input_features", {})).get("distance_transform", {})).get("mode", "raw")
+            ).strip().lower(),
+        },
+        f"{prefix}_spectral_contract_effective": {
+            "n_modes": int(dict(cfg.get("model_cfg", {})).get("n_modes", dict(cfg.get("model_cfg", {})).get("fno_n_modes", 2))),
+            "dealias_ratio": float(spectral_cfg.get("dealias_ratio", 1.0)),
+            "taper_alpha": float(spectral_cfg.get("taper_alpha", 0.0)),
+            "skip_filter": str(spectral_cfg.get("skip_filter", "none")).strip().lower(),
+        },
+        "target_family_effective": str(target_family),
+        "target_vars_effective": list(target_vars),
+        f"{prefix}_spatial_consistency_effective": bool(
+            dict((loss_cfg or {}).get("supervised", {}).get("spatial_consistency", {})).get("enabled", False)
+        ),
+    }
+    factorized_cfg = dict(spectral_cfg.get("factorized_cfg", {}))
+    if prefix == "ffno":
+        out[f"{prefix}_spectral_contract_effective"]["factorized_cfg"] = {
+            "enabled": bool(factorized_cfg.get("enabled", True)),
+            "mode": str(factorized_cfg.get("mode", "separable_1d")).strip().lower(),
+            "share_weights": bool(factorized_cfg.get("share_weights", False)),
+        }
+        local_skip_cfg = dict(spectral_cfg.get("local_skip_cfg", {}))
+        out[f"{prefix}_spectral_contract_effective"]["local_skip_cfg"] = {
+            "enabled": bool(local_skip_cfg.get("enabled", False)),
+            "init_scale": float(local_skip_cfg.get("init_scale", 0.0)),
+        }
+        axis_mix_cfg = dict(spectral_cfg.get("axis_mix_cfg", {}))
+        out[f"{prefix}_spectral_contract_effective"]["axis_mix_cfg"] = {
+            "enabled": bool(axis_mix_cfg.get("enabled", False)),
+            "init_h": float(axis_mix_cfg.get("init_h", 1.0)),
+            "init_w": float(axis_mix_cfg.get("init_w", 1.0)),
+        }
+    return out
+
+
+def _build_unet_contract_effective(
+    *,
+    cfg: dict[str, Any],
+    train_cfg: dict[str, Any],
+    model: Any,
+    grid_backend_effective: str,
+    grid_feature_channels: list[str],
+    grid_selection_cfg: dict[str, Any],
+    grid_optimizer_cfg: dict[str, Any],
+    grid_input_features_mode: str,
+    grid_target_family: str,
+    grid_target_vars: list[str],
+    grid_loss_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    model_cfg = dict(cfg.get("model_cfg", {}))
+    conv_cfg = dict(model_cfg.get("conv_cfg", {}))
+    operator_cfg = dict(model_cfg.get("unet_operator_v2_cfg", {}))
+    input_features_cfg = dict(cfg.get("input_features", {}))
+    distance_transform_cfg = dict(input_features_cfg.get("distance_transform", {}))
+    supervised_cfg = dict((grid_loss_cfg or {}).get("supervised", {}))
+    bt_cfg = dict(supervised_cfg.get("boundary_type_weighting", {}))
+    bp_cfg = dict(supervised_cfg.get("boundary_profile_weighting", {}))
+    rb_cfg = dict(supervised_cfg.get("region_balance", {}))
+    rb_schedule_cfg = dict(rb_cfg.get("schedule", {}))
+    return {
+        "unet_backend_effective": str(grid_backend_effective),
+        "unet_input_channels_effective": list(grid_feature_channels),
+        "unet_selection_mode_effective": str(grid_selection_cfg.get("mode", "last")).strip().lower(),
+        "selection_weights_effective": dict(grid_selection_cfg.get("weights", {})),
+        "boundary_bonus_weight_effective": float(grid_selection_cfg.get("boundary_bonus_weight", 0.0)),
+        "unet_optimizer_effective": {
+            "type": str(grid_optimizer_cfg.get("type", "adamw")).strip().lower()
+            if grid_backend_effective == "torch"
+            else "none",
+            "lr": (
+                float(grid_optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3))))
+                if grid_backend_effective == "torch"
+                else float(cfg.get("lr", train_cfg.get("lr", 1e-3)))
+            ),
+            "weight_decay": float(grid_optimizer_cfg.get("weight_decay", 0.0)) if grid_backend_effective == "torch" else 0.0,
+            "schedule": str(grid_optimizer_cfg.get("schedule", "none")).strip().lower()
+            if grid_backend_effective == "torch"
+            else "none",
+            "warmup_epochs": int(grid_optimizer_cfg.get("warmup_epochs", 0)) if grid_backend_effective == "torch" else 0,
+        },
+        "unet_output_heads_mode_effective": str(getattr(model, "output_heads_mode", "shared")).strip().lower(),
+        "unet_feature_contract_effective": {
+            "input_features_mode": str(grid_input_features_mode),
+            "input_feature_channels": list(grid_feature_channels),
+            "upsample_mode": str(
+                conv_cfg.get(
+                    "upsample_mode",
+                    operator_cfg.get("upsample", model_cfg.get("upsample_mode", "deconv")),
+                )
+            ).strip().lower(),
+            "distance_transform_mode": str(distance_transform_cfg.get("mode", "raw")).strip().lower(),
+        },
+        "unet_operator_v2_contract_effective": {
+            "enabled": str(getattr(model, "model_type", "")).strip().lower() == "unet_operator_v2",
+            "depth": int(operator_cfg.get("depth", getattr(model, "_torch_depth", 0) or 0)),
+            "width": int(operator_cfg.get("width", 0)),
+            "blocks_per_level": int(operator_cfg.get("blocks_per_level", getattr(model, "_torch_blocks_per_level", 0) or 0)),
+            "downsample": str(operator_cfg.get("downsample", getattr(model, "_torch_downsample", ""))).strip().lower(),
+            "use_film": bool(operator_cfg.get("use_film", getattr(model, "_torch_use_film", False))),
+            "head_mode": str(operator_cfg.get("head_mode", getattr(model, "_torch_head_mode", "shared"))).strip().lower(),
+        },
+        "merge_role": "single",
+        "target_family_effective": str(grid_target_family),
+        "target_vars_effective": list(grid_target_vars),
+        "unet_spatial_consistency_effective": bool(
+            dict((grid_loss_cfg or {}).get("supervised", {}).get("spatial_consistency", {})).get("enabled", False)
+        ),
+        "boundary_type_weighting_effective": {
+            "enabled": bool(bt_cfg.get("enabled", False)),
+            "vars": [str(v) for v in bt_cfg.get("vars", ["Te", "phi"])],
+            "band_px": float(bt_cfg.get("band_px", 2.0)),
+            "weights": {
+                "interface": float(dict(bt_cfg.get("weights", {})).get("interface", 1.0)),
+                "bc_dir": float(dict(bt_cfg.get("weights", {})).get("bc_dir", 1.0)),
+                "wafer": float(dict(bt_cfg.get("weights", {})).get("wafer", 1.0)),
+            },
+        },
+        "boundary_profile_weighting_effective": {
+            "enabled": bool(bp_cfg.get("enabled", False)),
+            "vars": [str(v) for v in bp_cfg.get("vars", ["Te", "phi"])],
+            "band_px": float(bp_cfg.get("band_px", 2.0)),
+            "mode": str(bp_cfg.get("mode", "exp_decay")).strip().lower(),
+            "alpha": float(bp_cfg.get("alpha", 0.35)),
+            "tau_px": float(bp_cfg.get("tau_px", 0.8)),
+        },
+        "region_balance_bands_effective": {
+            "enabled": bool(rb_cfg.get("enabled", False)),
+            "boundary_in_px": float(rb_cfg.get("boundary_in_px", 2.0)),
+            "mid_plasma_px": float(rb_cfg.get("mid_plasma_px", rb_cfg.get("deep_plasma_px", 10.0))),
+            "deep_plasma_px": float(rb_cfg.get("deep_plasma_px", 10.0)),
+            "weight_boundary_in": float(rb_cfg.get("weight_boundary_in", 0.6)),
+            "weight_plasma_mid": float(rb_cfg.get("weight_plasma_mid", 0.0)),
+            "weight_deep_plasma": float(rb_cfg.get("weight_deep_plasma", 0.4)),
+        },
+        "region_balance_schedule_effective": {
+            "enabled": bool(rb_schedule_cfg.get("enabled", False)),
+            "warmup_epochs": int(max(int(rb_schedule_cfg.get("warmup_epochs", 0)), 0)),
+            "ramp_epochs": int(max(int(rb_schedule_cfg.get("ramp_epochs", 0)), 0)),
+        },
+    }
+
+
+def _build_coord_mlp_contract_effective(
+    *,
+    model_name: str,
+    grid_backend_effective: str,
+    grid_target_family: str,
+    grid_target_vars: list[str],
+    grid_input_features_mode: str,
+    grid_feature_channels: list[str],
+    grid_feature_source: str,
+    cfg: dict[str, Any],
+    grid_selection_cfg: dict[str, Any],
+    coord_model_cfg: dict[str, Any],
+    basis_rank_by_var: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    out = {
+        "model_type_effective": str(model_name),
+        "backend_effective": str(grid_backend_effective),
+        "target_family_effective": str(grid_target_family),
+        "target_vars_effective": list(grid_target_vars),
+        "input_features_mode": str(grid_input_features_mode),
+        "input_feature_channels": list(grid_feature_channels),
+        "feature_source_effective": str(grid_feature_source),
+        "require_pack_effective": str(dict(cfg.get("input_features", {})).get("require_pack", "warn")).strip().lower(),
+        "selection_mode_effective": str(grid_selection_cfg.get("mode", "last")).strip().lower(),
+        "selection_weights_effective": dict(grid_selection_cfg.get("weights", {})),
+        "embedding": dict(coord_model_cfg.get("embedding", {})),
+        "siren": dict(coord_model_cfg.get("siren", {})),
+    }
+    if str(model_name).strip().lower() == "coord_mlp_pod_residual":
+        out["pod_residual"] = {
+            "basis": dict(coord_model_cfg.get("basis", {})),
+            "basis_rank_by_var": {str(k): int(v) for k, v in dict(basis_rank_by_var or {}).items()},
+            "coeff_loss_weight": float(coord_model_cfg.get("coeff_loss_weight", 0.0)),
+            "residual_scale_init": float(coord_model_cfg.get("residual_scale_init", 0.0)),
+            "point_encoder": dict(coord_model_cfg.get("point_encoder", {})),
+        }
+    return out
+
+
+def _build_geom_deeponet_siren_contract_effective(
+    *,
+    model_name: str,
+    grid_target_family: str,
+    grid_target_vars: list[str],
+    grid_input_features_mode: str,
+    grid_feature_channels: list[str],
+    grid_selection_cfg: dict[str, Any],
+    extra_artifacts: dict[str, Any],
+    structure_adapter_mode_effective: str,
+) -> dict[str, Any]:
+    return {
+        "model_type_effective": str(model_name),
+        "target_family_effective": str(grid_target_family),
+        "target_vars_effective": list(grid_target_vars),
+        "input_features_mode": str(grid_input_features_mode),
+        "input_feature_channels": list(grid_feature_channels),
+        "selection_mode_effective": str(grid_selection_cfg.get("mode", "last")).strip().lower(),
+        "selection_weights_effective": dict(grid_selection_cfg.get("weights", {})),
+        "descriptor_profile_effective": str(
+            extra_artifacts.get(GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY, "none")
+        ),
+        "descriptor_dim_effective": int(
+            extra_artifacts.get(GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY, 0)
+        ),
+        "adapter_mode_effective": str(structure_adapter_mode_effective),
+    }
+
+
+def run_grid_torch_train_predict(
+    *,
+    ctx: Any,
+    trainer: Any,
+    train_cfg: dict[str, Any],
+    optimizer_contract: dict[str, Any],
+    model_name: str,
+    cfg: dict[str, Any],
+    input_mode_effective: str,
+    structure_adapter_mode_effective: str,
+    extra_artifacts: dict[str, Any],
+) -> GridTorchTrainResult:
+    h, w = int(ctx.h), int(ctx.w)
+    grid_like_cfg = dict(train_cfg.get("unet_like", {}))
+    grid_loss_cfg = copy.deepcopy(ctx.loss_cfg or {})
+    grid_batch_size_cases = int(grid_like_cfg.get("batch_size_cases", 0))
+    grid_shuffle_cases = bool(grid_like_cfg.get("shuffle_cases", True))
+    grid_cond_train = np.asarray(ctx.cond_scaled[ctx.tr], dtype=np.float32)
+    grid_cond_val = np.asarray(ctx.cond_scaled[ctx.va], dtype=np.float32)
+    grid_cond_test = np.asarray(ctx.cond_scaled[ctx.te], dtype=np.float32)
+    grid_backend_effective = str(dict(cfg.get("model_cfg", cfg)).get("backend", "numpy")).strip().lower()
+    grid_supervised_distance_signed = None
+    grid_supervised_bc_dir_mask = None
+    grid_supervised_wafer_mask = None
+    train_key = f"train.{model_name}"
+
+    grid_target_family = resolve_allvars_target_family(
+        cfg.get("target_family", "allvars"),
+        cfg_key=f"{train_key}.target_family",
+    )
+    grid_target_vars = resolve_allvars_target_vars_for_family(
+        family=grid_target_family,
+        raw_target_vars=cfg.get("target_vars"),
+        available=ctx.y_vars,
+        cfg_key=f"{train_key}.target_vars",
+    )
+    grid_target_indices = [ctx.y_vars.index(v) for v in grid_target_vars]
+    input_features_cfg = dict(cfg.get("input_features", {}))
+    grid_input_features_mode = str(input_features_cfg.get("mode", "geom_feature_pack")).strip().lower()
+    if grid_input_features_mode not in {"legacy_xy", "geom_feature_pack"}:
+        raise ValueError(f"{train_key}.input_features.mode must be one of: legacy_xy, geom_feature_pack")
+    grid_feature_channels = resolve_coord_feature_channels(input_features_cfg.get("features"))
+    if grid_input_features_mode == "legacy_xy":
+        grid_feature_channels = ["x", "y"]
+    grid_selection_cfg = dict(cfg.get("selection", {}))
+
+    if model_name in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
+        _validate_geom_deeponet_siren_experimental_contract(
+            y_vars=ctx.y_vars,
+            target_family=grid_target_family,
+            target_vars=grid_target_vars,
+            input_features_cfg=input_features_cfg,
+            input_feature_channels=grid_feature_channels,
+        )
+    if model_name in MAINLINE_GEOM_PACK_MODELS:
+        _validate_unet_like_mainline_contract(
+            model_name=model_name,
+            model_cfg=dict(cfg.get("model_cfg", {})),
+            selection_cfg=grid_selection_cfg,
+            loss_cfg=grid_loss_cfg,
+            y_vars=ctx.y_vars,
+            target_family=grid_target_family,
+            target_vars=grid_target_vars,
+            require_shared_output_head=True,
+            input_features_mode=grid_input_features_mode,
+            input_feature_channels=grid_feature_channels,
+        )
+    elif model_name in COORD_MLP_FAMILY_MODELS:
+        _validate_coord_mlp_experimental_contract(
+            model_name=model_name,
+            y_vars=ctx.y_vars,
+            target_family=grid_target_family,
+            target_vars=grid_target_vars,
+            input_features_cfg=input_features_cfg,
+            input_feature_channels=grid_feature_channels,
+        )
+
+    grid_optimizer_cfg = dict(cfg.get("optimizer", {}))
+    if model_name in UNET_FAMILY_MODELS:
+        supervised_cfg = dict((grid_loss_cfg or {}).get("supervised", {}))
+        if bool(dict(supervised_cfg.get("chamber_aux", {})).get("enabled", False)):
+            raise ValueError(
+                f"train.loss.supervised.chamber_aux is not supported for {model_name} mainline; use region_balance"
+            )
+        _validate_unet_like_mainline_contract(
+            model_name=model_name,
+            model_cfg=dict(cfg.get("model_cfg", {})),
+            selection_cfg=grid_selection_cfg,
+            loss_cfg=grid_loss_cfg,
+            y_vars=ctx.y_vars,
+            target_family=grid_target_family,
+            target_vars=grid_target_vars,
+            require_shared_output_head=True,
+            input_features_mode=grid_input_features_mode,
+            input_feature_channels=grid_feature_channels,
+        )
+    if model_name not in COORD_MLP_FAMILY_MODELS:
+        grid_selection_cfg["weights"] = resolve_mainline_selection_weights(
+            selection_cfg=grid_selection_cfg,
+            target_vars=grid_target_vars,
+            cfg_prefix=train_key,
+        )
+
+    sc_cfg = dict(dict(grid_loss_cfg.get("supervised", {})).get("spatial_consistency", {}))
+    if bool(sc_cfg.get("enabled", False)):
+        scale_by_var = dict(sc_cfg.get("scale_by_var", {}))
+        for name in grid_target_vars:
+            scaler_obj = dict(getattr(ctx.transforms, "y_scalers", {}) or {}).get(name, None)
+            if scaler_obj is None:
+                continue
+            if isinstance(scaler_obj, dict):
+                scaler_dict = dict(scaler_obj)
+            elif hasattr(scaler_obj, "to_dict"):
+                scaler_dict = dict(scaler_obj.to_dict())
+            else:
+                raise TypeError(f"target scaler for {name!r} must be a dict or expose to_dict()")
+            std_raw = scaler_dict.get("std", None)
+            if isinstance(std_raw, list) and std_raw:
+                std_val = float(std_raw[0])
+            elif std_raw is not None:
+                std_val = float(std_raw)
+            else:
+                std_val = 1.0
+            if np.isfinite(std_val) and std_val > 0.0:
+                scale_by_var[str(name)] = float(std_val)
+        sc_cfg["scale_by_var"] = scale_by_var
+        sup_cfg_mut = dict(grid_loss_cfg.get("supervised", {}))
+        sup_cfg_mut["spatial_consistency"] = sc_cfg
+        grid_loss_cfg["supervised"] = sup_cfg_mut
+
+    if model_name in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
+        grid_descriptor_vec, geom_descriptor_meta = _resolve_geom_deeponet_siren_descriptor_contract(
+            input_mode=input_mode_effective,
+            adapter_mode=structure_adapter_mode_effective,
+            descriptor_profile=ctx.structure_descriptor_profile_effective,
+            descriptor_pack=ctx.structure_descriptor_pack,
+        )
+        extra_artifacts.update(dict(geom_descriptor_meta))
+        desc_train = np.repeat(grid_descriptor_vec.reshape(1, -1), grid_cond_train.shape[0], axis=0).astype(np.float32)
+        desc_val = np.repeat(grid_descriptor_vec.reshape(1, -1), grid_cond_val.shape[0], axis=0).astype(np.float32)
+        desc_test = np.repeat(grid_descriptor_vec.reshape(1, -1), grid_cond_test.shape[0], axis=0).astype(np.float32)
+        grid_cond_train = np.concatenate([grid_cond_train, desc_train], axis=1).astype(np.float32)
+        grid_cond_val = np.concatenate([grid_cond_val, desc_val], axis=1).astype(np.float32)
+        grid_cond_test = np.concatenate([grid_cond_test, desc_test], axis=1).astype(np.float32)
+    if model_name in MAINLINE_GEOM_PACK_MODELS or model_name in COORD_MLP_FAMILY_MODELS:
+        grid_backend_effective = "torch"
+
+    model_cfg_for_build = dict(cfg.get("model_cfg", cfg))
+    pod_basis_bundle = None
+    coord_pod_basis_rank_by_var: dict[str, int] = {}
+    if model_name == "coord_mlp_pod_residual":
+        coord_pod_cfg = normalize_coord_mlp_pod_residual_cfg(model_cfg_for_build)
+        basis_cfg = dict(coord_pod_cfg.get("basis", {}))
+        pod_basis_bundle = fit_pod_basis_from_targets(
+            ctx.y_scaled[ctx.tr][:, grid_target_indices],
+            output_keys=list(grid_target_vars),
+            requested_rank=int(basis_cfg.get("rank", 32)),
+            center=bool(basis_cfg.get("center", True)),
+            per_var=bool(basis_cfg.get("per_var", True)),
+        )
+        coord_pod_basis_rank_by_var = {str(k): int(v) for k, v in pod_basis_bundle.rank_by_var.items()}
+        extra_artifacts["coord_mlp_pod_residual_basis_rank_by_var"] = dict(coord_pod_basis_rank_by_var)
+
+    model = build_model_from_name(
+        model_name=model_name,
+        input_dim=int(grid_cond_train.shape[1]),
+        grid_shape=(h, w),
+        model_cfg=model_cfg_for_build,
+        seed=ctx.global_seed + ctx.model_idx,
+        phi_mode=str(ctx.profile_lock.get("phi_mode", "direct")),
+        out_channels=len(grid_target_vars),
+        output_keys=grid_target_vars,
+        unet_feature_channels=grid_feature_channels,
+        pod_basis_bundle=pod_basis_bundle,
+    )
+
+    require_pack = str(dict(cfg.get("input_features", {})).get("require_pack", "warn")).strip().lower()
+    if require_pack not in {"off", "warn", "error"}:
+        raise ValueError(f"train.{model_name}.input_features.require_pack must be one of: off, warn, error")
+    warning_bucket = extra_artifacts.setdefault(_grid_contract_warning_key(model_name), [])
+    grid_feature_source = "legacy_xy"
+    if grid_input_features_mode == "geom_feature_pack":
+        rows, source = build_coord_feature_rows(
+            channels=grid_feature_channels,
+            pack=ctx.coord_feature_pack,
+            geom_ctx=ctx.geom_ctx,
+            h=h,
+            w=w,
+        )
+        grid_feature_source = str(source)
+        if source != "preprocess_pack":
+            msg = (
+                f"{model_name} input-feature contract: preprocess coord_feature_pack was not used; "
+                f"effective_source={source}"
+            )
+            if model_name in COORD_MLP_FAMILY_MODELS or require_pack == "error":
+                raise ValueError(msg)
+            if require_pack == "warn":
+                warning_bucket.append(msg)
+        distance_transform_cfg = resolve_distance_transform_cfg(
+            dict(dict(cfg.get("input_features", {})).get("distance_transform") or {})
+        )
+        distance_transform_cfg_effective, _ = resolve_distance_transform_effective(
+            distance_transform_cfg,
+            stats=ctx.coord_distance_transform_stats,
+            warnings_out=warning_bucket,
+        )
+        rows, _ = apply_distance_transform(
+            rows.astype(np.float32),
+            channels=grid_feature_channels,
+            cfg=distance_transform_cfg_effective,
+        )
+        rows, _, scaling_applied = apply_coord_feature_scaling(
+            rows.astype(np.float32),
+            channels=grid_feature_channels,
+            coord_feature_scaler_artifact=ctx.coord_feature_scaler,
+        )
+        if model_name in COORD_MLP_FAMILY_MODELS and not bool(scaling_applied):
+            raise ValueError(f"train.{model_name} requires preprocessing.coord_features.scaling.enabled=true")
+    else:
+        yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
+        xx = np.linspace(0.0, 1.0, w, dtype=np.float32)
+        yv, xv = np.meshgrid(yy, xx, indexing="ij")
+        rows = np.stack([xv.reshape(-1), yv.reshape(-1)], axis=1).astype(np.float32)
+
+    spatial = rows.reshape(h, w, len(grid_feature_channels)).astype(np.float32)
+    if hasattr(model, "set_static_spatial_features"):
+        model.set_static_spatial_features(spatial)
+    if ctx.geom_ctx is not None:
+        raw_signed = getattr(ctx.geom_ctx, "distance_signed", None)
+        if raw_signed is not None:
+            grid_supervised_distance_signed = np.asarray(raw_signed, dtype=np.float32)
+        raw_bc_dir = getattr(ctx.geom_ctx, "bc_dir_mask", None)
+        if raw_bc_dir is not None:
+            grid_supervised_bc_dir_mask = np.asarray(raw_bc_dir, dtype=np.float32)
+        raw_wafer = getattr(ctx.geom_ctx, "regions", {}).get("wafer_mask") if hasattr(ctx.geom_ctx, "regions") else None
+        if raw_wafer is not None:
+            grid_supervised_wafer_mask = np.asarray(raw_wafer, dtype=np.float32)
+
+    out = trainer.run_unet(
+        model,
+        grid_cond_train,
+        ctx.y_scaled[ctx.tr][:, grid_target_indices],
+        grid_cond_val,
+        ctx.y_scaled[ctx.va][:, grid_target_indices],
+        epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
+        lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
+        physics_cfg=ctx.physics_cfg,
+        loss_cfg=grid_loss_cfg,
+        curriculum_cfg=ctx.curriculum_cfg,
+        supervised_mask=ctx.supervised_mask,
+        supervised_distance=ctx.supervised_distance,
+        supervised_distance_signed=grid_supervised_distance_signed,
+        supervised_bc_dir_mask=grid_supervised_bc_dir_mask,
+        supervised_wafer_mask=grid_supervised_wafer_mask,
+        optimizer_contract=optimizer_contract,
+        unet_optimizer_cfg=grid_optimizer_cfg,
+        batch_size_cases=grid_batch_size_cases,
+        shuffle_cases=grid_shuffle_cases,
+        seed=ctx.global_seed + ctx.model_idx,
+        selection_cfg=grid_selection_cfg,
+        selection_target_override=None,
+        selection_pred_additive=None,
+    )
+
+    history = out.history
+    steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, grid_batch_size_cases))) if grid_batch_size_cases > 0 else 1
+    extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
+
+    eval_vars = list(grid_target_vars)
+    if model_name in UNET_FAMILY_MODELS:
+        extra_artifacts["unet_contract_effective"] = _build_unet_contract_effective(
+            cfg=cfg,
+            train_cfg=train_cfg,
+            model=model,
+            grid_backend_effective=grid_backend_effective,
+            grid_feature_channels=grid_feature_channels,
+            grid_selection_cfg=grid_selection_cfg,
+            grid_optimizer_cfg=grid_optimizer_cfg,
+            grid_input_features_mode=grid_input_features_mode,
+            grid_target_family=grid_target_family,
+            grid_target_vars=grid_target_vars,
+            grid_loss_cfg=grid_loss_cfg,
+        )
+    elif model_name in SPECTRAL_FAMILY_MODELS:
+        prefix = "fno" if model_name == "fno" else "ffno"
+        extra_artifacts[f"{prefix}_contract_effective"] = _build_spectral_contract_effective(
+            prefix=prefix,
+            cfg=cfg,
+            selection_cfg=grid_selection_cfg,
+            optimizer_cfg=grid_optimizer_cfg,
+            input_features_mode=grid_input_features_mode,
+            input_feature_channels=grid_feature_channels,
+            target_family=grid_target_family,
+            target_vars=grid_target_vars,
+            loss_cfg=grid_loss_cfg,
+            train_cfg=train_cfg,
+        )
+    elif model_name in COORD_MLP_FAMILY_MODELS:
+        if model_name == "coord_mlp_pod_residual":
+            coord_model_cfg = normalize_coord_mlp_pod_residual_cfg(dict(cfg.get("model_cfg", {})))
+        else:
+            _, coord_model_cfg = _normalize_coord_mlp_model_cfg(
+                model_name=str(model_name),
+                raw_cfg=dict(cfg.get("model_cfg", {})),
+            )
+        extra_artifacts["coord_mlp_contract_effective"] = _build_coord_mlp_contract_effective(
+            model_name=model_name,
+            grid_backend_effective=grid_backend_effective,
+            grid_target_family=grid_target_family,
+            grid_target_vars=grid_target_vars,
+            grid_input_features_mode=grid_input_features_mode,
+            grid_feature_channels=grid_feature_channels,
+            grid_feature_source=grid_feature_source,
+            cfg=cfg,
+            grid_selection_cfg=grid_selection_cfg,
+            coord_model_cfg=coord_model_cfg,
+            basis_rank_by_var=coord_pod_basis_rank_by_var,
+        )
+    elif model_name in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
+        extra_artifacts["geom_deeponet_siren_contract_effective"] = _build_geom_deeponet_siren_contract_effective(
+            model_name=model_name,
+            grid_target_family=grid_target_family,
+            grid_target_vars=grid_target_vars,
+            grid_input_features_mode=grid_input_features_mode,
+            grid_feature_channels=grid_feature_channels,
+            grid_selection_cfg=grid_selection_cfg,
+            extra_artifacts=extra_artifacts,
+            structure_adapter_mode_effective=structure_adapter_mode_effective,
+        )
+
+    pred_features = model.forward_features(grid_cond_test)
+    pred_eval = ctx.transforms.inverse_field_dict(
+        {name: np.asarray(pred_features[name], dtype=np.float32) for name in grid_target_vars}
+    )
+    if "rho_eff" in pred_features:
+        pred_eval["rho_eff"] = np.asarray(pred_features["rho_eff"], dtype=np.float32)
+    true_eval = to_true_eval(ctx.y, ctx.te, grid_target_vars, source_y_vars=ctx.y_vars)
+    return GridTorchTrainResult(
+        model=model,
+        history=history,
+        pred_eval=pred_eval,
+        true_eval=true_eval,
+        eval_vars=eval_vars,
+    )
+
+
+__all__ = [
+    "GridTorchTrainResult",
+    "run_grid_torch_train_predict",
+]

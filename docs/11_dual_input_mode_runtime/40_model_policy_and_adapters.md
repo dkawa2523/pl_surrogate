@@ -13,9 +13,9 @@
 | ffno | no | yes | grid_pack |
 | coord_mlp_fourier | no | yes | coord_pack / hybrid_pack_descriptor |
 | coord_mlp_siren | no | yes | coord_pack / hybrid_pack_descriptor |
-| u_no (future) | no | yes | grid_pack |
-| cno (future) | no | yes | grid_pack |
-| geom_deeponet_siren (future) | no | yes | hybrid_pack_descriptor |
+| u_no | no | yes | grid_pack |
+| cno | no | yes | grid_pack |
+| geom_deeponet_siren | no | yes | hybrid_pack_descriptor |
 
 ## 重要な原則
 

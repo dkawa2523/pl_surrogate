@@ -7,6 +7,7 @@ from importlib import import_module
 __all__ = [
     "DeepONetPlasmaOperatorTorch",
     "PODDeepONetTorch",
+    "GeomDeepONetSIREN",
     "DeepONetPoissonHeadTorch",
     "BoundaryOperatorTorch",
 ]
@@ -14,6 +15,7 @@ __all__ = [
 _EXPORT_MAP = {
     "DeepONetPlasmaOperatorTorch": "plasma_surrogate.models.deeponet.plasma_operator_torch",
     "PODDeepONetTorch": "plasma_surrogate.models.deeponet.pod_deeponet_torch",
+    "GeomDeepONetSIREN": "plasma_surrogate.models.deeponet.geom_deeponet_siren",
     "DeepONetPoissonHeadTorch": "plasma_surrogate.models.deeponet.poisson_head_torch",
     "BoundaryOperatorTorch": "plasma_surrogate.models.deeponet.boundary_operator_torch",
 }

@@ -115,7 +115,7 @@ def _duplicate_case_keys(cases: list[dict[str, Any]], cond_order: list[str]) -> 
                 if key in cond:
                     try:
                         cond_payload[key] = float(cond[key])
-                    except Exception:
+                    except (TypeError, ValueError):
                         cond_payload[key] = str(cond[key])
         key_payload = {
             "cond": cond_payload,
@@ -135,7 +135,7 @@ def _cond_range_summary(cases: list[dict[str, Any]], cond_order: list[str]) -> d
             if isinstance(cond, dict) and key in cond:
                 try:
                     val = float(cond[key])
-                except Exception:
+                except (TypeError, ValueError):
                     continue
                 if np.isfinite(val):
                     vals.append(val)

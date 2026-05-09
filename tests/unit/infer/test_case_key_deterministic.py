@@ -35,7 +35,7 @@ def test_case_key_is_deterministic_for_same_payload(tmp_path: Path, geometry_roo
     assert (single_root / keys[0] / "fields_phys.npz").exists()
 
 
-def test_cycle1_accepts_geom_param_contract(tmp_path: Path, geometry_root: Path):
+def test_cycle1_rejects_geom_param_for_fixed_provider(tmp_path: Path, geometry_root: Path):
     engine = InferenceEngine(
         model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=0),
         cond_schema=CondSchema(order=["c0", "c1", "c2"]),
@@ -44,14 +44,14 @@ def test_cycle1_accepts_geom_param_contract(tmp_path: Path, geometry_root: Path)
         output_dir=tmp_path / "infer",
     )
 
-    res = engine.single_run(
-        cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
-        geom={"geom_id": "alt_geometry", "geom_param": {"radius": 0.2, "gap": 1.1}},
-        axis={"mode": "steady", "value": 0.0},
-    )
-    assert "uniformity" in res.qoi
+    with pytest.raises(ValueError, match="provider_mode=parametric_parts"):
+        engine.single_run(
+            cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
+            geom={"geom_id": "alt_geometry", "geom_param": {"radius": 0.2, "gap": 1.1}},
+            axis={"mode": "steady", "value": 0.0},
+        )
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="provider_mode=parametric_parts"):
         engine.single_run(
             cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
             geom={"geom_param": "invalid"},

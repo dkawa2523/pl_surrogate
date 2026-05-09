@@ -12,6 +12,7 @@ benchmark:
     primary_mode: max
 
 compare:
+  require_same_input_mode: true
   global_reference_mode: frozen
   objective_metric: auto_primary
   objective_mode: max

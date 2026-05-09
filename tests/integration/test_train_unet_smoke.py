@@ -3,9 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
 from plasma_surrogate.train.trainer import Trainer
+
+
+def _require_torch_runtime_from_env() -> None:
+    require_torch_runtime(enable_backend=False, refresh=False)
 
 
 def test_train_unet_smoke(tmp_path):
@@ -41,8 +45,7 @@ def test_train_unet_smoke(tmp_path):
 
 
 def test_train_unet_torch_backend_smoke(tmp_path):
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
 
     rng = np.random.default_rng(0)
     n, d, h, w = 10, 3, 8, 8
@@ -95,8 +98,7 @@ def test_train_unet_torch_backend_smoke(tmp_path):
 
 
 def test_train_unet_torch_backend_depth2_smoke(tmp_path):
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
 
     rng = np.random.default_rng(1)
     n, d, h, w = 8, 3, 8, 8
@@ -136,8 +138,7 @@ def test_train_unet_torch_backend_depth2_smoke(tmp_path):
 
 
 def test_unet_torch_backend_invalid_depth_raises():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
     with pytest.raises(ValueError, match="conv_cfg.depth"):
         UNetBaseline(
             input_dim=3,
@@ -148,8 +149,7 @@ def test_unet_torch_backend_invalid_depth_raises():
 
 
 def test_unet_torch_backend_invalid_upsample_mode_raises():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
     with pytest.raises(ValueError, match="upsample_mode"):
         UNetBaseline(
             input_dim=3,
@@ -160,8 +160,7 @@ def test_unet_torch_backend_invalid_upsample_mode_raises():
 
 
 def test_train_unet_torch_backend_resize_conv_depth2_smoke(tmp_path):
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
 
     rng = np.random.default_rng(11)
     n, d, h, w = 8, 3, 8, 8
@@ -203,8 +202,7 @@ def test_train_unet_torch_backend_resize_conv_depth2_smoke(tmp_path):
 
 
 def test_unet_torch_split_density_field_forward_smoke():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
     model = UNetBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -221,8 +219,7 @@ def test_unet_torch_split_density_field_forward_smoke():
 
 
 def test_train_unet_torch_allvars_boundary_selection_smoke(tmp_path):
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
     rng = np.random.default_rng(2)
     n, d, h, w = 10, 3, 8, 8
     cond = rng.uniform(0.0, 1.0, size=(n, d)).astype(np.float32)
@@ -276,8 +273,7 @@ def test_train_unet_torch_allvars_boundary_selection_smoke(tmp_path):
 
 
 def test_train_unet_torch_allvars_boundary_selection_ignores_legacy_density_guard_cfg(tmp_path):
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    _require_torch_runtime_from_env()
     rng = np.random.default_rng(3)
     n, d, h, w = 10, 3, 8, 8
     cond = rng.uniform(0.0, 1.0, size=(n, d)).astype(np.float32)

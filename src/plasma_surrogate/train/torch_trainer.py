@@ -349,13 +349,16 @@ class TorchTrainer:
         seed: int = 0,
     ) -> TorchTrainOutput:
         torch = require_torch()
+        device = getattr(model, "device", torch.device("cuda" if bool(torch.cuda.is_available()) else "cpu"))
+        if hasattr(model, "to"):
+            model.to(device)
         self._save_resolved_physics(physics_cfg)
         resolved_terms = list((physics_cfg or {}).get("resolved_terms", []))
         stages_cfg = list(stages or [{"name": "stage1", "epochs": 10, "lr": 1e-3, "freeze_poisson_head": True, "freeze_boundary_operator": True}])
-        c_tr = torch.as_tensor(cond_train, dtype=torch.float32)
-        y_tr = torch.as_tensor(y_train, dtype=torch.float32)
-        c_va = torch.as_tensor(cond_val, dtype=torch.float32)
-        y_va = torch.as_tensor(y_val, dtype=torch.float32)
+        c_tr = torch.as_tensor(cond_train, dtype=torch.float32, device=device)
+        y_tr = torch.as_tensor(y_train, dtype=torch.float32, device=device)
+        c_va = torch.as_tensor(cond_val, dtype=torch.float32, device=device)
+        y_va = torch.as_tensor(y_val, dtype=torch.float32, device=device)
 
         history: list[dict[str, float]] = []
         diagnostics_rows: list[dict[str, float]] = []

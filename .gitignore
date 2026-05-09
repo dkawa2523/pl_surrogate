@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+*.egg-info/
 
 # Local Python environments and caches
 .venv-torch/
@@ -7,11 +8,20 @@ __pycache__/
 
 # Generated benchmark/pipeline artifacts
 runs/
+artifacts/
+docs/reports/
+outputs_*/
+*.zip
+tmp_*/
+codex_followup_prompts*/
+codex_*_prompts/
+compare_all_models_*/
 tests/fixtures/benchmark_output*/
 tests/fixtures/benchmark_compare_*_output/
 tests/fixtures/pipeline_*_run/
 tests/fixtures/pipeline_run/
 tests/fixtures/deeponet_contract_run/
+tests/fixtures/generated/
 
 # Local datasets and generated conversion outputs
 data/

@@ -304,6 +304,7 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                 return self.head(feat, output_keys=output_keys)
 
         self.torch = torch
+        self._init_torch_device()
         self.output_heads_mode = output_heads_mode
         self.net = _ConvUNetModel(
             in_ch=in_channels,
@@ -316,6 +317,7 @@ class UNetBaseline(_TorchSpatialFieldMixin):
             with_rho_eff_head=self.with_rho_eff_head,
             upsample_mode=upsample_mode,
         )
+        self._ensure_net_device()
         self.net.train()
         self._torch_seed = int(seed)
         self._torch_base_channels = int(base_channels)
@@ -434,7 +436,10 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         lr: float,
         weight_decay: float = 0.0,
         apply_step: bool = True,
+        target_raw: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
     ) -> dict[str, float]:
+        del target_raw, loss_cfg
         if self.backend == "torch":
             return self._backward_raw_torch(grad_raw, lr=lr, apply_step=apply_step)
         return self._backward_raw_numpy(grad_raw, lr=lr, weight_decay=weight_decay)

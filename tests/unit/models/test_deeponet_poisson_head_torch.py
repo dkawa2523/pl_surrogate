@@ -1,18 +1,20 @@
 from __future__ import annotations
 
+import pytest
 from types import SimpleNamespace
 
 import numpy as np
-import pytest
 
-from plasma_surrogate.core.torch_backend import require_torch, torch_runtime_available
+from plasma_surrogate.core.torch_backend import require_torch
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.deeponet.plasma_operator_torch import DeepONetPlasmaOperatorTorch
 from plasma_surrogate.models.deeponet.poisson_head_torch import DeepONetPoissonHeadTorch
 
+pytestmark = pytest.mark.torch_runtime
+
 
 def test_deeponet_poisson_head_predict_phi_shape():
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     torch = require_torch()
     base = DeepONetPlasmaOperatorTorch(cond_dim=4, grid_shape=(8, 8), output_keys=["phi"])
     head = DeepONetPoissonHeadTorch.from_cache(

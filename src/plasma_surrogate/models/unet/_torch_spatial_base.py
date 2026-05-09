@@ -11,6 +11,7 @@ from plasma_surrogate.models._torch_spatial_common import (
     _build_unit_coord_grid,
     _load_state_dict_numpy_torch,
     _resolve_batched_spatial_features,
+    _resolve_torch_device,
     _state_dict_numpy_torch,
     _validate_static_spatial_features,
 )
@@ -26,6 +27,13 @@ class _TorchSpatialFieldMixin:
 
     def _torch_label(self) -> str:
         return str(getattr(self, "_spatial_label", type(self).__name__)).strip().lower()
+
+    def _init_torch_device(self) -> None:
+        self.device = _resolve_torch_device(self.torch)
+
+    def _ensure_net_device(self) -> None:
+        if getattr(self, "net", None) is not None:
+            self.net.to(self.device)
 
     def set_static_spatial_features(self, spatial_features: np.ndarray | None) -> None:
         if spatial_features is None:
@@ -71,8 +79,9 @@ class _TorchSpatialFieldMixin:
 
     def _forward_raw_torch(self, cond: np.ndarray, *, training: bool, spatial_features: np.ndarray | None) -> np.ndarray:
         torch = self.torch
+        self._ensure_net_device()
         fmap = self._feature_map(cond, spatial_features=spatial_features)
-        xt = torch.from_numpy(np.moveaxis(fmap, -1, 1).astype(np.float32))
+        xt = torch.from_numpy(np.moveaxis(fmap, -1, 1).astype(np.float32)).to(self.device)
         if training:
             self.net.train()
             yt = self._torch_forward(xt)
@@ -131,4 +140,6 @@ class _TorchSpatialFieldMixin:
                 if legacy_message
                 else f"{type(self).__name__}(torch) state dict does not contain expected torch::* weights"
             ),
+            device=self.device,
         )
+        self._ensure_net_device()
