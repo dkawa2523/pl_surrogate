@@ -263,28 +263,3 @@ def test_uniformity_values_for_plasma_mean_height_region() -> None:
     assert meta["uniformity_sample_count"] == 4.0
     np.testing.assert_allclose(vals, target[4, 1:5])
 
-
-def test_cv_over_density_gain_discourages_low_or_negative_density() -> None:
-    good_score, good_meta = InferenceEngine._cv_over_density_gain_score(
-        np.asarray([9.0, 10.0, 11.0], dtype=np.float32),
-        relative_uniformity=0.1,
-        mean_density=10.0,
-        density_ref=10.0,
-    )
-    low_score, _ = InferenceEngine._cv_over_density_gain_score(
-        np.asarray([0.9, 1.0, 1.1], dtype=np.float32),
-        relative_uniformity=0.1,
-        mean_density=1.0,
-        density_ref=10.0,
-    )
-    negative_score, negative_meta = InferenceEngine._cv_over_density_gain_score(
-        np.asarray([-9.0, -10.0, -11.0], dtype=np.float32),
-        relative_uniformity=0.1,
-        mean_density=-10.0,
-        density_ref=10.0,
-    )
-
-    assert good_meta["uniformity_density_gain"] == 1.0
-    assert low_score > good_score
-    assert negative_score > low_score
-    assert negative_meta["uniformity_negative_penalty"] > 0.0

@@ -173,33 +173,6 @@ class InferenceEngine:
         return vals, {"uniformity_region": "plasma", "uniformity_sample_count": float(vals.size)}
 
     @staticmethod
-    def _cv_over_density_gain_score(
-        vals: np.ndarray,
-        *,
-        relative_uniformity: float,
-        mean_density: float,
-        density_ref: float,
-    ) -> tuple[float, dict[str, float]]:
-        ref = max(abs(float(density_ref)), 1e-12)
-        vals64 = np.asarray(vals, dtype=np.float64).reshape(-1)
-        positive_mean = max(float(mean_density), 0.0)
-        density_gain = float(np.clip(positive_mean / ref, 0.2, 1.5))
-        negative_penalty = float(np.mean(np.maximum(-vals64, 0.0) ** 2) / (ref * ref)) if vals64.size else 0.0
-        low_density_gap = max(0.5 * ref - positive_mean, 0.0) / ref
-        low_density_penalty = float(low_density_gap * low_density_gap)
-        score = (
-            float(relative_uniformity) / (density_gain**0.5)
-            + 10.0 * negative_penalty
-            + 2.0 * low_density_penalty
-        )
-        return score, {
-            "uniformity_density_ref": ref,
-            "uniformity_density_gain": density_gain,
-            "uniformity_negative_penalty": negative_penalty,
-            "uniformity_low_density_penalty": low_density_penalty,
-        }
-
-    @staticmethod
     def _resolve_symbol_key(
         fields_phys: dict[str, np.ndarray],
         *,
@@ -1206,24 +1179,12 @@ class InferenceEngine:
             score_mode = str(self.ood_cfg.get("uniformity_score_mode", "relative")).strip().lower()
             if score_mode in {"relative", "cv"}:
                 score = float(relative_uniformity)
-            elif score_mode == "cv_over_density_gain":
-                density_ref = float(self.ood_cfg.get("uniformity_density_ref", abs(mean_density)))
-                score, density_score_meta = self._cv_over_density_gain_score(
-                    vals64,
-                    relative_uniformity=relative_uniformity,
-                    mean_density=mean_density,
-                    density_ref=density_ref,
-                )
             else:
-                raise ValueError(
-                    "ood.uniformity_score_mode must be one of: relative, cv_over_density_gain"
-                )
+                raise ValueError("ood.uniformity_score_mode must be one of: relative, cv")
             qoi = {"uniformity": score}
             qoi["uniformity_relative"] = float(relative_uniformity)
             qoi["uniformity_mean_density"] = mean_density
             qoi["uniformity_score_mode"] = score_mode
-            if score_mode == "cv_over_density_gain":
-                qoi.update(density_score_meta)
             qoi["uniformity_target"] = str(qoi_target_key)
             qoi.update(uniformity_meta)
         bo_cfg = self.ood_cfg.get("boundary_operator", {})

@@ -23,7 +23,7 @@ PART_IDS = tuple(f"coil_{idx:02d}" for idx in range(1, 7))
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run ICP part-SDF-lite black-box shape optimization.")
+    parser = argparse.ArgumentParser(description="Run ICP part-SDF-lite shape optimization.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-dir", required=True, help="Benchmark model run dir, e.g. runs/.../full/unet")
     parser.add_argument("--model", default="unet", choices=("unet", "ffno"))
@@ -33,7 +33,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--uniformity-target", default="ne")
     parser.add_argument("--uniformity-region", default="plasma")
-    parser.add_argument("--uniformity-score-mode", choices=("relative", "cv", "cv_over_density_gain"), default="relative")
+    parser.add_argument("--uniformity-score-mode", choices=("relative", "cv"), default="relative")
     parser.add_argument("--mid-height-band-px", type=int, default=0)
     parser.add_argument("--space-mode", choices=("layout", "transform"), default="transform")
     parser.add_argument(
@@ -310,10 +310,6 @@ def main() -> int:
     base_geom = {"geom_id": "default", "geom_param": _default_geom_params(str(args.space_mode), layout_specs)}
 
     base = engine.single_run_aggregated(cond=cond, geom=base_geom, axis=axis)
-    if str(args.uniformity_score_mode).strip().lower() == "cv_over_density_gain":
-        ref_density = abs(float(base.qoi.get("uniformity_mean_density", 0.0)))
-        engine.ood_cfg["uniformity_density_ref"] = max(ref_density, 1e-12)
-        base = engine.single_run_aggregated(cond=cond, geom=base_geom, axis=axis)
     best = engine.optimize_run(
         space=space,
         geom_space=_geom_space(str(args.space_mode), layout_specs),
@@ -342,7 +338,6 @@ def main() -> int:
                 "uniformity_target": str(args.uniformity_target),
                 "uniformity_region": str(args.uniformity_region),
                 "uniformity_score_mode": str(args.uniformity_score_mode),
-                "uniformity_density_ref": engine.ood_cfg.get("uniformity_density_ref"),
                 "mid_height_band_px": int(args.mid_height_band_px),
                 "space_mode": str(args.space_mode),
                 "layout_center_span": float(args.layout_center_span),
