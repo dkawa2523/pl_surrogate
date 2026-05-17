@@ -23,6 +23,7 @@ PROVIDER_MODE_PARAMETRIC_PARTS = "parametric_parts"
 PROVIDER_MODES: tuple[str, str] = (PROVIDER_MODE_FIXED, PROVIDER_MODE_PARAMETRIC_PARTS)
 
 _PART_PARAM_RE = re.compile(r"^part\.(?P<part_id>[A-Za-z0-9_\-]+)\.(?P<name>tx|ty|scale_x|scale_y|rotation_deg|fillet)$")
+_LAYOUT_PARAM_RE = re.compile(r"^layout\.(?P<part_id>[A-Za-z0-9_\-]+)\.(?P<name>r_center|z_center|width|height)$")
 _GAP_PARAM_RE = re.compile(r"^gap\.(?P<name>[A-Za-z0-9_\-]+)$")
 _OFFSET_PARAM_RE = re.compile(r"^offset\.(?P<name>x|y|tx|ty)$")
 
@@ -288,6 +289,26 @@ class ParametricPartsGeometryProvider:
         iy = np.clip(np.rint(y_src * np.float32(max(h - 1, 1))).astype(np.int64), 0, max(h - 1, 0))
         return src[iy, ix].astype(np.float32)
 
+    @staticmethod
+    def _rect_mask_from_layout(
+        coord_grid: np.ndarray,
+        *,
+        r_center: float,
+        z_center: float,
+        width: float,
+        height: float,
+    ) -> np.ndarray:
+        coord = np.asarray(coord_grid, dtype=np.float32)
+        if coord.ndim != 3 or coord.shape[0] < 2:
+            raise ValueError(f"coord_grid must be [2,H,W] for layout params, got {coord.shape}")
+        w = float(width)
+        h = float(height)
+        if w <= 0.0 or h <= 0.0:
+            raise ValueError("layout width/height must be > 0")
+        rr = coord[0]
+        zz = coord[1]
+        return ((np.abs(rr - float(r_center)) <= 0.5 * w) & (np.abs(zz - float(z_center)) <= 0.5 * h)).astype(np.float32)
+
     def _load_manifest_and_pack(self, base_ctx: GeometryContext) -> None:
         if self._manifest is not None and self._part_ids is not None and self._mask_stack is not None and self._param_specs is not None:
             return
@@ -350,11 +371,18 @@ class ParametricPartsGeometryProvider:
                 raise ValueError("parts_manifest param_specs keys must be non-empty strings")
             spec = dict(raw_spec) if isinstance(raw_spec, dict) else {"default": raw_spec}
             part_match = _PART_PARAM_RE.match(name)
+            layout_match = _LAYOUT_PARAM_RE.match(name)
             if part_match is not None:
                 part_id = str(part_match.group("part_id"))
                 if part_id not in part_set:
                     raise ValueError(
                         f"parts_manifest param key references unknown part id: {name!r}; known={sorted(part_set)}"
+                    )
+            elif layout_match is not None:
+                part_id = str(layout_match.group("part_id"))
+                if part_id not in part_set:
+                    raise ValueError(
+                        f"parts_manifest layout key references unknown part id: {name!r}; known={sorted(part_set)}"
                     )
             elif _GAP_PARAM_RE.match(name) is not None:
                 pass
@@ -363,7 +391,8 @@ class ParametricPartsGeometryProvider:
             else:
                 raise ValueError(
                     "parts_manifest param key is unsupported. "
-                    "Use part.<id>.(tx|ty|scale_x|scale_y|rotation_deg|fillet), gap.<name>, or offset.(x|y|tx|ty). "
+                    "Use part.<id>.(tx|ty|scale_x|scale_y|rotation_deg|fillet), "
+                    "layout.<id>.(r_center|z_center|width|height), gap.<name>, or offset.(x|y|tx|ty). "
                     f"got={name!r}"
                 )
             spec_min = None
@@ -443,6 +472,22 @@ class ParametricPartsGeometryProvider:
         global_ty = float(params.get("offset.y", params.get("offset.ty", 0.0)))
         per_part_masks: list[np.ndarray] = []
         for idx, part_id in enumerate(self._part_ids):
+            layout_prefix = f"layout.{part_id}."
+            has_layout = any((layout_prefix + key) in params for key in ("r_center", "z_center", "width", "height"))
+            if has_layout:
+                missing = [key for key in ("r_center", "z_center", "width", "height") if (layout_prefix + key) not in params]
+                if missing:
+                    raise ValueError(f"layout params for {part_id} require r_center/z_center/width/height; missing={missing}")
+                per_part_masks.append(
+                    self._rect_mask_from_layout(
+                        base_ctx.coord_grid,
+                        r_center=float(params[layout_prefix + "r_center"]),
+                        z_center=float(params[layout_prefix + "z_center"]),
+                        width=float(params[layout_prefix + "width"]),
+                        height=float(params[layout_prefix + "height"]),
+                    ).astype(np.float32)
+                )
+                continue
             prefix = f"part.{part_id}."
             tx = float(params.get(prefix + "tx", 0.0)) + global_tx
             ty = float(params.get(prefix + "ty", 0.0)) + global_ty
@@ -465,7 +510,17 @@ class ParametricPartsGeometryProvider:
         if gap_delta != 0.0:
             union_solid = self._morph_binary(union_solid, delta=gap_delta, scale_ref=max(h, w))
         mask_base = (np.asarray(base_ctx.mask_plasma, dtype=np.float32) > 0.5).astype(np.float32)
-        mask_plasma = (mask_base * (1.0 - union_solid)).astype(np.float32)
+        manifest = dict(self._manifest or {})
+        plasma_mode = str(manifest.get("plasma_mode", "subtract_solid")).strip().lower()
+        if plasma_mode == "preserve":
+            mask_plasma = mask_base.astype(np.float32)
+        elif plasma_mode in {"subtract_solid", "solid_exclusion"}:
+            mask_plasma = (mask_base * (1.0 - union_solid)).astype(np.float32)
+        else:
+            raise ValueError(
+                "parts_manifest.json plasma_mode must be one of: preserve, subtract_solid; "
+                f"got={plasma_mode!r}"
+            )
         if float(np.sum(mask_plasma)) <= 0.0:
             raise ValueError("parametric_parts geom_param produced empty plasma region")
         distance_signed = build_signed_distance_fields(mask_plasma).astype(np.float32)

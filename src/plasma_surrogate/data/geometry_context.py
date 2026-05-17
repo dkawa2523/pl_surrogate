@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -25,71 +24,47 @@ class GeometryContext:
 
 
 def _boundary_mask(mask_plasma: np.ndarray) -> np.ndarray:
-    m = (mask_plasma > 0.5).astype(np.uint8)
-    h, w = m.shape
-    boundary = np.zeros_like(m)
-    for i in range(h):
-        for j in range(w):
-            if m[i, j] == 0:
-                continue
-            neighbors = (
-                m[i - 1, j] if i > 0 else 0,
-                m[i + 1, j] if i < h - 1 else 0,
-                m[i, j - 1] if j > 0 else 0,
-                m[i, j + 1] if j < w - 1 else 0,
-            )
-            if any(v == 0 for v in neighbors):
-                boundary[i, j] = 1
-    return boundary
+    m = np.asarray(mask_plasma > 0.5, dtype=bool)
+    padded = np.pad(m, 1, mode="constant", constant_values=False)
+    up = padded[:-2, 1:-1]
+    down = padded[2:, 1:-1]
+    left = padded[1:-1, :-2]
+    right = padded[1:-1, 2:]
+    return (m & (~up | ~down | ~left | ~right)).astype(np.uint8)
 
 
 def _distance_from_seeds(mask: np.ndarray, seed_mask: np.ndarray) -> np.ndarray:
-    h, w = mask.shape
-    inf = float("inf")
-    dist = np.full((h, w), inf, dtype=np.float32)
-    q: deque[tuple[int, int]] = deque()
+    active = np.asarray(mask > 0, dtype=bool)
+    seeds = np.asarray(seed_mask > 0, dtype=bool) & active
+    h, w = active.shape
+    if not np.any(seeds):
+        return np.zeros((h, w), dtype=np.float32)
 
-    for i in range(h):
-        for j in range(w):
-            if seed_mask[i, j] > 0 and mask[i, j] > 0:
-                dist[i, j] = 0.0
-                q.append((i, j))
+    inf = np.float32(h + w + 1)
+    dist = np.where(seeds, np.float32(0.0), inf).astype(np.float32)
 
-    while q:
-        i, j = q.popleft()
-        base = dist[i, j]
-        for ni, nj in ((i - 1, j), (i + 1, j), (i, j - 1), (i, j + 1)):
-            if ni < 0 or ni >= h or nj < 0 or nj >= w:
-                continue
-            if mask[ni, nj] <= 0:
-                continue
-            nd = base + 1.0
-            if nd < dist[ni, nj]:
-                dist[ni, nj] = nd
-                q.append((ni, nj))
+    for j in range(1, w):
+        dist[:, j] = np.minimum(dist[:, j], dist[:, j - 1] + np.float32(1.0))
+    for j in range(w - 2, -1, -1):
+        dist[:, j] = np.minimum(dist[:, j], dist[:, j + 1] + np.float32(1.0))
+    for i in range(1, h):
+        dist[i, :] = np.minimum(dist[i, :], dist[i - 1, :] + np.float32(1.0))
+    for i in range(h - 2, -1, -1):
+        dist[i, :] = np.minimum(dist[i, :], dist[i + 1, :] + np.float32(1.0))
 
-    dist[mask <= 0] = 0.0
-    dist[np.isinf(dist)] = 0.0
-    return dist
+    dist[~active] = 0.0
+    dist[dist >= inf] = 0.0
+    return dist.astype(np.float32)
 
 
 def _outside_boundary_mask(mask_plasma: np.ndarray) -> np.ndarray:
-    m = (mask_plasma > 0.5).astype(np.uint8)
-    h, w = m.shape
-    outside = np.zeros_like(m)
-    for i in range(h):
-        for j in range(w):
-            if m[i, j] > 0:
-                continue
-            neighbors = (
-                m[i - 1, j] if i > 0 else 0,
-                m[i + 1, j] if i < h - 1 else 0,
-                m[i, j - 1] if j > 0 else 0,
-                m[i, j + 1] if j < w - 1 else 0,
-            )
-            if any(v > 0 for v in neighbors):
-                outside[i, j] = 1
-    return outside
+    m = np.asarray(mask_plasma > 0.5, dtype=bool)
+    padded = np.pad(m, 1, mode="constant", constant_values=False)
+    up = padded[:-2, 1:-1]
+    down = padded[2:, 1:-1]
+    left = padded[1:-1, :-2]
+    right = padded[1:-1, 2:]
+    return (~m & (up | down | left | right)).astype(np.uint8)
 
 
 def build_signed_distance_fields(mask_plasma: np.ndarray) -> np.ndarray:

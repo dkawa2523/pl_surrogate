@@ -86,10 +86,8 @@ def _make_engine(
 
 
 def _display_field(var_name: str, arr: np.ndarray) -> np.ndarray:
-    a = np.asarray(arr, dtype=np.float64)
-    if var_name in {"ne", "ni"}:
-        return np.log10(np.maximum(a, 1.0))
-    return a
+    del var_name
+    return np.asarray(arr, dtype=np.float64)
 
 
 def _build_summary_fields(
@@ -206,10 +204,7 @@ def _make_plot(
             ax.set_xticks([])
             ax.set_yticks([])
             if col_idx == 0:
-                ylabel = f"{var_name}"
-                if var_name in {"ne", "ni"}:
-                    ylabel += "\nlog10 scale"
-                axes[row_idx, col_idx].set_ylabel(ylabel, fontsize=11)
+                axes[row_idx, col_idx].set_ylabel(f"{var_name}", fontsize=11)
         if field_im is not None:
             fig.colorbar(field_im, ax=field_axes, fraction=0.018, pad=0.01)
         if err_im is not None:

@@ -10,6 +10,8 @@ from plasma_surrogate.eval.metrics_builder import (
     build_eval_metrics_payload,
     build_region_metrics,
     build_single_case_physics_metrics,
+    build_spatial_distribution_by_case_rows,
+    build_spatial_distribution_summary_rows,
     build_spatial_error_by_case_rows,
     build_spatial_error_summary_rows,
     build_viz_tables_payload,
@@ -79,6 +81,7 @@ def test_build_region_metrics_and_benchmark_row():
     assert "test_rmse_phi_plasma" in row
     assert "test_r2_phi_plasma" in row
     assert "score_total" in row
+    assert "score_nrmse_plasma_mean" in row
     assert float(row["score_total"]) != 0.0
     assert "test_r2_logpair_plasma_mean" not in row
     assert "score_total_logpair" not in row
@@ -90,6 +93,37 @@ def test_build_region_metrics_and_benchmark_row():
     assert "test_neg_ratio_ni_plasma" in row
     assert "continuity_grad_ratio_all_plasma" in row
     assert "continuity_lap_ratio_all_plasma" in row
+
+
+def test_aggregate_score_uses_unitless_normalized_rmse():
+    mask = np.ones((2, 2), dtype=np.float32)
+    true_small = np.array([[[[0.0, 2.0], [0.0, 2.0]]]], dtype=np.float32)
+    pred_small = true_small + 1.0
+    true_large = true_small * 1000.0
+    pred_large = true_large + 1000.0
+    row = build_benchmark_eval_row(
+        model_id="scale_test",
+        metrics={"small": 1.0, "large": 1000.0},
+        r2_scores={"small": 0.0, "large": 0.0},
+        pred_eval={"small": pred_small, "large": pred_large},
+        true_eval={"small": true_small, "large": true_large},
+        mask_plasma=mask,
+        single_qoi={"uniformity": 0.0, "boundary_gamma_uniformity": 0.0},
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        opt_best_uniformity=0.0,
+        aggregate_cfg={
+            "enabled": True,
+            "rmse_weight": 1.0,
+            "r2_weight": 0.0,
+            "boundary_penalty_weight": 0.0,
+            "use_plasma_metrics": True,
+        },
+        target_vars_for_score=["small", "large"],
+    )
+
+    assert float(row["score_rmse_plasma_mean"]) > 100.0
+    assert np.isclose(float(row["score_nrmse_plasma_mean"]), 1.0)
+    assert np.isclose(float(row["score_total"]), 1.0)
 
 
 def test_build_benchmark_eval_row_supports_dynamic_target_names():
@@ -293,3 +327,34 @@ def test_build_spatial_error_summary_rows_uses_nan_when_region_has_no_points():
     assert deep_rows
     assert np.isnan(float(deep_rows[0]["rmse"]))
     assert np.isnan(float(deep_rows[0]["r2"]))
+
+
+def test_build_spatial_distribution_rows_detect_integral_peak_and_center_shift():
+    true = np.zeros((1, 1, 4, 4), dtype=np.float32)
+    pred = np.zeros_like(true)
+    true[0, 0, 1, 1] = 10.0
+    true[0, 0, 1, 2] = 4.0
+    pred[0, 0, 2, 2] = 7.0
+    pred[0, 0, 2, 3] = 2.0
+    mask = np.ones((4, 4), dtype=np.float32)
+
+    rows = build_spatial_distribution_by_case_rows(
+        pred_eval={"ne": pred},
+        true_eval={"ne": true},
+        mask_plasma=mask,
+        vars_for_summary=["ne"],
+        case_ids=["case_a"],
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["case_id"] == "case_a"
+    assert float(row["integral_rel_error"]) > 0.0
+    assert float(row["peak_location_error_px"]) > 0.0
+    assert float(row["center_of_mass_error_px"]) > 0.0
+    assert np.isfinite(float(row["distribution_error_score"]))
+
+    summary = build_spatial_distribution_summary_rows(rows)
+    assert len(summary) == 1
+    assert summary[0]["var"] == "ne"
+    assert float(summary[0]["integral_rel_error_mean"]) == float(row["integral_rel_error"])

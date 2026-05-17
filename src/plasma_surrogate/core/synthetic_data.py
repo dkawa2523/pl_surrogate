@@ -15,6 +15,7 @@ class SyntheticDataset:
     cond_order: list[str]
     geometry_root: Path
     shape: tuple[int, int]
+    structure_root: Path | None = None
 
 
 def build_synthetic_dataset(cfg: dict[str, Any], output_root: str | Path) -> SyntheticDataset:

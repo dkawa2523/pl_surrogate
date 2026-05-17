@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -28,20 +29,28 @@ class StandardScaler(BaseScaler):
     std: np.ndarray | None = None
 
     def fit(self, x: np.ndarray) -> "StandardScaler":
-        self.mean = np.mean(x, axis=0)
-        self.std = np.std(x, axis=0)
+        arr = np.asarray(x, dtype=np.float64)
+        self.mean = np.mean(arr, axis=0)
+        self.std = np.std(arr, axis=0)
         self.std = np.where(self.std < 1e-12, 1.0, self.std)
         return self
 
     def transform(self, x: np.ndarray) -> np.ndarray:
         if self.mean is None or self.std is None:
             raise RuntimeError("Scaler not fitted")
-        return (x - self.mean) / self.std
+        return (np.asarray(x, dtype=np.float64) - self.mean) / self.std
 
     def inverse_transform(self, x: np.ndarray) -> np.ndarray:
         if self.mean is None or self.std is None:
             raise RuntimeError("Scaler not fitted")
-        return x * self.std + self.mean
+        out = np.asarray(x, dtype=np.float64) * self.std + self.mean
+        if not np.all(np.isfinite(out)):
+            warnings.warn(
+                "StandardScaler.inverse_transform produced non-finite values",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         if self.mean is None or self.std is None:
@@ -55,21 +64,29 @@ class MinMaxScaler(BaseScaler):
     max_: np.ndarray | None = None
 
     def fit(self, x: np.ndarray) -> "MinMaxScaler":
-        self.min_ = np.min(x, axis=0)
-        self.max_ = np.max(x, axis=0)
+        arr = np.asarray(x, dtype=np.float64)
+        self.min_ = np.min(arr, axis=0)
+        self.max_ = np.max(arr, axis=0)
         return self
 
     def transform(self, x: np.ndarray) -> np.ndarray:
         if self.min_ is None or self.max_ is None:
             raise RuntimeError("Scaler not fitted")
         denom = np.where((self.max_ - self.min_) < 1e-12, 1.0, self.max_ - self.min_)
-        return (x - self.min_) / denom
+        return (np.asarray(x, dtype=np.float64) - self.min_) / denom
 
     def inverse_transform(self, x: np.ndarray) -> np.ndarray:
         if self.min_ is None or self.max_ is None:
             raise RuntimeError("Scaler not fitted")
         denom = np.where((self.max_ - self.min_) < 1e-12, 1.0, self.max_ - self.min_)
-        return x * denom + self.min_
+        out = np.asarray(x, dtype=np.float64) * denom + self.min_
+        if not np.all(np.isfinite(out)):
+            warnings.warn(
+                "MinMaxScaler.inverse_transform produced non-finite values",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return out
 
     def to_dict(self) -> dict[str, Any]:
         if self.min_ is None or self.max_ is None:
@@ -99,16 +116,16 @@ class ScalerFactory:
         if kind == "zscore":
             sc = StandardScaler()
             if raw.get("mean") is not None:
-                sc.mean = np.array(raw["mean"], dtype=np.float32)
+                sc.mean = np.array(raw["mean"], dtype=np.float64)
             if raw.get("std") is not None:
-                sc.std = np.array(raw["std"], dtype=np.float32)
+                sc.std = np.array(raw["std"], dtype=np.float64)
             return sc
         if kind == "minmax":
             sc = MinMaxScaler()
             if raw.get("min") is not None:
-                sc.min_ = np.array(raw["min"], dtype=np.float32)
+                sc.min_ = np.array(raw["min"], dtype=np.float64)
             if raw.get("max") is not None:
-                sc.max_ = np.array(raw["max"], dtype=np.float32)
+                sc.max_ = np.array(raw["max"], dtype=np.float64)
             return sc
         return IdentityScaler()
 
@@ -117,6 +134,18 @@ _ALLOWED_VALUE_TRANSFORMS = {"identity", "log10"}
 _ALLOWED_SCALERS = {"none", "zscore", "minmax"}
 _ALLOWED_FIT_SCOPES = {"all", "plasma_only"}
 _ALLOWED_CLIP_MODES = {"none", "quantile"}
+
+
+def _to_float32_checked(values: np.ndarray, *, label: str) -> np.ndarray:
+    with np.errstate(over="ignore", invalid="ignore"):
+        out = np.asarray(values, dtype=np.float64).astype(np.float32)
+    if not np.all(np.isfinite(out)):
+        warnings.warn(
+            f"{label} produced non-finite float32 values; evaluation metrics will mark them invalid",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    return out
 
 
 def _default_target_transform(var: str, *, default_scaler: str, default_fit_scope: str) -> dict[str, Any]:
@@ -179,11 +208,19 @@ def _apply_value_transform(values: np.ndarray, *, mode: str, var: str) -> np.nda
 
 
 def _apply_inverse_value_transform(values: np.ndarray, *, mode: str) -> np.ndarray:
-    arr = np.asarray(values, dtype=np.float32)
+    arr = np.asarray(values, dtype=np.float64)
     if mode == "identity":
         return arr
     if mode == "log10":
-        return np.power(10.0, arr.astype(np.float64)).astype(np.float32)
+        with np.errstate(over="ignore", invalid="ignore"):
+            out = np.power(10.0, arr)
+        if not np.all(np.isfinite(out)):
+            warnings.warn(
+                "target inverse value_transform=log10 produced non-finite values",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return out
     raise ValueError(f"Unsupported value_transform: {mode}")
 
 
@@ -260,7 +297,7 @@ class TransformBundle:
         )
         value_mode = str(spec.get("value_transform", "identity")).strip().lower()
         clip_spec = dict(spec.get("clip", {}))
-        flat = np.asarray(values, dtype=np.float32).reshape(-1, 1)
+        flat = np.asarray(values, dtype=np.float64).reshape(-1, 1)
         if inverse:
             out = scaler.inverse_transform(flat)
             out = _apply_inverse_value_transform(out, mode=value_mode)
@@ -271,7 +308,7 @@ class TransformBundle:
                 hi = float(clip_spec.get("clip_high", clip_spec.get("q_high_value", 0.0)))
                 out = np.clip(out, lo, hi).astype(np.float32)
             out = scaler.transform(out)
-        return out.reshape(values.shape).astype(np.float32)
+        return _to_float32_checked(out.reshape(values.shape), label=f"target '{var}' transform")
 
     def transform_field_dict(self, fields: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
         out: dict[str, np.ndarray] = {}

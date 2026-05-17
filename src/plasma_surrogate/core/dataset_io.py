@@ -86,6 +86,8 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
         )
     axis_column = str(ds_cfg.get("axis_column", "axis"))
     fields_col = str(ds_cfg.get("fields_npz_column", "fields_npz"))
+    structure_col_raw = ds_cfg.get("structure_npz_column")
+    structure_col = str(structure_col_raw) if structure_col_raw is not None else None
     case_id_col = str(ds_cfg.get("case_id_column", "case_id"))
     base_case_id_col_raw = ds_cfg.get("base_case_id_column")
     split_group_col_raw = ds_cfg.get("split_group_column")
@@ -112,6 +114,8 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
     with index_csv.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         required = {case_id_col, axis_column, fields_col, *cond_columns}
+        if structure_col is not None:
+            required.add(structure_col)
         if base_case_id_col is not None:
             required.add(base_case_id_col)
         if split_group_col is not None:
@@ -171,6 +175,13 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
                 "axis": axis,
                 "y": y,
             }
+            if structure_col is not None:
+                structure_path = Path(str(row[structure_col]))
+                if not structure_path.is_absolute():
+                    structure_path = root / structure_path
+                if not structure_path.exists():
+                    raise FileNotFoundError(f"structure npz not found for case={case_id}: {structure_path}")
+                case_payload["structure_npz"] = str(structure_path)
             if base_case_id_col is not None:
                 case_payload["base_case_id"] = str(row[base_case_id_col])
             if split_group_col is not None:
@@ -185,6 +196,7 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
         cond_order=[str(k) for k in cond_columns],
         geometry_root=geometry_root,
         shape=expected_shape,
+        structure_root=root,
     )
 
 

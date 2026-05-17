@@ -24,6 +24,7 @@ from plasma_surrogate.core.input_modes import (
     normalize_input_mode_cfg,
     validate_input_mode_cfg,
 )
+from plasma_surrogate.data.geometry_context import build_signed_distance_fields
 from plasma_surrogate.data.geometry_provider import build_geometry_provider
 from plasma_surrogate.features.structure_feature_registry import (
     resolve_spatial_channels_for_feature_profile,
@@ -85,6 +86,183 @@ def _derive_geometry_feature_maps(
         "normal_y": normal_y,
         "curvature_proxy": curvature_proxy,
     }
+
+
+ICP_STRUCT_STATIC_CHANNELS: tuple[str, ...] = (
+    "x",
+    "y",
+    "mask_plasma",
+    "distance_signed",
+    "distance_any",
+)
+ICP_STRUCT_CASE_CHANNELS: tuple[str, ...] = ("mask_coil", "distance_coil", "coil_proximity")
+ICP_PART_SDF_CHANNELS: tuple[str, ...] = tuple(f"sdf_coil_{i:02d}" for i in range(1, 7))
+ICP_PART_SDF_LITE_CASE_CHANNELS: tuple[str, ...] = (*ICP_STRUCT_CASE_CHANNELS, *ICP_PART_SDF_CHANNELS)
+
+
+def _is_mask_like_channel(name: str) -> bool:
+    return str(name).startswith("mask_") or str(name) in {
+        "valid_field_mask",
+        "outside_mask",
+        "coil_proximity",
+    }
+
+
+def _load_case_structure_npz(case: dict[str, Any], *, shape: tuple[int, int]) -> dict[str, np.ndarray]:
+    raw_path = case.get("structure_npz")
+    if raw_path is None:
+        raise ValueError(
+            "case-specific structure feature profiles require "
+            "dataset rows with structure_npz_column"
+        )
+    path = Path(str(raw_path))
+    if not path.exists():
+        raise FileNotFoundError(f"structure npz not found for case={case.get('case_id')}: {path}")
+    out: dict[str, np.ndarray] = {}
+    with np.load(path, allow_pickle=True) as data:
+        for key in ("mask_plasma", "mask_coil", "valid_field_mask", "outside_mask"):
+            if key not in data.files:
+                raise ValueError(f"structure npz missing key={key!r} for case={case.get('case_id')}: {path}")
+            arr = np.asarray(data[key], dtype=np.float32)
+            if arr.shape != shape:
+                raise ValueError(
+                    f"structure npz shape mismatch for case={case.get('case_id')} key={key}: "
+                    f"expected={shape}, got={arr.shape}"
+                )
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"structure npz contains non-finite values for case={case.get('case_id')} key={key}")
+            out[key] = (arr > 0.5).astype(np.float32)
+        for key in ICP_PART_SDF_CHANNELS:
+            if key not in data.files:
+                continue
+            arr = np.asarray(data[key], dtype=np.float32)
+            if arr.shape != shape:
+                raise ValueError(
+                    f"structure npz shape mismatch for case={case.get('case_id')} key={key}: "
+                    f"expected={shape}, got={arr.shape}"
+                )
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"structure npz contains non-finite values for case={case.get('case_id')} key={key}")
+            out[key] = arr.astype(np.float32)
+    return out
+
+
+def _distance_to_mask(mask: np.ndarray) -> np.ndarray:
+    binary = (np.asarray(mask, dtype=np.float32) > 0.5).astype(np.float32)
+    if float(np.sum(binary, dtype=np.float32)) <= 0.0:
+        return np.full(binary.shape, float(max(binary.shape)), dtype=np.float32)
+    signed = build_signed_distance_fields(binary)
+    return np.where(binary > 0.5, 0.0, np.abs(signed)).astype(np.float32)
+
+
+def _build_compact_case_spatial_feature_pack(
+    *,
+    cases: list[dict[str, Any]],
+    channels: list[str],
+    coord_x: np.ndarray,
+    coord_y: np.ndarray,
+    train_indices: np.ndarray,
+    coil_proximity_percentile: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    shape = tuple(int(v) for v in np.asarray(coord_x, dtype=np.float32).shape)
+    struct_channels = [*ICP_STRUCT_STATIC_CHANNELS, *ICP_STRUCT_CASE_CHANNELS]
+    part_sdf_channels = [*ICP_STRUCT_STATIC_CHANNELS, *ICP_PART_SDF_LITE_CASE_CHANNELS]
+    if list(channels) == struct_channels:
+        case_channels = ICP_STRUCT_CASE_CHANNELS
+        feature_profile = "icp_struct_spatial_v1"
+    elif list(channels) == part_sdf_channels:
+        case_channels = ICP_PART_SDF_LITE_CASE_CHANNELS
+        feature_profile = "icp_part_sdf_lite_v1"
+    else:
+        raise ValueError(
+            "compact ICP structure packs expect channels="
+            f"{struct_channels} or {part_sdf_channels}; got={list(channels)}"
+        )
+
+    static_map: dict[str, np.ndarray] | None = None
+    case_maps: list[dict[str, np.ndarray]] = []
+    train_distance_coil_values: list[np.ndarray] = []
+    train_set = set(int(v) for v in np.asarray(train_indices, dtype=np.int64).reshape(-1).tolist())
+    for idx, case in enumerate(cases):
+        structure = _load_case_structure_npz(case, shape=shape)
+        mask_plasma = structure["mask_plasma"]
+        distance_signed = build_signed_distance_fields(mask_plasma).astype(np.float32)
+        distance_any = np.abs(distance_signed).astype(np.float32)
+        distance_coil = _distance_to_mask(structure["mask_coil"]).astype(np.float32)
+
+        current_static = {
+            "x": np.asarray(coord_x, dtype=np.float32),
+            "y": np.asarray(coord_y, dtype=np.float32),
+            "mask_plasma": mask_plasma,
+            "distance_signed": distance_signed,
+            "distance_any": distance_any,
+        }
+        if static_map is None:
+            static_map = {name: np.asarray(value, dtype=np.float32) for name, value in current_static.items()}
+        else:
+            changed = [
+                name
+                for name, value in current_static.items()
+                if not np.array_equal(np.asarray(value, dtype=np.float32), static_map[name])
+            ]
+            if changed:
+                raise ValueError(
+                    "icp_struct_spatial_v1 compact packs require fixed plasma/coordinate structure; "
+                    f"case={case.get('case_id')} changed={changed}"
+                )
+
+        fmap = {
+            "mask_coil": structure["mask_coil"],
+            "distance_coil": distance_coil,
+        }
+        for name in ICP_PART_SDF_CHANNELS:
+            if name in case_channels:
+                if name not in structure:
+                    raise ValueError(
+                        f"{feature_profile} requires structure npz key={name!r} "
+                        f"for case={case.get('case_id')}"
+                    )
+                fmap[name] = structure[name]
+        case_maps.append(fmap)
+        if idx in train_set:
+            sel = mask_plasma > 0.5
+            vals = distance_coil[sel] if np.any(sel) else distance_coil.reshape(-1)
+            train_distance_coil_values.append(np.asarray(vals, dtype=np.float32).reshape(-1))
+    if train_distance_coil_values:
+        coil_values = np.concatenate(train_distance_coil_values, axis=0)
+    else:
+        coil_values = np.concatenate([m["distance_coil"].reshape(-1) for m in case_maps], axis=0)
+    coil_values = coil_values[np.isfinite(coil_values)]
+    if coil_values.size == 0:
+        coil_values = np.asarray([float(max(shape))], dtype=np.float32)
+    coil_tau = float(max(np.percentile(coil_values, float(coil_proximity_percentile)), 1.0e-3))
+    for fmap in case_maps:
+        fmap["coil_proximity"] = np.exp(-np.maximum(fmap["distance_coil"], 0.0) / coil_tau).astype(np.float32)
+    if static_map is None:
+        raise ValueError("cannot build compact spatial pack from empty cases")
+    static_data = np.stack(
+        [np.asarray(static_map[name], dtype=np.float32) for name in ICP_STRUCT_STATIC_CHANNELS],
+        axis=0,
+    ).astype(np.float32)
+    case_data = np.stack(
+        [np.stack([np.asarray(fmap[name], dtype=np.float32) for name in case_channels], axis=0) for fmap in case_maps],
+        axis=0,
+    ).astype(np.float32)
+    if not np.all(np.isfinite(static_data)) or not np.all(np.isfinite(case_data)):
+        raise ValueError("compact case spatial feature packs contain non-finite values")
+    meta = {
+        "coil_proximity_tau": coil_tau,
+        "case_ids": [str(c["case_id"]) for c in cases],
+        "feature_profile": feature_profile,
+        "logical_channels": list(channels),
+        "static_channels": list(ICP_STRUCT_STATIC_CHANNELS),
+        "case_channels": list(case_channels),
+        "static_shape": [int(v) for v in static_data.shape],
+        "case_shape": [int(v) for v in case_data.shape],
+        "logical_shape": [int(len(cases)), int(len(channels)), int(shape[0]), int(shape[1])],
+        "storage": "split_static_case",
+    }
+    return static_data, case_data, meta
 
 
 @dataclass
@@ -286,6 +464,7 @@ class PreprocessRunner:
             seed=int(split_cfg.get("seed", 0)),
             ratios=tuple(ratios),
         )
+        split_structure_holdout = split
 
         cond_order = list(self.cfg.get("cond_order", []))
         if not cond_order:
@@ -400,9 +579,24 @@ class PreprocessRunner:
         coord_rows_z = coord_scaler_z.transform(coord_rows).astype(np.float32)
         coord_rows_mm = coord_scaler_mm.transform(coord_rows).astype(np.float32)
 
-        case_to_idx = {c["case_id"]: i for i, c in enumerate(cases)}
-        train_indices = np.array([case_to_idx[cid] for cid in split["train"]], dtype=np.int64)
         scaler_cfg = dict(self.cfg.get("scalers", {}))
+        scaler_fit_split = str(scaler_cfg.get("fit_split", "random")).strip().lower()
+        split_for_scalers_by_name = {
+            "random": split,
+            "casewise": split,
+            "structure_holdout": split_structure_holdout,
+            "interp": split_interp,
+            "extrap": split_extrap_v1,
+            "pressure_extrap": split_extrap,
+        }
+        if scaler_fit_split not in split_for_scalers_by_name:
+            raise ValueError(
+                "preprocessing.scalers.fit_split must be one of: "
+                "random, interp, extrap, pressure_extrap, structure_holdout"
+            )
+        split_for_scalers = split_for_scalers_by_name[scaler_fit_split]
+        case_to_idx = {c["case_id"]: i for i, c in enumerate(cases)}
+        train_indices = np.array([case_to_idx[cid] for cid in split_for_scalers["train"]], dtype=np.int64)
         y_fit_policy = str(scaler_cfg.get("y_fit_policy", "all"))
         target_transforms_cfg = dict(scaler_cfg.get("target_transforms", {}))
         if "target_transform_policy" in scaler_cfg:
@@ -450,6 +644,7 @@ class PreprocessRunner:
         self.store.save_json("split/split_interp_status_v1.json", interp_status)
         self.store.save_json("split/split_pressure_extrap_v1.json", split_extrap)
         self.store.save_json("split/split_extrap_v1.json", split_extrap_v1)
+        self.store.save_json("split/split_structure_holdout_v1.json", split_structure_holdout)
         self.store.save_json("schema/cond_schema.json", cond_schema.to_dict())
         self.store.save_json("schema/axis_schema.json", axis_schema.to_dict())
         featurization_root = self.cfg.get("featurization_root")
@@ -486,6 +681,8 @@ class PreprocessRunner:
         cond_scaler_payload = transforms.cond_scaler.to_dict()
         cond_scaler_payload["cond_dim"] = transforms.cond_dim
         cond_scaler_payload["fit_policy"] = transforms.fit_policy
+        cond_scaler_payload["fit_split"] = scaler_fit_split
+        cond_scaler_payload["fit_train_case_count"] = int(len(train_indices))
         cond_scaler_payload["mask_applied"] = transforms.mask_applied
         cond_scaler_payload["target_transforms"] = transforms.target_transforms
         self.store.save_json("scalers/cond_scaler.json", cond_scaler_payload)
@@ -510,6 +707,8 @@ class PreprocessRunner:
             "scalers/fit_policy.json",
             {
                 "y_fit_policy": transforms.fit_policy,
+                "fit_split": scaler_fit_split,
+                "fit_train_case_count": int(len(train_indices)),
                 "mask_applied": bool(transforms.mask_applied),
                 "mask_active_ratio": float(np.mean(geom.mask_plasma > 0.5)),
                 "target_transforms": transforms.target_transforms,
@@ -625,6 +824,89 @@ class PreprocessRunner:
             "mask_plasma": np.asarray(geom.mask_plasma, dtype=np.float32),
         }
         coord_feature_maps.update(_derive_geometry_feature_maps(distance_signed=distance_signed))
+        case_spatial_feature_enabled = bool(
+            coord_features_enabled
+            and self.input_mode_effective == TABLE_PLUS_STRUCTURE
+            and self._resolve_runtime_feature_profile() in {"icp_struct_spatial_v1", "icp_part_sdf_lite_v1"}
+        )
+        static_spatial_feature_rel_path = str(
+            coord_features_cfg.get("static_output", "features/static_spatial_feature_pack.npz")
+        )
+        case_structure_feature_rel_path = str(
+            coord_features_cfg.get("case_structure_output", "features/case_structure_feature_pack.npz")
+        )
+        case_spatial_feature_rel_path = str(coord_features_cfg.get("case_output", ""))
+        static_spatial_feature_meta_rel = ""
+        case_structure_feature_meta_rel = ""
+        case_spatial_feature_meta_rel = ""
+        case_spatial_feature_shape: list[int] = []
+        static_spatial_feature_shape: list[int] = []
+        case_structure_feature_shape: list[int] = []
+        static_spatial_feature_data: np.ndarray | None = None
+        case_structure_feature_data: np.ndarray | None = None
+        case_spatial_meta: dict[str, Any] = {}
+        compact_fit_mask = np.ones_like(coord_x, dtype=bool)
+        if case_spatial_feature_enabled:
+            static_spatial_feature_data, case_structure_feature_data, case_spatial_meta = (
+                _build_compact_case_spatial_feature_pack(
+                    cases=cases,
+                    channels=coord_feature_channels,
+                    coord_x=coord_x,
+                    coord_y=coord_y,
+                    train_indices=train_indices,
+                    coil_proximity_percentile=proximity_pct,
+                )
+            )
+            static_map = {
+                name: static_spatial_feature_data[i]
+                for i, name in enumerate(list(ICP_STRUCT_STATIC_CHANNELS))
+            }
+            signed_static = static_map["distance_signed"]
+            any_static = static_map["distance_any"]
+            mask_static = static_map["mask_plasma"] > 0.5
+            stats_mask = np.ones_like(mask_static, dtype=bool)
+            if distance_stats_mask_scope == "plasma_only":
+                stats_mask = mask_static
+            elif distance_stats_mask_scope == "plasma_plus_band":
+                stats_mask = signed_static >= (-float(distance_stats_band))
+            if not np.any(stats_mask):
+                stats_mask = np.ones_like(stats_mask, dtype=bool)
+            abs_signed_vals = np.abs(signed_static[stats_mask])
+            proximity_vals = any_static[stats_mask]
+            signed_tanh_tau_auto = float(max(np.percentile(abs_signed_vals, signed_pct), 1e-3))
+            proximity_tau_auto = float(max(np.percentile(proximity_vals, proximity_pct), 1e-3))
+            distance_stats_payload.update(
+                {
+                    "signed_tanh_tau_auto": signed_tanh_tau_auto,
+                    "proximity_tau_auto": proximity_tau_auto,
+                    "coil_proximity_tau": float(case_spatial_meta.get("coil_proximity_tau", proximity_tau_auto)),
+                    "source": "static_spatial_feature_pack",
+                }
+            )
+            self.store.save_json("scalers/distance_transform_stats.json", distance_stats_payload)
+            compact_fit_mask = np.ones_like(mask_static, dtype=bool)
+            if coord_features_scaling_mask_scope == "plasma_only":
+                compact_fit_mask = mask_static
+            elif coord_features_scaling_mask_scope == "plasma_plus_band":
+                compact_fit_mask = signed_static >= (-float(coord_features_scaling_band))
+            if coord_features_scaling_fit_scope == "all":
+                compact_fit_mask = np.ones_like(compact_fit_mask, dtype=bool)
+            if not np.any(compact_fit_mask):
+                compact_fit_mask = np.ones_like(compact_fit_mask, dtype=bool)
+                coord_feature_scalers_payload_fallback = True
+            else:
+                coord_feature_scalers_payload_fallback = False
+            case_spatial_meta["scaling"] = {
+                "enabled": bool(coord_features_scaling_enabled),
+                "mode": str(coord_features_scaling_mode),
+                "fit_scope": str(coord_features_scaling_fit_scope),
+                "mask_scope": str(coord_features_scaling_mask_scope),
+            }
+            case_spatial_feature_shape = list(case_spatial_meta["logical_shape"])
+            static_spatial_feature_shape = list(case_spatial_meta["static_shape"])
+            case_structure_feature_shape = list(case_spatial_meta["case_shape"])
+            if coord_feature_scalers_payload_fallback:
+                case_spatial_meta["fit_scope_fallback"] = "all_pixels"
         coord_feature_scalers_payload: dict[str, Any] = {
             "enabled": bool(coord_features_scaling_enabled),
             "mode": str(coord_features_scaling_mode),
@@ -643,15 +925,63 @@ class PreprocessRunner:
         if not np.any(fit_mask):
             fit_mask = np.ones_like(fit_mask, dtype=bool)
             coord_feature_scalers_payload["fit_scope_fallback"] = "all_pixels"
-        for name in coord_feature_channels:
-            values = np.asarray(coord_feature_maps[name], dtype=np.float32).reshape(-1, 1)
-            if coord_features_scaling_enabled and coord_features_scaling_mode != "none" and name != "mask_plasma":
-                scaler = ScalerFactory.create(coord_features_scaling_mode).fit(values[fit_mask.reshape(-1)])
+        if case_spatial_feature_enabled and case_spatial_meta.get("fit_scope_fallback"):
+            coord_feature_scalers_payload["fit_scope_fallback"] = str(case_spatial_meta["fit_scope_fallback"])
+        for i_channel, name in enumerate(coord_feature_channels):
+            if case_spatial_feature_enabled:
+                if static_spatial_feature_data is None or case_structure_feature_data is None:
+                    raise RuntimeError("compact case spatial feature pack was not initialized")
+                static_channels_effective = tuple(case_spatial_meta.get("static_channels", ICP_STRUCT_STATIC_CHANNELS))
+                case_channels_effective = tuple(case_spatial_meta.get("case_channels", ICP_STRUCT_CASE_CHANNELS))
+                if name in static_channels_effective:
+                    static_idx = list(static_channels_effective).index(name)
+                    values = static_spatial_feature_data[static_idx].reshape(-1, 1)
+                    fit_values = values[compact_fit_mask.reshape(-1)]
+                elif name in case_channels_effective:
+                    case_idx = list(case_channels_effective).index(name)
+                    fit_case_indices = (
+                        np.arange(case_structure_feature_data.shape[0], dtype=np.int64)
+                        if coord_features_scaling_fit_scope == "all"
+                        else train_indices
+                    )
+                    values = case_structure_feature_data[fit_case_indices, case_idx].reshape(-1, 1)
+                    repeated_mask = np.broadcast_to(
+                        compact_fit_mask.reshape(1, -1),
+                        (int(len(fit_case_indices)), int(compact_fit_mask.size)),
+                    ).reshape(-1)
+                    fit_values = values[repeated_mask]
+                else:
+                    raise ValueError(f"compact case spatial feature channel is unavailable: {name}")
+            else:
+                values = np.asarray(coord_feature_maps[name], dtype=np.float32).reshape(-1, 1)
+                fit_values = values[fit_mask.reshape(-1)]
+            if coord_features_scaling_enabled and coord_features_scaling_mode != "none" and not _is_mask_like_channel(name):
+                scaler = ScalerFactory.create(coord_features_scaling_mode).fit(fit_values)
             else:
                 scaler = ScalerFactory.create("none").fit(values)
             coord_feature_scalers_payload["channels"][name] = scaler.to_dict()
         self.store.save_json("scalers/coord_feature_scaler.json", coord_feature_scalers_payload)
-        if coord_features_enabled:
+        if case_spatial_feature_enabled:
+            if static_spatial_feature_data is None or case_structure_feature_data is None:
+                raise RuntimeError("compact case spatial feature pack was not initialized")
+            self.store.save_npz(
+                static_spatial_feature_rel_path,
+                data=static_spatial_feature_data,
+                channels=np.asarray(list(case_spatial_meta.get("static_channels", ICP_STRUCT_STATIC_CHANNELS))),
+            )
+            self.store.save_npz(
+                case_structure_feature_rel_path,
+                data=case_structure_feature_data,
+                channels=np.asarray(list(case_spatial_meta.get("case_channels", ICP_STRUCT_CASE_CHANNELS))),
+                case_ids=np.asarray([str(c["case_id"]) for c in cases]),
+            )
+            static_path = Path(static_spatial_feature_rel_path)
+            case_path = Path(case_structure_feature_rel_path)
+            static_spatial_feature_meta_rel = str(static_path.parent / f"{static_path.stem}_meta.json")
+            case_structure_feature_meta_rel = str(case_path.parent / f"{case_path.stem}_meta.json")
+            self.store.save_json(static_spatial_feature_meta_rel, case_spatial_meta)
+            self.store.save_json(case_structure_feature_meta_rel, case_spatial_meta)
+        elif coord_features_enabled:
             coord_feature_data = np.stack([coord_feature_maps[name] for name in coord_feature_channels], axis=0).astype(np.float32)
             self.store.save_npz(coord_feature_rel_path, data=coord_feature_data, channels=np.asarray(coord_feature_channels))
             pack_path = Path(coord_feature_rel_path)
@@ -801,7 +1131,15 @@ class PreprocessRunner:
                 "max": float(np.max(vals)),
             }
         self.store.save_json("stats/y_stats.json", y_stats)
-        split_hash = hash_json({"split_random": split, "split_pressure_extrap": split_extrap})
+        split_hash = hash_json(
+            {
+                "split_random": split,
+                "split_pressure_extrap": split_extrap,
+                "split_extrap": split_extrap_v1,
+                "split_structure_holdout": split_structure_holdout,
+                "scaler_fit_split": scaler_fit_split,
+            }
+        )
         sampling_hash = hash_json(
             {
                 "point_pools_shape": {k: int(v.shape[0]) for k, v in pools.items()},
@@ -891,11 +1229,35 @@ class PreprocessRunner:
                 },
             },
             "coord_scaler_status": "ok",
+            "scaler_fit_split": scaler_fit_split,
+            "scaler_fit_train_case_count": int(len(train_indices)),
+            "density_value_transform_effective": {
+                name: str(dict(target_transforms_cfg.get(name, {})).get("value_transform", "identity"))
+                for name in ("ne", "ni")
+                if name in set(y_vars)
+            },
             "coord_features_enabled": bool(coord_features_enabled),
             "coord_feature_channels": coord_feature_channels,
-            "coord_feature_pack_path": coord_feature_rel_path if coord_features_enabled else "",
+            "coord_feature_pack_path": (
+                "" if case_spatial_feature_enabled else (coord_feature_rel_path if coord_features_enabled else "")
+            ),
             "coord_feature_scaling_enabled": bool(coord_features_scaling_enabled),
             "coord_feature_scaling_mode": str(coord_features_scaling_mode),
+            "case_spatial_pack_used": bool(case_spatial_feature_enabled),
+            "case_spatial_feature_storage": "split_static_case" if case_spatial_feature_enabled else "",
+            "case_spatial_feature_pack_path": "",
+            "case_spatial_feature_pack_meta_path": case_spatial_feature_meta_rel,
+            "case_spatial_feature_shape": case_spatial_feature_shape,
+            "static_spatial_feature_pack_path": (
+                static_spatial_feature_rel_path if case_spatial_feature_enabled else ""
+            ),
+            "static_spatial_feature_pack_meta_path": static_spatial_feature_meta_rel,
+            "static_spatial_feature_shape": static_spatial_feature_shape,
+            "case_structure_feature_pack_path": (
+                case_structure_feature_rel_path if case_spatial_feature_enabled else ""
+            ),
+            "case_structure_feature_pack_meta_path": case_structure_feature_meta_rel,
+            "case_structure_feature_shape": case_structure_feature_shape,
             "distance_transform_stats_path": "scalers/distance_transform_stats.json",
             "distance_transform_stats_enabled": bool(distance_stats_enabled),
             "distance_transform_tau_auto": {

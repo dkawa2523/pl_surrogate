@@ -105,6 +105,9 @@ class TrainDispatchContext:
     supervised_distance: np.ndarray | None = None
     coord_scaler: dict[str, Any] | None = None
     coord_feature_pack: dict[str, Any] | None = None
+    case_spatial_feature_pack: dict[str, Any] | None = None
+    static_spatial_feature_pack: dict[str, Any] | None = None
+    case_structure_feature_pack: dict[str, Any] | None = None
     coord_feature_scaler: dict[str, Any] | None = None
     coord_distance_transform_stats: dict[str, Any] | None = None
     structure_descriptor_pack: dict[str, Any] | None = None

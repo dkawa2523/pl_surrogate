@@ -41,12 +41,59 @@ def _broadcast_mask_to_shape(mask: np.ndarray, target: np.ndarray, *, name: str)
     raise ValueError(f"{name} only supports 2D/3D/4D tensors, got {t.shape}")
 
 
+def _finite_pair_or_nan(y_true: np.ndarray, y_pred: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    yt = np.asarray(y_true, dtype=np.float64)
+    yp = np.asarray(y_pred, dtype=np.float64)
+    if yt.shape != yp.shape:
+        raise ValueError(f"metric shape mismatch: y_true={yt.shape}, y_pred={yp.shape}")
+    if not (np.all(np.isfinite(yt)) and np.all(np.isfinite(yp))):
+        return None
+    return yt, yp
+
+
+def finite_pair_stats(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    mask: np.ndarray | None = None,
+) -> dict[str, float]:
+    """Count finite/non-finite paired values used by evaluation metrics."""
+
+    yt = np.asarray(y_true, dtype=np.float64)
+    yp = np.asarray(y_pred, dtype=np.float64)
+    if yt.shape != yp.shape:
+        raise ValueError(f"finite_pair_stats shape mismatch: y_true={yt.shape}, y_pred={yp.shape}")
+    if mask is None:
+        active = np.ones(yt.shape, dtype=bool)
+    else:
+        active = _broadcast_mask_to_shape(mask, yt, name="finite_pair_stats") > 0.5
+    n_active = int(np.sum(active))
+    if n_active <= 0:
+        return {"n_active": 0.0, "n_finite": 0.0, "n_nonfinite": 0.0, "finite_ratio": 0.0}
+    finite = np.isfinite(yt) & np.isfinite(yp)
+    n_finite = int(np.sum(active & finite))
+    n_nonfinite = int(n_active - n_finite)
+    return {
+        "n_active": float(n_active),
+        "n_finite": float(n_finite),
+        "n_nonfinite": float(n_nonfinite),
+        "finite_ratio": float(n_finite / float(n_active)),
+    }
+
+
 def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    pair = _finite_pair_or_nan(y_true, y_pred)
+    if pair is None:
+        return float("nan")
+    yt, yp = pair
+    return float(np.sqrt(np.mean((yt - yp) ** 2)))
 
 
 def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
-    return float(np.mean(np.abs(y_true - y_pred)))
+    pair = _finite_pair_or_nan(y_true, y_pred)
+    if pair is None:
+        return float("nan")
+    yt, yp = pair
+    return float(np.mean(np.abs(yt - yp)))
 
 
 def rmse_by_var(y_true: dict[str, np.ndarray], y_pred: dict[str, np.ndarray]) -> dict[str, float]:
@@ -54,18 +101,27 @@ def rmse_by_var(y_true: dict[str, np.ndarray], y_pred: dict[str, np.ndarray]) ->
 
 
 def rmse_masked(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> float:
-    yt = np.asarray(y_true, dtype=np.float32)
-    yp = np.asarray(y_pred, dtype=np.float32)
+    yt = np.asarray(y_true, dtype=np.float64)
+    yp = np.asarray(y_pred, dtype=np.float64)
     if yt.shape != yp.shape:
         raise ValueError(f"rmse_masked shape mismatch: y_true={yt.shape}, y_pred={yp.shape}")
     m = _broadcast_mask_to_shape(mask, yt, name="rmse_masked")
-    denom = max(float(np.sum(m)), 1.0)
-    return float(np.sqrt(np.sum(((yt - yp) ** 2) * m) / denom))
+    active = m > 0.5
+    if not np.any(active):
+        return 0.0
+    if not (np.all(np.isfinite(yt[active])) and np.all(np.isfinite(yp[active]))):
+        return float("nan")
+    diff = yt[active] - yp[active]
+    return float(np.sqrt(np.mean(diff * diff)))
 
 
 def r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     yt = np.asarray(y_true, dtype=np.float64).reshape(-1)
     yp = np.asarray(y_pred, dtype=np.float64).reshape(-1)
+    if yt.shape != yp.shape:
+        raise ValueError(f"r2 shape mismatch: y_true={yt.shape}, y_pred={yp.shape}")
+    if not (np.all(np.isfinite(yt)) and np.all(np.isfinite(yp))):
+        return float("nan")
     ss_res = float(np.sum((yt - yp) ** 2))
     ss_tot = float(np.sum((yt - np.mean(yt)) ** 2))
     if ss_tot <= 1e-18:
@@ -88,6 +144,8 @@ def r2_masked(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> float
         return 0.0
     yta = yt[active]
     ypa = yp[active]
+    if not (np.all(np.isfinite(yta)) and np.all(np.isfinite(ypa))):
+        return float("nan")
     ss_res = float(np.sum((yta - ypa) ** 2))
     ss_tot = float(np.sum((yta - np.mean(yta)) ** 2))
     if ss_tot <= 1e-18:
@@ -96,7 +154,7 @@ def r2_masked(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> float
 
 
 def uniformity(values: np.ndarray) -> float:
-    vals = np.asarray(values, dtype=np.float32).reshape(-1)
+    vals = np.asarray(values, dtype=np.float64).reshape(-1)
     if vals.size == 0:
         return float("nan")
     if not np.all(np.isfinite(vals)):

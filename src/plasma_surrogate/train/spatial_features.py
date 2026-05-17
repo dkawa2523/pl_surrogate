@@ -2,12 +2,57 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.data.geometry_context import build_signed_distance_fields
 from plasma_surrogate.features.structure_feature_registry import validate_coord_feature_channels
 from plasma_surrogate.preprocessing.scalers import ScalerFactory
+
+
+ICP_STRUCT_STATIC_CHANNELS: tuple[str, ...] = (
+    "x",
+    "y",
+    "mask_plasma",
+    "distance_signed",
+    "distance_any",
+)
+ICP_STRUCT_CASE_CHANNELS: tuple[str, ...] = ("mask_coil", "distance_coil", "coil_proximity")
+ICP_PART_SDF_CHANNELS: tuple[str, ...] = tuple(f"sdf_coil_{i:02d}" for i in range(1, 7))
+ICP_PART_SDF_LITE_CASE_CHANNELS: tuple[str, ...] = (*ICP_STRUCT_CASE_CHANNELS, *ICP_PART_SDF_CHANNELS)
+
+
+def distance_to_mask(mask: np.ndarray) -> np.ndarray:
+    binary = (np.asarray(mask, dtype=np.float32) > 0.5).astype(np.float32)
+    if float(np.sum(binary, dtype=np.float32)) <= 0.0:
+        return np.full(binary.shape, float(max(binary.shape)), dtype=np.float32)
+    signed = build_signed_distance_fields(binary)
+    return np.where(binary > 0.5, 0.0, np.abs(signed)).astype(np.float32)
+
+
+def sdf_from_part_mask(mask: np.ndarray) -> np.ndarray:
+    binary = (np.asarray(mask, dtype=np.float32) > 0.5).astype(np.float32)
+    if float(np.sum(binary, dtype=np.float32)) <= 0.0:
+        return np.full(binary.shape, float(max(binary.shape)), dtype=np.float32)
+    return (-build_signed_distance_fields(binary)).astype(np.float32)
+
+
+def part_sdf_maps_from_stack(part_mask_stack: np.ndarray, *, slot_count: int = 6) -> dict[str, np.ndarray]:
+    stack = np.asarray(part_mask_stack, dtype=np.float32)
+    if stack.ndim != 3:
+        raise ValueError(f"part_mask_stack must be [P,H,W], got {stack.shape}")
+    h, w = stack.shape[1:]
+    fill = np.full((h, w), float(max(h, w)), dtype=np.float32)
+    out: dict[str, np.ndarray] = {}
+    for idx in range(int(slot_count)):
+        name = f"sdf_coil_{idx + 1:02d}"
+        if idx < int(stack.shape[0]):
+            out[name] = sdf_from_part_mask(stack[idx]).astype(np.float32)
+        else:
+            out[name] = fill.copy()
+    return out
 
 
 def coord_xy_rows_from_geom(geom_ctx: Any, *, h: int, w: int) -> tuple[np.ndarray, str]:
@@ -210,3 +255,172 @@ def build_coord_feature_rows(
     )
     feats = np.stack([np.asarray(mapping[name], dtype=np.float32) for name in channels], axis=1).astype(np.float32)
     return feats, "runtime_geom"
+
+
+@dataclass(frozen=True)
+class CaseSpatialFeatureSource:
+    channels: tuple[str, ...]
+    h: int
+    w: int
+    n_cases: int
+    source: str
+    static_data: np.ndarray | None = None
+    static_channels: tuple[str, ...] = ()
+    case_data: np.ndarray | None = None
+    case_channels: tuple[str, ...] = ()
+    legacy_data: np.ndarray | None = None
+    legacy_channels: tuple[str, ...] = ()
+    case_indices: np.ndarray | None = None
+    distance_transform_cfg: dict[str, Any] | None = None
+    coord_feature_scaler_artifact: dict[str, Any] | None = None
+
+    @property
+    def shape(self) -> tuple[int, int, int, int]:
+        return (self.n_cases, self.h, self.w, len(self.channels))
+
+    @property
+    def scaling_applied(self) -> bool:
+        raw = dict(self.coord_feature_scaler_artifact or {})
+        return bool(raw.get("enabled", False)) and bool(dict(raw.get("channels", {})))
+
+    def subset(self, indices: np.ndarray) -> "CaseSpatialFeatureSource":
+        raw = np.asarray(indices, dtype=np.int64).reshape(-1)
+        if self.case_indices is not None:
+            raw = np.asarray(self.case_indices, dtype=np.int64).reshape(-1)[raw]
+        return CaseSpatialFeatureSource(
+            channels=self.channels,
+            h=self.h,
+            w=self.w,
+            n_cases=int(raw.shape[0]),
+            source=self.source,
+            static_data=self.static_data,
+            static_channels=self.static_channels,
+            case_data=self.case_data,
+            case_channels=self.case_channels,
+            legacy_data=self.legacy_data,
+            legacy_channels=self.legacy_channels,
+            case_indices=raw,
+            distance_transform_cfg=self.distance_transform_cfg,
+            coord_feature_scaler_artifact=self.coord_feature_scaler_artifact,
+        )
+
+    def batch(self, indices: np.ndarray) -> np.ndarray:
+        local = np.asarray(indices, dtype=np.int64).reshape(-1)
+        global_idx = local if self.case_indices is None else np.asarray(self.case_indices, dtype=np.int64)[local]
+        bsz = int(global_idx.shape[0])
+        out = np.empty((bsz, self.h, self.w, len(self.channels)), dtype=np.float32)
+        if self.legacy_data is not None:
+            channel_to_idx = {name: i for i, name in enumerate(self.legacy_channels)}
+            for out_idx, name in enumerate(self.channels):
+                out[..., out_idx] = np.asarray(self.legacy_data[global_idx, channel_to_idx[name]], dtype=np.float32)
+        else:
+            if self.static_data is None or self.case_data is None:
+                raise ValueError("compact case spatial feature source is missing static or case data")
+            static_to_idx = {name: i for i, name in enumerate(self.static_channels)}
+            case_to_idx = {name: i for i, name in enumerate(self.case_channels)}
+            for out_idx, name in enumerate(self.channels):
+                if name in static_to_idx:
+                    out[..., out_idx] = np.asarray(self.static_data[static_to_idx[name]], dtype=np.float32)
+                elif name in case_to_idx:
+                    out[..., out_idx] = np.asarray(self.case_data[global_idx, case_to_idx[name]], dtype=np.float32)
+                else:
+                    raise ValueError(f"case spatial feature channel is unavailable: {name}")
+        flat = out.reshape(-1, len(self.channels))
+        flat, _ = apply_distance_transform(
+            flat.astype(np.float32),
+            channels=list(self.channels),
+            cfg=dict(self.distance_transform_cfg or {"mode": "raw"}),
+        )
+        flat, _, _ = apply_coord_feature_scaling(
+            flat.astype(np.float32),
+            channels=list(self.channels),
+            coord_feature_scaler_artifact=dict(self.coord_feature_scaler_artifact or {}),
+        )
+        return flat.reshape(out.shape).astype(np.float32)
+
+
+def _load_pack_channels(pack: dict[str, Any], key: str = "channels") -> list[str]:
+    return [str(v) for v in np.asarray(pack.get(key)).reshape(-1).tolist()]
+
+
+def build_case_spatial_features(
+    *,
+    channels: list[str],
+    pack: dict[str, Any] | None,
+    static_pack: dict[str, Any] | None = None,
+    case_pack: dict[str, Any] | None = None,
+    h: int,
+    w: int,
+    distance_transform_cfg: dict[str, Any] | None = None,
+    coord_feature_scaler_artifact: dict[str, Any] | None = None,
+) -> tuple[CaseSpatialFeatureSource | None, str]:
+    if static_pack and case_pack and "data" in static_pack and "data" in case_pack:
+        static_data = np.asarray(static_pack.get("data"), dtype=np.float32)
+        case_data = np.asarray(case_pack.get("data"), dtype=np.float32)
+        if static_data.ndim != 3 or tuple(static_data.shape[1:]) != (h, w):
+            raise ValueError(f"static spatial feature pack data must be [C,H,W], got {static_data.shape}")
+        if case_data.ndim != 4 or tuple(case_data.shape[2:]) != (h, w):
+            raise ValueError(f"case structure feature pack data must be [N,C,H,W], got {case_data.shape}")
+        static_channels = _load_pack_channels(static_pack)
+        case_channels = _load_pack_channels(case_pack)
+        available = set(static_channels) | set(case_channels)
+        missing = [name for name in channels if name not in available]
+        if missing:
+            return None, f"missing_channels:{','.join(missing)}"
+        if not np.all(np.isfinite(static_data)) or not np.all(np.isfinite(case_data)):
+            raise ValueError("compact case spatial feature packs contain non-finite values")
+        return (
+            CaseSpatialFeatureSource(
+                channels=tuple(channels),
+                h=int(h),
+                w=int(w),
+                n_cases=int(case_data.shape[0]),
+                source="compact_case_spatial_pack",
+                static_data=static_data,
+                static_channels=tuple(static_channels),
+                case_data=case_data,
+                case_channels=tuple(case_channels),
+                distance_transform_cfg=dict(distance_transform_cfg or {"mode": "raw"}),
+                coord_feature_scaler_artifact=dict(coord_feature_scaler_artifact or {}),
+            ),
+            "compact_case_spatial_pack",
+        )
+
+    if not pack or "data" not in pack or "channels" not in pack:
+        return None, "missing"
+    data = np.asarray(pack.get("data"), dtype=np.float32)
+    if data.ndim != 4:
+        raise ValueError(f"case spatial feature pack data must be [N,C,H,W], got {data.shape}")
+    if tuple(data.shape[2:]) != (h, w):
+        raise ValueError(
+            f"case spatial feature pack spatial shape mismatch: expected={(h, w)}, got={tuple(data.shape[2:])}"
+        )
+    pack_channels = _load_pack_channels(pack)
+    channel_to_idx = {name: i for i, name in enumerate(pack_channels)}
+    missing = [name for name in channels if name not in channel_to_idx]
+    if missing:
+        return None, f"missing_channels:{','.join(missing)}"
+    if not np.all(np.isfinite(data)):
+        raise ValueError("case spatial feature pack contains non-finite values")
+    return (
+        CaseSpatialFeatureSource(
+            channels=tuple(channels),
+            h=int(h),
+            w=int(w),
+            n_cases=int(data.shape[0]),
+            source="case_spatial_pack",
+            legacy_data=data,
+            legacy_channels=tuple(pack_channels),
+            distance_transform_cfg=dict(distance_transform_cfg or {"mode": "raw"}),
+            coord_feature_scaler_artifact=dict(coord_feature_scaler_artifact or {}),
+        ),
+        "case_spatial_pack",
+    )
+
+
+def materialize_case_spatial_batch(spatial_features: Any, indices: np.ndarray) -> np.ndarray | None:
+    if spatial_features is None:
+        return None
+    if hasattr(spatial_features, "batch"):
+        return spatial_features.batch(indices)
+    return np.asarray(spatial_features, dtype=np.float32)[np.asarray(indices, dtype=np.int64)]

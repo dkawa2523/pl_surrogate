@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -17,6 +18,7 @@ from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
 from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy
 from plasma_surrogate.train.losses import laplacian2d
+from plasma_surrogate.train.spatial_features import materialize_case_spatial_batch
 
 
 @dataclass
@@ -572,6 +574,7 @@ def train_one_epoch_unet(
     supervised_distance_signed: np.ndarray | None = None,
     supervised_bc_dir_mask: np.ndarray | None = None,
     supervised_wafer_mask: np.ndarray | None = None,
+    spatial_features: Any | None = None,
     optimizer_contract: dict[str, Any] | None = None,
     torch_optimizer: Any | None = None,
     batch_size_cases: int = 0,
@@ -614,7 +617,8 @@ def train_one_epoch_unet(
         sl = order[start : start + bsz]
         cond_batch = cond_matrix[sl]
         y_batch = y_field[sl]
-        raw_pred = model.forward_raw(cond_batch, training=True)
+        spatial_batch = materialize_case_spatial_batch(spatial_features, sl)
+        raw_pred = model.forward_raw(cond_batch, training=True, spatial_features=spatial_batch)
         pred = raw_pred[:, : model.out_channels]
         pred_dict = {name: pred[:, i] for i, name in enumerate(y_vars)}
         tgt_dict = {name: np.asarray(y_batch[:, i], dtype=np.float32) for i, name in enumerate(y_vars)}
@@ -864,6 +868,38 @@ class Trainer:
         data = [[r.get(k, 0.0) for k in header] for r in rows]
         self.store.save_csv("scalars/optimization_diagnostics.csv", header, data)
 
+    def _save_training_progress(
+        self,
+        *,
+        history: list[dict[str, float]],
+        diagnostics_rows: list[dict[str, float]],
+        total_epochs: int,
+        elapsed_seconds: float,
+        best_epoch: int | None = None,
+        best_score: float | None = None,
+    ) -> None:
+        if not history:
+            return
+        header = list(history[0].keys())
+        rows = [[h.get(k, "") for k in header] for h in history]
+        self.store.save_csv("scalars/metrics_partial.csv", header, rows)
+
+        latest = dict(history[-1])
+        latest["epoch_completed"] = int(latest.get("epoch", len(history) - 1))
+        latest["epochs_completed"] = int(len(history))
+        latest["total_epochs"] = int(total_epochs)
+        latest["elapsed_seconds"] = float(elapsed_seconds)
+        if best_epoch is not None:
+            latest["best_epoch_so_far"] = int(best_epoch)
+        if best_score is not None and np.isfinite(float(best_score)):
+            latest["best_score_so_far"] = float(best_score)
+        self.store.save_json("scalars/progress_latest.json", latest)
+
+        if diagnostics_rows:
+            diag_header = list(diagnostics_rows[0].keys())
+            diag_rows = [[row.get(k, "") for k in diag_header] for row in diagnostics_rows]
+            self.store.save_csv("scalars/optimization_diagnostics_partial.csv", diag_header, diag_rows)
+
     def _save_resolved_physics(self, physics_cfg: dict[str, Any] | None) -> None:
         cfg = dict(physics_cfg or {})
         self.store.save_json(
@@ -1038,6 +1074,8 @@ class Trainer:
         supervised_distance_signed: np.ndarray | None = None,
         supervised_bc_dir_mask: np.ndarray | None = None,
         supervised_wafer_mask: np.ndarray | None = None,
+        spatial_train: Any | None = None,
+        spatial_val: Any | None = None,
         optimizer_contract: dict[str, Any] | None = None,
         unet_optimizer_cfg: dict[str, Any] | None = None,
         batch_size_cases: int = 0,
@@ -1114,6 +1152,7 @@ class Trainer:
         best_score_parts: dict[str, float] = {}
         stale = 0
         rng = np.random.default_rng(int(seed))
+        train_start = time.perf_counter()
         for epoch in range(epochs):
             if torch_optimizer is not None:
                 lr = _set_unet_optimizer_epoch_lr(
@@ -1143,6 +1182,7 @@ class Trainer:
                 supervised_distance_signed=supervised_distance_signed,
                 supervised_bc_dir_mask=supervised_bc_dir_mask,
                 supervised_wafer_mask=supervised_wafer_mask,
+                spatial_features=spatial_train,
                 optimizer_contract=contract,
                 torch_optimizer=torch_optimizer,
                 batch_size_cases=batch_size_cases,
@@ -1150,7 +1190,16 @@ class Trainer:
                 rng=rng,
                 epoch_idx=epoch,
             )
-            val_pred = model.forward(cond_val)
+            val_bsz = int(cond_val.shape[0]) if int(batch_size_cases) <= 0 else min(int(batch_size_cases), int(cond_val.shape[0]))
+            val_chunks: list[np.ndarray] = []
+            for val_start in range(0, int(cond_val.shape[0]), max(1, val_bsz)):
+                val_stop = min(val_start + max(1, val_bsz), int(cond_val.shape[0]))
+                val_idx = np.arange(val_start, val_stop, dtype=np.int64)
+                val_spatial = materialize_case_spatial_batch(spatial_val, val_idx)
+                val_chunks.append(
+                    np.asarray(model.forward(cond_val[val_idx], spatial_features=val_spatial), dtype=np.float32)
+                )
+            val_pred = np.concatenate(val_chunks, axis=0).astype(np.float32)
             val_data_loss, _, _ = compose_supervised_numpy(
                 {name: val_pred[:, i] for i, name in enumerate(y_vars)},
                 {name: y_val[:, i] for i, name in enumerate(y_vars)},
@@ -1282,6 +1331,14 @@ class Trainer:
                         "selected_epoch_flag": 0.0,
                     }
                 )
+            self._save_training_progress(
+                history=history,
+                diagnostics_rows=diagnostics_rows,
+                total_epochs=int(epochs),
+                elapsed_seconds=float(time.perf_counter() - train_start),
+                best_epoch=int(best_epoch) if best_epoch >= 0 else None,
+                best_score=float(best_score),
+            )
             if fail_fast_enabled:
                 if float(stats.get("grad_l2_total", 0.0)) <= min_step_ratio:
                     stale += 1

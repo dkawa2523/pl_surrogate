@@ -13,6 +13,7 @@ from plasma_surrogate.core.input_modes import TABLE_ONLY, TABLE_PLUS_STRUCTURE
 from plasma_surrogate.data.geometry_provider import PROVIDER_MODE_FIXED, PROVIDER_MODE_PARAMETRIC_PARTS
 
 _PART_KEY_RE = re.compile(r"^part\.[A-Za-z0-9_\-]+\.(tx|ty|scale_x|scale_y|rotation_deg|fillet)$")
+_LAYOUT_KEY_RE = re.compile(r"^layout\.[A-Za-z0-9_\-]+\.(r_center|z_center|width|height)$")
 _GAP_KEY_RE = re.compile(r"^gap\.[A-Za-z0-9_\-]+$")
 _OFFSET_KEY_RE = re.compile(r"^offset\.(x|y|tx|ty)$")
 
@@ -41,10 +42,16 @@ def _normalize_search_space(
         if lo > hi:
             raise ValueError(f"{label}[{name!r}] requires lo <= hi; got={bounds!r}")
         if check_geom_keys:
-            if _PART_KEY_RE.match(name) is None and _GAP_KEY_RE.match(name) is None and _OFFSET_KEY_RE.match(name) is None:
+            if (
+                _PART_KEY_RE.match(name) is None
+                and _LAYOUT_KEY_RE.match(name) is None
+                and _GAP_KEY_RE.match(name) is None
+                and _OFFSET_KEY_RE.match(name) is None
+            ):
                 raise ValueError(
                     "geom_space keys must be low-dimensional geometry params: "
-                    "part.<id>.(tx|ty|scale_x|scale_y|rotation_deg|fillet), gap.<name>, offset.(x|y|tx|ty). "
+                    "part.<id>.(tx|ty|scale_x|scale_y|rotation_deg|fillet), "
+                    "layout.<id>.(r_center|z_center|width|height), gap.<name>, offset.(x|y|tx|ty). "
                     f"got={name!r}"
                 )
         out[name] = (lo, hi)

@@ -182,6 +182,24 @@ class RunBundleLoader:
         if latent_pack_rel:
             latent_pack_path = run_path / "preprocessing" / latent_pack_rel
             latent_pack_meta_path = latent_pack_path.parent / f"{latent_pack_path.stem}_meta.json"
+        case_spatial_pack_rel = str(preprocess_report.get("case_spatial_feature_pack_path", "")).strip()
+        case_spatial_pack_path: Path | None = None
+        case_spatial_pack_meta_path: Path | None = None
+        if case_spatial_pack_rel:
+            case_spatial_pack_path = run_path / "preprocessing" / case_spatial_pack_rel
+            case_spatial_pack_meta_path = case_spatial_pack_path.parent / f"{case_spatial_pack_path.stem}_meta.json"
+        static_spatial_pack_rel = str(preprocess_report.get("static_spatial_feature_pack_path", "")).strip()
+        static_spatial_pack_path: Path | None = None
+        static_spatial_pack_meta_path: Path | None = None
+        if static_spatial_pack_rel:
+            static_spatial_pack_path = run_path / "preprocessing" / static_spatial_pack_rel
+            static_spatial_pack_meta_path = static_spatial_pack_path.parent / f"{static_spatial_pack_path.stem}_meta.json"
+        case_structure_pack_rel = str(preprocess_report.get("case_structure_feature_pack_path", "")).strip()
+        case_structure_pack_path: Path | None = None
+        case_structure_pack_meta_path: Path | None = None
+        if case_structure_pack_rel:
+            case_structure_pack_path = run_path / "preprocessing" / case_structure_pack_rel
+            case_structure_pack_meta_path = case_structure_pack_path.parent / f"{case_structure_pack_path.stem}_meta.json"
 
         schemas = {
             "cond_schema": cls._load_json_if_exists(run_path / "preprocessing" / "schema" / "cond_schema.json"),
@@ -219,6 +237,24 @@ class RunBundleLoader:
             "structure_descriptor_pack": cls._load_npz_if_exists(descriptor_pack_path) if descriptor_pack_path else None,
             "latent_feature_pack_meta": cls._load_json_if_exists(latent_pack_meta_path) if latent_pack_meta_path else {},
             "latent_feature_pack": cls._load_npz_if_exists(latent_pack_path) if latent_pack_path else None,
+            "case_spatial_feature_pack_meta": (
+                cls._load_json_if_exists(case_spatial_pack_meta_path) if case_spatial_pack_meta_path else {}
+            ),
+            "case_spatial_feature_pack": (
+                cls._load_npz_if_exists(case_spatial_pack_path) if case_spatial_pack_path else None
+            ),
+            "static_spatial_feature_pack_meta": (
+                cls._load_json_if_exists(static_spatial_pack_meta_path) if static_spatial_pack_meta_path else {}
+            ),
+            "static_spatial_feature_pack": (
+                cls._load_npz_if_exists(static_spatial_pack_path) if static_spatial_pack_path else None
+            ),
+            "case_structure_feature_pack_meta": (
+                cls._load_json_if_exists(case_structure_pack_meta_path) if case_structure_pack_meta_path else {}
+            ),
+            "case_structure_feature_pack": (
+                cls._load_npz_if_exists(case_structure_pack_path) if case_structure_pack_path else None
+            ),
         }
         task_spec = cls._load_task_spec(run_path=run_path, cfg=cfg, schemas=schemas, transforms=transforms)
 

@@ -14,7 +14,14 @@ from plasma_surrogate.features.structure_feature_registry import (
 
 def test_feature_profiles_include_reserved_names() -> None:
     names = list_feature_profiles()
-    assert names == ("geom_v1_mainline", "boundary_plus_v1", "part_lite_v1", "part_semantic_v1")
+    assert names == (
+        "geom_v1_mainline",
+        "boundary_plus_v1",
+        "part_lite_v1",
+        "part_semantic_v1",
+        "icp_struct_spatial_v1",
+        "icp_part_sdf_lite_v1",
+    )
 
 
 def test_geom_v1_mainline_resolves_exact_five_channels() -> None:
@@ -24,6 +31,25 @@ def test_geom_v1_mainline_resolves_exact_five_channels() -> None:
         "mask_plasma",
         "distance_signed",
         "distance_any",
+    )
+
+
+def test_icp_part_sdf_lite_resolves_exact_fourteen_channels() -> None:
+    assert resolve_spatial_channels_for_feature_profile("icp_part_sdf_lite_v1") == (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "mask_coil",
+        "distance_coil",
+        "coil_proximity",
+        "sdf_coil_01",
+        "sdf_coil_02",
+        "sdf_coil_03",
+        "sdf_coil_04",
+        "sdf_coil_05",
+        "sdf_coil_06",
     )
 
 

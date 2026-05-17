@@ -61,6 +61,7 @@ from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
 from plasma_surrogate.preprocessing.scalers import ScalerFactory, TransformBundle
 from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 from plasma_surrogate.train.losses import boundary_operator_loss, boundary_operator_target, poisson_residual
+from plasma_surrogate.train.spatial_features import distance_to_mask, part_sdf_maps_from_stack
 
 @dataclass
 class InferenceResult:
@@ -114,6 +115,89 @@ class InferenceEngine:
                 continue
             return key, np.asarray(fields_phys[key], dtype=np.float32)[0]
         return None, None
+
+    @staticmethod
+    def _uniformity_values_for_region(
+        qoi_target: np.ndarray,
+        *,
+        mask_plasma: np.ndarray,
+        wafer_mask: np.ndarray | None,
+        region: str,
+        mid_height_band_px: int = 0,
+    ) -> tuple[np.ndarray, dict[str, float | str]]:
+        target = np.asarray(qoi_target, dtype=np.float32)
+        plasma = np.asarray(mask_plasma, dtype=np.float32) > 0.5
+        region_norm = str(region or "auto").strip().lower()
+        if region_norm in {
+            "plasma_mid_height",
+            "mid_height",
+            "plasma_midline",
+            "plasma_mean_height",
+            "mean_height",
+        }:
+            active_rows = np.where(np.any(plasma, axis=1))[0]
+            if active_rows.size <= 0:
+                return np.asarray([], dtype=np.float32), {
+                    "uniformity_region": "plasma_mean_height" if region_norm in {"plasma_mean_height", "mean_height"} else "plasma_mid_height",
+                    "uniformity_mid_height_row": -1.0,
+                    "uniformity_mean_height_row": -1.0,
+                    "uniformity_sample_count": 0.0,
+                }
+            if region_norm in {"plasma_mean_height", "mean_height"}:
+                yy = np.nonzero(plasma)[0].astype(np.float64)
+                target_mid = float(np.mean(yy))
+                region_label = "plasma_mean_height"
+            else:
+                target_mid = 0.5 * (float(active_rows[0]) + float(active_rows[-1]))
+                region_label = "plasma_mid_height"
+            mid_row = int(active_rows[int(np.argmin(np.abs(active_rows.astype(np.float64) - target_mid)))])
+            band = max(0, int(mid_height_band_px))
+            y0 = max(0, mid_row - band)
+            y1 = min(int(plasma.shape[0]), mid_row + band + 1)
+            selector = plasma[y0:y1]
+            vals = target[y0:y1][selector]
+            return vals, {
+                "uniformity_region": region_label,
+                "uniformity_mid_height_row": float(mid_row),
+                "uniformity_mean_height_row": float(target_mid),
+                "uniformity_sample_count": float(vals.size),
+            }
+        if region_norm == "plasma":
+            vals = target[plasma]
+            return vals, {"uniformity_region": "plasma", "uniformity_sample_count": float(vals.size)}
+        if wafer_mask is not None and region_norm in {"auto", "wafer"}:
+            wafer = np.asarray(wafer_mask, dtype=np.float32) > 0.5
+            vals = target[wafer]
+            return vals, {"uniformity_region": "wafer", "uniformity_sample_count": float(vals.size)}
+        vals = target[plasma]
+        return vals, {"uniformity_region": "plasma", "uniformity_sample_count": float(vals.size)}
+
+    @staticmethod
+    def _cv_over_density_gain_score(
+        vals: np.ndarray,
+        *,
+        relative_uniformity: float,
+        mean_density: float,
+        density_ref: float,
+    ) -> tuple[float, dict[str, float]]:
+        ref = max(abs(float(density_ref)), 1e-12)
+        vals64 = np.asarray(vals, dtype=np.float64).reshape(-1)
+        positive_mean = max(float(mean_density), 0.0)
+        density_gain = float(np.clip(positive_mean / ref, 0.2, 1.5))
+        negative_penalty = float(np.mean(np.maximum(-vals64, 0.0) ** 2) / (ref * ref)) if vals64.size else 0.0
+        low_density_gap = max(0.5 * ref - positive_mean, 0.0) / ref
+        low_density_penalty = float(low_density_gap * low_density_gap)
+        score = (
+            float(relative_uniformity) / (density_gain**0.5)
+            + 10.0 * negative_penalty
+            + 2.0 * low_density_penalty
+        )
+        return score, {
+            "uniformity_density_ref": ref,
+            "uniformity_density_gain": density_gain,
+            "uniformity_negative_penalty": negative_penalty,
+            "uniformity_low_density_penalty": low_density_penalty,
+        }
 
     @staticmethod
     def _resolve_symbol_key(
@@ -711,7 +795,7 @@ class InferenceEngine:
                     rows = self._transform_coord_features(rows, channels)
                     return rows
 
-        if require_pack == "error":
+        if require_pack == "error" and not bool(getattr(self.geometry_provider, "supports_geom_param", False)):
             raise ValueError("input-feature contract requires preprocess feature_pack, but pack is missing")
         coord_xy = self._coord_xy_from_geom(geom)
         distance_any = np.asarray(geom.distance_any, dtype=np.float32).reshape(-1)
@@ -741,6 +825,25 @@ class InferenceEngine:
             "normal_y": normal_y,
             "curvature_proxy": curvature_proxy,
         }
+        regions = dict(getattr(geom, "regions", {}) or {})
+        solid_union = regions.get("solid_union_mask")
+        if solid_union is not None:
+            mask_coil = (np.asarray(solid_union, dtype=np.float32) > 0.5).astype(np.float32)
+            distance_coil = distance_to_mask(mask_coil).astype(np.float32)
+            coil_tau = float(
+                dict(self.coord_distance_transform_stats or {}).get(
+                    "coil_proximity_tau",
+                    dict(self.coord_distance_transform_stats or {}).get("proximity_tau_auto", max(h, w)),
+                )
+            )
+            coil_tau = max(coil_tau, 1.0e-3)
+            mapping["mask_coil"] = mask_coil.reshape(-1).astype(np.float32)
+            mapping["distance_coil"] = distance_coil.reshape(-1).astype(np.float32)
+            mapping["coil_proximity"] = np.exp(-np.maximum(distance_coil, 0.0) / coil_tau).reshape(-1).astype(np.float32)
+        part_stack = regions.get("part_mask_stack")
+        if part_stack is not None:
+            for name, arr in part_sdf_maps_from_stack(np.asarray(part_stack, dtype=np.float32)).items():
+                mapping[name] = np.asarray(arr, dtype=np.float32).reshape(-1)
         rows = np.stack([np.asarray(mapping[name], dtype=np.float32) for name in channels], axis=1).astype(np.float32)
         if (not has_coord_feature_scaler) and {"x", "y"}.issubset(set(channels)):
             idx_x = channels.index("x")
@@ -814,7 +917,7 @@ class InferenceEngine:
                     rows = self._apply_distance_transform(rows, channels, distance_transform_cfg)
                     rows = self._transform_coord_features(rows, channels)
                     return rows
-        if require_pack == "error":
+        if require_pack == "error" and not bool(getattr(self.geometry_provider, "supports_geom_param", False)):
             raise ValueError("unet input-feature contract requires preprocess coord_feature_pack, but pack is missing")
         return self._build_coord_feature_rows(geom, channels)
 
@@ -1090,12 +1193,39 @@ class InferenceEngine:
         if qoi_target is None:
             qoi = {"uniformity": 0.0}
         else:
-            if wafer is not None:
-                vals = qoi_target[wafer > 0.5]
+            vals, uniformity_meta = self._uniformity_values_for_region(
+                qoi_target,
+                mask_plasma=geom_ctx.mask_plasma,
+                wafer_mask=wafer,
+                region=str(self.ood_cfg.get("uniformity_region", "auto")),
+                mid_height_band_px=int(self.ood_cfg.get("mid_height_band_px", 0)),
+            )
+            relative_uniformity = uniformity(vals)
+            vals64 = np.asarray(vals, dtype=np.float64).reshape(-1)
+            mean_density = float(np.mean(vals64)) if vals64.size > 0 and np.all(np.isfinite(vals64)) else float("nan")
+            score_mode = str(self.ood_cfg.get("uniformity_score_mode", "relative")).strip().lower()
+            if score_mode in {"relative", "cv"}:
+                score = float(relative_uniformity)
+            elif score_mode == "cv_over_density_gain":
+                density_ref = float(self.ood_cfg.get("uniformity_density_ref", abs(mean_density)))
+                score, density_score_meta = self._cv_over_density_gain_score(
+                    vals64,
+                    relative_uniformity=relative_uniformity,
+                    mean_density=mean_density,
+                    density_ref=density_ref,
+                )
             else:
-                vals = qoi_target[geom_ctx.mask_plasma > 0.5]
-            qoi = {"uniformity": uniformity(vals)}
+                raise ValueError(
+                    "ood.uniformity_score_mode must be one of: relative, cv_over_density_gain"
+                )
+            qoi = {"uniformity": score}
+            qoi["uniformity_relative"] = float(relative_uniformity)
+            qoi["uniformity_mean_density"] = mean_density
+            qoi["uniformity_score_mode"] = score_mode
+            if score_mode == "cv_over_density_gain":
+                qoi.update(density_score_meta)
             qoi["uniformity_target"] = str(qoi_target_key)
+            qoi.update(uniformity_meta)
         bo_cfg = self.ood_cfg.get("boundary_operator", {})
         delta_edge = float(bo_cfg.get("delta_edge", 1.5))
         wafer_only = bool(bo_cfg.get("wafer_only", False))

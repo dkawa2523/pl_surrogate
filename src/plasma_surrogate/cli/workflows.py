@@ -566,6 +566,8 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
             coord_scaler=dict(bundle.transforms.get("coord_scaler", {})),
             coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
             coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
+            static_spatial_feature_pack=bundle.schemas.get("static_spatial_feature_pack"),
+            case_structure_feature_pack=bundle.schemas.get("case_structure_feature_pack"),
             coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
             structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
             latent_feature_pack=bundle.schemas.get("latent_feature_pack"),

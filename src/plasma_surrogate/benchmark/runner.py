@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import csv
+import gc
 import itertools
 import json
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ from plasma_surrogate.core.physics_contract import build_physics_cfg
 from plasma_surrogate.eval.metrics import r2_masked, rmse_masked
 from plasma_surrogate.eval.metrics_builder import (
     build_benchmark_eval_row,
+    build_spatial_distribution_by_case_rows,
+    build_spatial_distribution_summary_rows,
     build_spatial_error_by_case_rows,
     build_spatial_error_summary_rows,
 )
@@ -124,10 +127,22 @@ _UNET_CONTRACT_OPTIONAL_SCOPES: set[str] = {
 }
 
 
+def _release_torch_cuda_cache() -> None:
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        return
+
+
 def _inject_input_mode_metadata_into_row(
     *,
     row: dict[str, Any],
     input_mode_meta: dict[str, Any],
+    case_spatial_pack_used: bool = False,
 ) -> None:
     missing = [key for key in input_mode_metadata_keys() if key not in input_mode_meta]
     if missing:
@@ -137,6 +152,16 @@ def _inject_input_mode_metadata_into_row(
         )
     for key in input_mode_metadata_keys():
         row[key] = input_mode_meta[key]
+    input_mode = str(input_mode_meta.get("input_mode_effective", "")).strip().lower()
+    provider_mode = str(input_mode_meta.get("geometry_provider_mode_effective", "fixed")).strip().lower()
+    if input_mode == "table_only":
+        structure_kind = "none"
+    elif provider_mode == "parametric_parts" or bool(case_spatial_pack_used):
+        structure_kind = "case_varying_geometry"
+    else:
+        structure_kind = "static_grid_features"
+    row["structure_input_kind_effective"] = structure_kind
+    row["has_case_varying_structure_inputs_effective"] = bool(structure_kind == "case_varying_geometry")
 
 
 def _primary_metric_value(row: dict[str, Any], *, primary_metric: str, model_name: str) -> float:
@@ -155,6 +180,54 @@ def _primary_metric_value(row: dict[str, Any], *, primary_metric: str, model_nam
             f"benchmark.eval.primary_metric={primary_metric!r} for model {model_name!r} must be numeric; "
             f"got {row[primary_metric]!r}"
         ) from exc
+
+
+def _target_metric_validity(row: dict[str, Any], *, target_vars: list[str]) -> tuple[bool, list[str]]:
+    invalid: list[str] = []
+    for var_name in [str(v) for v in target_vars]:
+        rmse_key = f"test_rmse_{var_name}_plasma" if f"test_rmse_{var_name}_plasma" in row else f"test_rmse_{var_name}"
+        r2_key = f"test_r2_{var_name}_plasma" if f"test_r2_{var_name}_plasma" in row else f"test_r2_{var_name}"
+        missing = [key for key in [rmse_key, r2_key] if key not in row]
+        if missing:
+            invalid.append(f"{var_name}:missing")
+            continue
+        try:
+            rmse_val = float(row[rmse_key])
+            r2_val = float(row[r2_key])
+        except (TypeError, ValueError):
+            invalid.append(str(var_name))
+            continue
+        nonfinite_count = float(row.get(f"test_nonfinite_count_{var_name}_plasma", 0.0) or 0.0)
+        if nonfinite_count > 0.0 or not np.isfinite(rmse_val) or not np.isfinite(r2_val):
+            invalid.append(str(var_name))
+    return len(invalid) == 0, invalid
+
+
+def _attach_primary_metric_status(
+    row: dict[str, Any],
+    *,
+    primary_metric: str,
+    model_name: str,
+    target_vars: list[str],
+) -> None:
+    row["primary_metric"] = primary_metric
+    if primary_metric not in row:
+        row["primary_metric_value"] = float("nan")
+    else:
+        row["primary_metric_value"] = _primary_metric_value(
+            row,
+            primary_metric=primary_metric,
+            model_name=model_name,
+        )
+    target_valid, invalid_vars = _target_metric_validity(row, target_vars=target_vars)
+    row["target_metrics_valid"] = bool(target_valid and bool(row.get("target_metrics_valid", True)))
+    row["target_metrics_invalid_vars"] = "|".join(
+        sorted(set([*invalid_vars, *str(row.get("target_metrics_invalid_vars", "")).split("|")]) - {""})
+    )
+    protocol_reliable = bool(row.get("primary_metric_protocol_reliable", row.get("eval_protocol_reliable", True)))
+    row["primary_metric_reliable"] = bool(
+        np.isfinite(float(row["primary_metric_value"])) and row["target_metrics_valid"] and protocol_reliable
+    )
 
 
 def _build_benchmark_inference_engine(
@@ -271,8 +344,8 @@ class BenchmarkRunner:
         resolved.update(self.input_mode_meta)
         eval_protocol_cfg = dict(self.benchmark_cfg.get("eval_protocol", {}))
         eval_protocol_mode = str(eval_protocol_cfg.get("mode", "single")).strip().lower()
-        if eval_protocol_mode not in {"single", "dual_axis"}:
-            raise ValueError("benchmark.eval_protocol.mode must be one of: single, dual_axis")
+        if eval_protocol_mode not in {"single", "primary_axis", "dual_axis"}:
+            raise ValueError("benchmark.eval_protocol.mode must be one of: single, primary_axis, dual_axis")
         eval_protocol_scope = str(eval_protocol_cfg.get("scope", "common")).strip().lower()
         if eval_protocol_scope not in set(_EVAL_PROTOCOL_SCOPES):
             raise ValueError(
@@ -297,8 +370,15 @@ class BenchmarkRunner:
         if interp_mode not in {"marginal", "overlap"}:
             raise ValueError("benchmark.eval.interp_mode must be one of: marginal, overlap")
         primary_split = str(eval_protocol_cfg.get("primary_split", "interp")).strip().lower()
-        if primary_split not in {"interp", "extrap"}:
-            raise ValueError("benchmark.eval_protocol.primary_split must be one of: interp, extrap")
+        if primary_split not in {"interp", "extrap", "structure_holdout"}:
+            raise ValueError(
+                "benchmark.eval_protocol.primary_split must be one of: interp, extrap, structure_holdout"
+            )
+        if eval_protocol_mode == "dual_axis" and primary_split == "structure_holdout":
+            raise ValueError(
+                "benchmark.eval_protocol.primary_split=structure_holdout requires "
+                "benchmark.eval_protocol.mode=primary_axis"
+            )
         interp_weight = float(eval_protocol_cfg.get("interp_weight", 0.5))
         extrap_weight = float(eval_protocol_cfg.get("extrap_weight", 0.5))
         resolved["eval_protocol"] = {
@@ -384,7 +464,12 @@ class BenchmarkRunner:
         resolved["density_contract_version_effective"] = "v2" if ("ne" in y_vars or "ni" in y_vars) else "v1"
         resolved["density_keys_effective"] = [k for k in ["ne", "ni"] if k in set(y_vars)]
         resolved["density_output_vars_effective"] = [v for v in [density_ne_key, density_ni_key] if v is not None]
-        default_primary_metric = "score_total_dual" if eval_protocol_mode == "dual_axis" else "score_total"
+        if eval_protocol_mode == "dual_axis":
+            default_primary_metric = "score_total_dual"
+        elif eval_protocol_mode == "primary_axis":
+            default_primary_metric = f"score_total_{primary_split}"
+        else:
+            default_primary_metric = "score_total"
         primary_metric = str(eval_cfg.get("primary_metric", default_primary_metric)).strip()
         if primary_metric == "":
             raise ValueError("benchmark.eval.primary_metric must be a non-empty string")
@@ -433,6 +518,15 @@ class BenchmarkRunner:
             self.output_root / "preprocessing" / "split" / "split_extrap_v1.json",
             fallback=context.split,
         )
+        split_structure_holdout = self._load_split_json(
+            self.output_root / "preprocessing" / "split" / "split_structure_holdout_v1.json",
+            fallback=context.split,
+        )
+        split_by_name = {
+            "interp": split_interp,
+            "extrap": split_extrap,
+            "structure_holdout": split_structure_holdout,
+        }
         cond_tuple_by_case = {
             str(c["case_id"]): tuple(float(c["cond"][k]) for k in cond_order)
             for c in context.dataset.cases
@@ -440,8 +534,10 @@ class BenchmarkRunner:
         resolved["tuple_overlap_ratio"] = {
             "interp": self._tuple_overlap_ratio(split_interp, cond_tuple_by_case),
             "extrap": self._tuple_overlap_ratio(split_extrap, cond_tuple_by_case),
+            "structure_holdout": self._tuple_overlap_ratio(split_structure_holdout, cond_tuple_by_case),
         }
         test_holdout_ratio = float(len(split_extrap.get("test", [])) / float(max(n_cases, 1)))
+        structure_holdout_ratio = float(len(split_structure_holdout.get("test", [])) / float(max(n_cases, 1)))
         strict_input_mode, allow_mode_fallback = self.strict_input_mode, self.allow_mode_fallback
         interp_overlap_ratio = float(resolved["tuple_overlap_ratio"]["interp"])
         extrapolation_severity = float(np.clip((1.0 - interp_overlap_ratio) * 0.7 + test_holdout_ratio * 0.3, 0.0, 1.0))
@@ -451,6 +547,7 @@ class BenchmarkRunner:
             "tuple_overlap_extrap": float(resolved["tuple_overlap_ratio"]["extrap"]),
             "holdout_ratio": test_holdout_ratio,
         }
+        resolved["eval_protocol"]["structure_holdout_test_ratio"] = structure_holdout_ratio
         resolved["eval_protocol"]["interp_mode_effective"] = str(interp_overlap_status.get("applied_mode", interp_mode))
         resolved["interp_overlap_status"] = interp_overlap_status
         self._persist_resolved(split=context.split, resolved=resolved)
@@ -617,6 +714,9 @@ class BenchmarkRunner:
                     deeponet_boundary_meta=deeponet_boundary_meta,
                     coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
                     coord_feature_pack=coord_feature_pack,
+                    case_spatial_feature_pack=context.case_spatial_feature_pack,
+                    static_spatial_feature_pack=context.static_spatial_feature_pack,
+                    case_structure_feature_pack=context.case_structure_feature_pack,
                     coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
                     structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
                     latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
@@ -644,7 +744,10 @@ class BenchmarkRunner:
             single_diagnostics: dict[str, Any] = {"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0}
             best_uniformity = 0.0
             batch_rows: list[dict[str, Any]] = []
-            if has_phi:
+            case_spatial_inference_skip = bool(
+                context.case_spatial_feature_pack or context.case_structure_feature_pack
+            )
+            if has_phi and not case_spatial_inference_skip:
                 viz.plot_parity(true_eval["phi"].reshape(-1), pred_eval["phi"].reshape(-1), rel_path="plots/parity_phi.png")
                 viz.plot_field_triplet(true_eval["phi"][0, 0], pred_eval["phi"][0, 0], rel_path="plots/phi_triplet.png")
 
@@ -754,7 +857,13 @@ class BenchmarkRunner:
             _inject_input_mode_metadata_into_row(
                 row=row,
                 input_mode_meta=effective_input_mode_meta,
+                case_spatial_pack_used=bool(context.case_spatial_feature_pack or context.case_structure_feature_pack),
             )
+            row["scaler_fit_split"] = str(preprocess_report.get("scaler_fit_split", "unknown"))
+            density_value_transform = dict(preprocess_report.get("density_value_transform_effective", {}))
+            if density_value_transform:
+                row["density_transform_ne"] = str(density_value_transform.get("ne", ""))
+                row["density_transform_ni"] = str(density_value_transform.get("ni", ""))
             spatial_audit_cfg = dict(self.benchmark_cfg.get("eval", {}).get("spatial_error_audit", {}))
             boundary_type_breakdown = bool(spatial_audit_cfg.get("boundary_type_breakdown", False))
             pred_spatial = dict(pred_eval)
@@ -769,6 +878,10 @@ class BenchmarkRunner:
             spatial_vars = [v for v in target_vars_for_score_effective if v in set(spatial_common_keys)]
             if not spatial_vars:
                 spatial_vars = list(spatial_common_keys)
+            eval_case_ids = [
+                str(context.dataset.cases[int(i)].get("case_id", int(i)))
+                for i in np.asarray(te_idx, dtype=np.int64).tolist()
+            ]
             spatial_rows = build_spatial_error_summary_rows(
                 pred_eval=pred_spatial,
                 true_eval=true_spatial,
@@ -815,10 +928,7 @@ class BenchmarkRunner:
                 ),
                 boundary_type_breakdown=boundary_type_breakdown,
                 vars_for_summary=[v for v in spatial_vars if v in set(true_spatial.keys())],
-                case_ids=[
-                    str(context.dataset.cases[int(i)].get("case_id", int(i)))
-                    for i in np.asarray(te_idx, dtype=np.int64).tolist()
-                ],
+                case_ids=eval_case_ids,
                 region_band_cfg=region_bands_effective,
             )
             if spatial_case_rows:
@@ -839,18 +949,102 @@ class BenchmarkRunner:
                         for r in spatial_case_rows
                     ],
             )
-            row["protocol_variant"] = protocol_variant if protocol_variant else "default"
-            row["primary_metric"] = primary_metric
-            if eval_protocol_mode == "dual_axis" and primary_metric not in row:
-                row["primary_metric_value"] = float("nan")
-            else:
-                row["primary_metric_value"] = _primary_metric_value(
-                    row,
-                    primary_metric=primary_metric,
-                    model_name=model_name,
+            distribution_cfg = dict(self.benchmark_cfg.get("eval", {}).get("spatial_distribution_audit", {}))
+            if bool(distribution_cfg.get("enabled", True)):
+                raw_distribution_vars = distribution_cfg.get("vars", "density")
+                density_vars = [v for v in ["ne", "ni"] if v in set(true_spatial.keys()) and v in set(pred_spatial.keys())]
+                if isinstance(raw_distribution_vars, list):
+                    distribution_vars = [
+                        str(v)
+                        for v in raw_distribution_vars
+                        if str(v) in set(true_spatial.keys()) and str(v) in set(pred_spatial.keys())
+                    ]
+                elif str(raw_distribution_vars).strip().lower() == "all":
+                    distribution_vars = [v for v in spatial_vars if v in set(true_spatial.keys()) and v in set(pred_spatial.keys())]
+                else:
+                    distribution_vars = density_vars or [
+                        v for v in spatial_vars if v in set(true_spatial.keys()) and v in set(pred_spatial.keys())
+                    ]
+                distribution_case_rows = build_spatial_distribution_by_case_rows(
+                    pred_eval=pred_spatial,
+                    true_eval=true_spatial,
+                    mask_plasma=metric_mask,
+                    vars_for_summary=distribution_vars,
+                    case_ids=eval_case_ids,
+                    top_fraction=float(distribution_cfg.get("top_fraction", 0.10)),
                 )
+                distribution_summary_rows = build_spatial_distribution_summary_rows(distribution_case_rows)
+                if distribution_case_rows:
+                    header = list(distribution_case_rows[0].keys())
+                    ArtifactStore(model_dir / "eval").save_csv(
+                        "spatial_distribution_by_case.csv",
+                        header,
+                        [[r.get(key, "") for key in header] for r in distribution_case_rows],
+                    )
+                if distribution_summary_rows:
+                    header = list(distribution_summary_rows[0].keys())
+                    ArtifactStore(model_dir / "eval").save_csv(
+                        "spatial_distribution_summary.csv",
+                        header,
+                        [[r.get(key, "") for key in header] for r in distribution_summary_rows],
+                    )
+                    for summary_row in distribution_summary_rows:
+                        var_name = str(summary_row.get("var", ""))
+                        if not var_name:
+                            continue
+                        for metric_name in [
+                            "integral_rel_error_mean",
+                            "p99_rel_error_mean",
+                            "center_of_mass_error_px_mean",
+                            "peak_location_error_px_mean",
+                            "distribution_error_score_mean",
+                        ]:
+                            row[f"dist_{var_name}_{metric_name}"] = float(
+                                summary_row.get(metric_name, float("nan"))
+                            )
+                plot_worst_cases = int(distribution_cfg.get("plot_worst_cases", 0))
+                if plot_worst_cases > 0 and distribution_case_rows:
+                    worst_rows = sorted(
+                        [
+                            r
+                            for r in distribution_case_rows
+                            if np.isfinite(float(r.get("distribution_error_score", float("nan"))))
+                        ],
+                        key=lambda r: float(r.get("distribution_error_score", float("nan"))),
+                        reverse=True,
+                    )[:plot_worst_cases]
+                    for worst in worst_rows:
+                        var_name = str(worst.get("var", ""))
+                        case_idx = int(float(worst.get("case_index", 0.0)))
+                        if var_name not in true_spatial or var_name not in pred_spatial:
+                            continue
+                        true_arr = np.asarray(true_spatial[var_name], dtype=np.float32)
+                        pred_arr = np.asarray(pred_spatial[var_name], dtype=np.float32)
+                        if true_arr.ndim == 4:
+                            true_field = true_arr[case_idx, 0]
+                            pred_field = pred_arr[case_idx, 0]
+                        elif true_arr.ndim == 3:
+                            true_field = true_arr[case_idx]
+                            pred_field = pred_arr[case_idx]
+                        else:
+                            continue
+                        case_token = "".join(
+                            ch if ch.isalnum() or ch in {"-", "_"} else "_"
+                            for ch in str(worst.get("case_id", case_idx))
+                        )[:80]
+                        viz.plot_field_triplet(
+                            true_field,
+                            pred_field,
+                            rel_path=f"plots/spatial_distribution_worst_{var_name}_{case_token}.png",
+                        )
+            row["protocol_variant"] = protocol_variant if protocol_variant else "default"
+            _attach_primary_metric_status(
+                row,
+                primary_metric=primary_metric,
+                model_name=model_name,
+                target_vars=target_vars_for_score_effective,
+            )
             return {
-                "model_obj": model,
                 "row": row,
                 "effective_steps": int(extra_artifacts.get("effective_steps", max(len(history), 0))),
                 "unet_contract_effective": dict(extra_artifacts.get("unet_contract_effective", {})),
@@ -873,6 +1067,69 @@ class BenchmarkRunner:
                     te_idx=te,
                 )
                 leaderboard.append(out["row"])
+                effective_steps_per_model[model_name] = int(out.get("effective_steps", 0))
+                if out.get("unet_contract_effective"):
+                    unet_contract_samples.append(dict(out["unet_contract_effective"]))
+                if out.get("fno_contract_effective"):
+                    fno_contract_samples.append(dict(out["fno_contract_effective"]))
+                if out.get("ffno_contract_effective"):
+                    ffno_contract_samples.append(dict(out["ffno_contract_effective"]))
+                if out.get("coord_mlp_contract_effective"):
+                    coord_mlp_contract_samples.append(dict(out["coord_mlp_contract_effective"]))
+                if out.get("deeponet_contract_effective"):
+                    deeponet_contract_samples.append(dict(out["deeponet_contract_effective"]))
+                if out.get("deeponet_pod_contract_effective"):
+                    deeponet_pod_contract_samples.append(dict(out["deeponet_pod_contract_effective"]))
+            elif eval_protocol_mode == "primary_axis":
+                split_def = split_by_name[primary_split]
+                tr_i, va_i, te_i = self._indices_from_split(split_def, case_id_to_idx)
+                split_offset = {"interp": 1, "extrap": 2, "structure_holdout": 3}[primary_split]
+                out = _run_single_split_model(
+                    model_name=model_name,
+                    model_idx=(model_idx * 10 + split_offset),
+                    model_dir=model_dir / "eval_protocol" / primary_split,
+                    tr_idx=tr_i,
+                    va_idx=va_i,
+                    te_idx=te_i,
+                )
+                row = dict(out["row"])
+                for var_name in target_vars_for_score_effective:
+                    row[f"test_r2_{var_name}_plasma_{primary_split}"] = float(
+                        row.get(f"test_r2_{var_name}_plasma", 0.0)
+                    )
+                row[f"score_total_{primary_split}"] = float(row.get("score_total", 0.0))
+                row[f"score_nrmse_plasma_mean_{primary_split}"] = float(
+                    row.get("score_nrmse_plasma_mean", float("nan"))
+                )
+                r2_mean, r2_valid, r2_invalid = self._r2_plasma_mean_status(
+                    row,
+                    target_vars=target_vars_for_score_effective,
+                )
+                row[f"test_r2_plasma_mean_{primary_split}"] = float(r2_mean)
+                row["primary_axis_split"] = primary_split
+                row["interp_test_cases"] = float(len(split_interp.get("test", [])))
+                row["extrap_test_cases"] = float(len(split_extrap.get("test", [])))
+                row["structure_holdout_test_cases"] = float(len(split_structure_holdout.get("test", [])))
+                row["interp_overlap_fallback_applied"] = bool(interp_overlap_status.get("fallback_applied", False))
+                row["interp_mode_effective"] = str(interp_overlap_status.get("applied_mode", interp_mode))
+                protocol_issues: list[str] = []
+                if primary_split == "interp" and bool(interp_overlap_status.get("fallback_applied", False)):
+                    protocol_issues.append(
+                        f"interp_overlap_fallback:{interp_overlap_status.get('reason', 'unknown')}"
+                    )
+                if not bool(r2_valid):
+                    protocol_issues.append(f"r2_invalid:{','.join(r2_invalid)}")
+                row["eval_protocol_issue"] = "|".join(protocol_issues)
+                row["eval_protocol_reliable"] = bool(len(protocol_issues) == 0)
+                row["primary_metric_protocol_reliable"] = bool(len(protocol_issues) == 0)
+                row["protocol_variant"] = protocol_variant if protocol_variant else "default"
+                _attach_primary_metric_status(
+                    row,
+                    primary_metric=primary_metric,
+                    model_name=model_name,
+                    target_vars=target_vars_for_score_effective,
+                )
+                leaderboard.append(row)
                 effective_steps_per_model[model_name] = int(out.get("effective_steps", 0))
                 if out.get("unet_contract_effective"):
                     unet_contract_samples.append(dict(out["unet_contract_effective"]))
@@ -913,6 +1170,7 @@ class BenchmarkRunner:
                         deeponet_contract_samples.append(dict(split_out["deeponet_contract_effective"]))
                     if split_out.get("deeponet_pod_contract_effective"):
                         deeponet_pod_contract_samples.append(dict(split_out["deeponet_pod_contract_effective"]))
+                    _release_torch_cuda_cache()
                 row = dict(split_rows[primary_split])
                 for var_name in target_vars_for_score_effective:
                     row[f"test_r2_{var_name}_plasma_interp"] = float(
@@ -930,20 +1188,55 @@ class BenchmarkRunner:
                 row["score_total_dual"] = float(
                     interp_weight * row["score_total_interp"] + extrap_weight * row["score_total_extrap"]
                 )
-                row["test_r2_plasma_mean_interp"] = float(
-                    self._r2_plasma_mean(split_rows["interp"], target_vars=target_vars_for_score_effective)
+                row["score_nrmse_plasma_mean_interp"] = float(
+                    split_rows["interp"].get("score_nrmse_plasma_mean", float("nan"))
                 )
-                row["test_r2_plasma_mean_extrap"] = float(
-                    self._r2_plasma_mean(split_rows["extrap"], target_vars=target_vars_for_score_effective)
+                row["score_nrmse_plasma_mean_extrap"] = float(
+                    split_rows["extrap"].get("score_nrmse_plasma_mean", float("nan"))
                 )
+                row["score_nrmse_plasma_mean_dual"] = float(
+                    interp_weight * row["score_nrmse_plasma_mean_interp"]
+                    + extrap_weight * row["score_nrmse_plasma_mean_extrap"]
+                )
+                interp_r2_mean, interp_r2_valid, interp_r2_invalid = self._r2_plasma_mean_status(
+                    split_rows["interp"],
+                    target_vars=target_vars_for_score_effective,
+                )
+                extrap_r2_mean, extrap_r2_valid, extrap_r2_invalid = self._r2_plasma_mean_status(
+                    split_rows["extrap"],
+                    target_vars=target_vars_for_score_effective,
+                )
+                row["test_r2_plasma_mean_interp"] = float(interp_r2_mean)
+                row["test_r2_plasma_mean_extrap"] = float(extrap_r2_mean)
                 row["test_r2_plasma_mean_dual"] = float(
                     interp_weight * row["test_r2_plasma_mean_interp"] + extrap_weight * row["test_r2_plasma_mean_extrap"]
                 )
-                row["primary_metric"] = primary_metric
-                row["primary_metric_value"] = _primary_metric_value(
+                row["test_r2_plasma_mean_invalid_vars"] = "|".join(
+                    sorted(set([*interp_r2_invalid, *extrap_r2_invalid]))
+                )
+                interp_test_cases = int(len(split_interp.get("test", [])))
+                extrap_test_cases = int(len(split_extrap.get("test", [])))
+                protocol_issues: list[str] = []
+                if bool(interp_overlap_status.get("fallback_applied", False)):
+                    protocol_issues.append(
+                        f"interp_overlap_fallback:{interp_overlap_status.get('reason', 'unknown')}"
+                    )
+                if interp_test_cases < 3:
+                    protocol_issues.append(f"interp_test_too_small:{interp_test_cases}")
+                row["interp_test_cases"] = float(interp_test_cases)
+                row["extrap_test_cases"] = float(extrap_test_cases)
+                row["interp_overlap_fallback_applied"] = bool(interp_overlap_status.get("fallback_applied", False))
+                row["interp_mode_effective"] = str(interp_overlap_status.get("applied_mode", interp_mode))
+                row["eval_protocol_issue"] = "|".join(protocol_issues)
+                row["eval_protocol_reliable"] = bool(len(protocol_issues) == 0)
+                primary_metric_lower = str(primary_metric).strip().lower()
+                primary_uses_interp = ("interp" in primary_metric_lower) or ("dual" in primary_metric_lower)
+                row["primary_metric_protocol_reliable"] = bool((not primary_uses_interp) or len(protocol_issues) == 0)
+                _attach_primary_metric_status(
                     row,
                     primary_metric=primary_metric,
                     model_name=model_name,
+                    target_vars=target_vars_for_score_effective,
                 )
                 leaderboard.append(row)
                 effective_steps_per_model[model_name] = {
@@ -1008,6 +1301,9 @@ class BenchmarkRunner:
                             deeponet_boundary_meta=deeponet_boundary_meta,
                             coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
                             coord_feature_pack=coord_feature_pack,
+                            case_spatial_feature_pack=context.case_spatial_feature_pack,
+                            static_spatial_feature_pack=context.static_spatial_feature_pack,
+                            case_structure_feature_pack=context.case_structure_feature_pack,
                             coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
                             structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
                             latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
@@ -1091,17 +1387,31 @@ class BenchmarkRunner:
                 "single_boundary_residual_map_l2",
                 "opt_best_uniformity",
                 "score_rmse_plasma_mean",
+                "score_nrmse_plasma_mean",
                 "score_r2_plasma_mean",
                 "score_boundary_penalty",
                 "score_total",
+                "score_nrmse_plasma_mean_interp",
+                "score_nrmse_plasma_mean_extrap",
+                "score_nrmse_plasma_mean_dual",
                 "score_total_interp",
                 "score_total_extrap",
                 "score_total_dual",
                 "test_r2_plasma_mean_interp",
                 "test_r2_plasma_mean_extrap",
                 "test_r2_plasma_mean_dual",
+                "interp_test_cases",
+                "extrap_test_cases",
+                "interp_overlap_fallback_applied",
+                "interp_mode_effective",
+                "eval_protocol_reliable",
+                "eval_protocol_issue",
+                "primary_metric_protocol_reliable",
                 "primary_metric",
                 "primary_metric_value",
+                "target_metrics_valid",
+                "target_metrics_invalid_vars",
+                "primary_metric_reliable",
             ]
         )
         extra_keys = sorted({k for row in leaderboard for k in row.keys() if k not in header})
@@ -1466,6 +1776,15 @@ class BenchmarkRunner:
 
     @staticmethod
     def _r2_plasma_mean(row: dict[str, Any], *, target_vars: list[str] | None = None) -> float:
+        value, _, _ = BenchmarkRunner._r2_plasma_mean_status(row, target_vars=target_vars)
+        return float(value)
+
+    @staticmethod
+    def _r2_plasma_mean_status(
+        row: dict[str, Any],
+        *,
+        target_vars: list[str] | None = None,
+    ) -> tuple[float, bool, list[str]]:
         vars_effective = [str(v) for v in (target_vars or [])]
         keys = [f"test_r2_{name}_plasma" for name in vars_effective]
         if not keys:
@@ -1474,10 +1793,24 @@ class BenchmarkRunner:
                 for k in sorted(row.keys())
                 if k.startswith("test_r2_") and k.endswith("_plasma") and "_interp" not in k and "_extrap" not in k
             ]
-        vals = [float(row[k]) for k in keys if k in row and np.isfinite(float(row[k]))]
+        missing = [key.replace("test_r2_", "").replace("_plasma", "") for key in keys if key not in row]
+        vals: list[float] = []
+        nonfinite: list[str] = []
+        for key in keys:
+            if key not in row:
+                continue
+            name = key.replace("test_r2_", "").replace("_plasma", "")
+            val = float(row[key])
+            if not np.isfinite(val):
+                nonfinite.append(name)
+                continue
+            vals.append(val)
+        invalid = [*missing, *nonfinite]
+        if invalid or len(vals) != len(keys):
+            return float("nan"), False, invalid
         if len(vals) == 0:
-            return 0.0
-        return float(np.mean(np.asarray(vals, dtype=np.float64)))
+            return float("nan"), False, []
+        return float(np.mean(np.asarray(vals, dtype=np.float64))), True, []
 
     def _persist_resolved(self, *, split: dict[str, Any], resolved: dict[str, Any], include_manifest: bool = False) -> None:
         if include_manifest:

@@ -51,6 +51,9 @@ class BenchmarkModelContext:
     deeponet_boundary_meta: dict[str, Any]
     coord_feature_scaler: dict[str, Any] | None = None
     coord_feature_pack: dict[str, Any] | None = None
+    case_spatial_feature_pack: dict[str, Any] | None = None
+    static_spatial_feature_pack: dict[str, Any] | None = None
+    case_structure_feature_pack: dict[str, Any] | None = None
     coord_distance_transform_stats: dict[str, Any] | None = None
     structure_descriptor_pack: dict[str, Any] | None = None
     latent_feature_pack: dict[str, Any] | None = None
@@ -114,6 +117,9 @@ def run_model_train_eval(ctx: BenchmarkModelContext) -> dict[str, Any]:
             supervised_distance=ctx.supervised_distance,
             coord_feature_scaler=dict(ctx.coord_feature_scaler or {}),
             coord_feature_pack=ctx.coord_feature_pack,
+            case_spatial_feature_pack=ctx.case_spatial_feature_pack,
+            static_spatial_feature_pack=ctx.static_spatial_feature_pack,
+            case_structure_feature_pack=ctx.case_structure_feature_pack,
             coord_distance_transform_stats=dict(ctx.coord_distance_transform_stats or {}),
             structure_descriptor_pack=ctx.structure_descriptor_pack,
             latent_feature_pack=ctx.latent_feature_pack,

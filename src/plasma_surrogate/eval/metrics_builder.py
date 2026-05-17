@@ -10,7 +10,14 @@ import numpy as np
 
 from plasma_surrogate.core.density_contract import resolve_density_key
 from plasma_surrogate.core.spatial_regions import build_boundary_type_masks, build_region_masks
-from plasma_surrogate.eval.metrics import poisson_residual_norm, r2_by_var, r2_masked, rmse_by_var, rmse_masked
+from plasma_surrogate.eval.metrics import (
+    finite_pair_stats,
+    poisson_residual_norm,
+    r2_by_var,
+    r2_masked,
+    rmse_by_var,
+    rmse_masked,
+)
 from plasma_surrogate.train.losses import poisson_residual_loss
 
 
@@ -80,6 +87,36 @@ def _safe_diff(left: float | None, right: float | None) -> float:
     if not np.isfinite(left_f) or not np.isfinite(right_f):
         return float("nan")
     return float(left_f - right_f)
+
+
+def _finite_mean(values: list[float], *, default: float = float("nan")) -> float:
+    arr = np.asarray([float(v) for v in values if np.isfinite(float(v))], dtype=np.float64)
+    if arr.size == 0:
+        return float(default)
+    return float(np.mean(arr))
+
+
+def _target_std_for_score(values: np.ndarray, mask: np.ndarray | None) -> float:
+    arr = np.asarray(values, dtype=np.float64)
+    active = np.isfinite(arr)
+    if mask is not None:
+        m = np.asarray(mask, dtype=bool)
+        if arr.ndim == 4 and m.ndim == 3 and m.shape[-2:] == arr.shape[-2:]:
+            m = m[:, None, :, :]
+        while m.ndim < arr.ndim:
+            m = m[None, ...]
+        try:
+            m = np.broadcast_to(m, arr.shape)
+        except ValueError:
+            return float("nan")
+        active &= m
+    vals = arr[active]
+    if vals.size < 2:
+        return float("nan")
+    std = float(np.std(vals))
+    if not np.isfinite(std) or std <= 1.0e-12:
+        return float("nan")
+    return std
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -167,9 +204,11 @@ def build_benchmark_eval_row(
 
     metrics_plasma: dict[str, float] = {}
     r2_plasma: dict[str, float] = {}
+    finite_stats_plasma: dict[str, dict[str, float]] = {}
     if true_eval is not None and mask_plasma is not None:
         for name in core_eval_keys:
             if name in true_eval and name in pred_eval:
+                finite_stats_plasma[name] = finite_pair_stats(true_eval[name], pred_eval[name], mask_plasma)
                 metrics_plasma[name] = float(rmse_masked(true_eval[name], pred_eval[name], mask_plasma))
                 r2_plasma[name] = float(r2_masked(true_eval[name], pred_eval[name], mask_plasma))
 
@@ -244,21 +283,40 @@ def build_benchmark_eval_row(
     r2_weight = float(agg.get("r2_weight", 0.4))
     boundary_penalty_weight = float(agg.get("boundary_penalty_weight", 0.1))
     score_rmse = 0.0
+    score_nrmse = float("nan")
     score_r2 = 0.0
     score_boundary_penalty = 0.0
     score_total = 0.0
     if use_score:
         metric_src = metrics_plasma if (use_plasma and metrics_plasma) else metrics
         r2_src = r2_plasma if (use_plasma and r2_plasma) else r2_scores
-        vars_present = [k for k in core_eval_keys if k in metric_src and k in r2_src]
+        score_keys = [k for k in target_vars_effective if k in core_eval_keys] or core_eval_keys
+        vars_present = [k for k in score_keys if k in metric_src and k in r2_src]
         if vars_present:
-            score_rmse = float(np.mean([float(metric_src[k]) for k in vars_present]))
-            score_r2 = float(np.mean([float(r2_src[k]) for k in vars_present]))
+            score_rmse_values = [float(metric_src[k]) for k in vars_present]
+            score_r2_values = [float(r2_src[k]) for k in vars_present]
+            score_nrmse_values: list[float] = []
+            for key in vars_present:
+                if true_eval is None or key not in true_eval:
+                    continue
+                rmse_val = float(metric_src[key])
+                scale = _target_std_for_score(
+                    true_eval[key],
+                    mask_plasma if (use_plasma and mask_plasma is not None) else None,
+                )
+                if np.isfinite(rmse_val) and np.isfinite(scale):
+                    score_nrmse_values.append(float(rmse_val / scale))
+            score_rmse = _finite_mean(score_rmse_values, default=0.0)
+            score_nrmse = _finite_mean(score_nrmse_values)
+            score_r2 = _finite_mean(score_r2_values, default=0.0)
         score_boundary_penalty = float(
             np.log1p(abs(float(single_diagnostics.get("boundary_operator_proxy_loss", 0.0))))
             + np.log1p(abs(float(single_qoi.get("boundary_gamma_uniformity", 0.0))))
         )
-        score_total = (rmse_weight * score_rmse) - (r2_weight * score_r2) + (boundary_penalty_weight * score_boundary_penalty)
+        score_rmse_for_total = score_nrmse if np.isfinite(score_nrmse) else score_rmse
+        score_total = (rmse_weight * score_rmse_for_total) - (r2_weight * score_r2) + (
+            boundary_penalty_weight * score_boundary_penalty
+        )
 
     if mask_plasma is not None:
         plasma_mask_bool = np.asarray(mask_plasma, dtype=np.float32) > 0.5
@@ -309,12 +367,6 @@ def build_benchmark_eval_row(
         boundary_deep_rmse_ratio[name] = _safe_ratio(boundary_rmse.get(name), deep_rmse.get(name))
         boundary_deep_r2_gap[name] = _safe_diff(boundary_r2.get(name), deep_r2.get(name))
 
-    def _finite_mean(values: list[float]) -> float:
-        arr = np.asarray([float(v) for v in values if np.isfinite(float(v))], dtype=np.float64)
-        if arr.size == 0:
-            return float("nan")
-        return float(np.mean(arr))
-
     row: dict[str, float | str] = {
         "model_id": model_id,
         "continuity_grad_ratio_all_plasma": float(continuity_grad_ratio_all),
@@ -330,6 +382,7 @@ def build_benchmark_eval_row(
         "single_boundary_residual_map_l2": float(single_diagnostics.get("boundary_operator_residual_map_l2", 0.0)),
         "opt_best_uniformity": float(opt_best_uniformity),
         "score_rmse_plasma_mean": float(score_rmse),
+        "score_nrmse_plasma_mean": float(score_nrmse),
         "score_r2_plasma_mean": float(score_r2),
         "score_boundary_penalty": float(score_boundary_penalty),
         "score_total": float(score_total),
@@ -339,6 +392,11 @@ def build_benchmark_eval_row(
         row[f"test_r2_{name}"] = _metric_val(r2_scores, name)
         row[f"test_rmse_{name}_plasma"] = _metric_val(metrics_plasma, name)
         row[f"test_r2_{name}_plasma"] = _metric_val(r2_plasma, name)
+        if name in finite_stats_plasma:
+            stats = finite_stats_plasma[name]
+            row[f"test_active_count_{name}_plasma"] = float(stats["n_active"])
+            row[f"test_nonfinite_count_{name}_plasma"] = float(stats["n_nonfinite"])
+            row[f"test_finite_ratio_{name}_plasma"] = float(stats["finite_ratio"])
         row[f"test_rmse_{name}_boundary_in"] = _metric_val(boundary_rmse, name)
         row[f"test_r2_{name}_boundary_in"] = _metric_val(boundary_r2, name)
         row[f"test_rmse_{name}_plasma_deep"] = _metric_val(deep_rmse, name)
@@ -576,6 +634,284 @@ def build_spatial_error_by_case_rows(
                             "r2": float(r2_masked(y_true_case, y_pred_case, region_mask_eff)),
                         }
                     )
+    return rows
+
+
+def _field_as_nhw(values: np.ndarray, *, key: str) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float32)
+    if arr.ndim == 2:
+        return arr[None, ...]
+    if arr.ndim == 3:
+        return arr
+    if arr.ndim == 4:
+        if int(arr.shape[1]) < 1:
+            raise ValueError(f"{key} must include at least one channel")
+        return arr[:, 0, :, :]
+    raise ValueError(f"{key} must be [H,W], [N,H,W], or [N,C,H,W], got={tuple(arr.shape)}")
+
+
+def _mask_as_nhw(mask: np.ndarray | None, *, n_cases: int, shape: tuple[int, int]) -> np.ndarray:
+    if mask is None:
+        return np.ones((n_cases, *shape), dtype=bool)
+    arr = np.asarray(mask, dtype=np.float32)
+    if arr.ndim == 2:
+        arr = np.repeat(arr[None, ...], n_cases, axis=0)
+    elif arr.ndim == 3 and int(arr.shape[0]) == 1 and n_cases > 1:
+        arr = np.repeat(arr, n_cases, axis=0)
+    if arr.ndim != 3 or int(arr.shape[0]) != n_cases or tuple(arr.shape[1:]) != shape:
+        raise ValueError(f"mask shape must be [H,W] or [N,H,W], got={tuple(arr.shape)}")
+    return arr > 0.5
+
+
+def _safe_rel_abs(pred: float, true: float, *, eps: float) -> float:
+    p = float(pred)
+    t = float(true)
+    if not np.isfinite(p) or not np.isfinite(t):
+        return float("nan")
+    return float(abs(p - t) / max(abs(t), float(eps)))
+
+
+def _masked_flat(true_field: np.ndarray, pred_field: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    active = np.asarray(mask, dtype=bool) & np.isfinite(true_field) & np.isfinite(pred_field)
+    return np.asarray(true_field[active], dtype=np.float64), np.asarray(pred_field[active], dtype=np.float64)
+
+
+def _peak_location(field: np.ndarray, mask: np.ndarray) -> tuple[float, float] | None:
+    active = np.asarray(mask, dtype=bool) & np.isfinite(field)
+    if not np.any(active):
+        return None
+    masked = np.where(active, np.asarray(field, dtype=np.float64), -np.inf)
+    y, x = np.unravel_index(int(np.argmax(masked)), masked.shape)
+    return float(y), float(x)
+
+
+def _center_of_mass(field: np.ndarray, mask: np.ndarray, *, eps: float) -> tuple[float, float] | None:
+    active = np.asarray(mask, dtype=bool) & np.isfinite(field)
+    if not np.any(active):
+        return None
+    vals = np.where(active, np.maximum(np.asarray(field, dtype=np.float64), 0.0), 0.0)
+    denom = float(np.sum(vals))
+    if denom <= eps:
+        vals = np.where(active, np.abs(np.asarray(field, dtype=np.float64)), 0.0)
+        denom = float(np.sum(vals))
+    if denom <= eps:
+        return None
+    yy, xx = np.indices(vals.shape, dtype=np.float64)
+    return float(np.sum(yy * vals) / denom), float(np.sum(xx * vals) / denom)
+
+
+def _profile_rmse(true_field: np.ndarray, pred_field: np.ndarray, mask: np.ndarray, *, reduce_axis: int) -> float:
+    active = np.asarray(mask, dtype=bool) & np.isfinite(true_field) & np.isfinite(pred_field)
+    counts = np.sum(active, axis=reduce_axis).astype(np.float64)
+    valid = counts > 0.0
+    if not np.any(valid):
+        return float("nan")
+    true_sum = np.sum(np.where(active, true_field, 0.0), axis=reduce_axis).astype(np.float64)
+    pred_sum = np.sum(np.where(active, pred_field, 0.0), axis=reduce_axis).astype(np.float64)
+    true_prof = true_sum[valid] / counts[valid]
+    pred_prof = pred_sum[valid] / counts[valid]
+    return float(np.sqrt(np.mean((pred_prof - true_prof) ** 2)))
+
+
+def _grad_rmse(true_field: np.ndarray, pred_field: np.ndarray, mask: np.ndarray) -> float:
+    active = np.asarray(mask, dtype=bool) & np.isfinite(true_field) & np.isfinite(pred_field)
+    if not np.any(active):
+        return float("nan")
+    true_y, true_x = np.gradient(np.asarray(true_field, dtype=np.float64), edge_order=1)
+    pred_y, pred_x = np.gradient(np.asarray(pred_field, dtype=np.float64), edge_order=1)
+    err2 = (pred_y - true_y) ** 2 + (pred_x - true_x) ** 2
+    return float(np.sqrt(np.mean(err2[active])))
+
+
+def _top_fraction_rmse(true_field: np.ndarray, pred_field: np.ndarray, mask: np.ndarray, *, fraction: float) -> float:
+    true_vals, _ = _masked_flat(true_field, pred_field, mask)
+    if true_vals.size == 0:
+        return float("nan")
+    frac = float(np.clip(fraction, 1.0e-6, 1.0))
+    threshold = float(np.percentile(true_vals, 100.0 * (1.0 - frac)))
+    active = (
+        np.asarray(mask, dtype=bool)
+        & np.isfinite(true_field)
+        & np.isfinite(pred_field)
+        & (np.asarray(true_field, dtype=np.float64) >= threshold)
+    )
+    if not np.any(active):
+        return float("nan")
+    err = np.asarray(pred_field, dtype=np.float64)[active] - np.asarray(true_field, dtype=np.float64)[active]
+    return float(np.sqrt(np.mean(err * err)))
+
+
+def _shape_corr(true_vals: np.ndarray, pred_vals: np.ndarray) -> float:
+    if true_vals.size < 2 or pred_vals.size < 2:
+        return float("nan")
+    t_std = float(np.std(true_vals))
+    p_std = float(np.std(pred_vals))
+    if t_std <= 1.0e-12 or p_std <= 1.0e-12:
+        return float("nan")
+    return float(np.corrcoef(true_vals, pred_vals)[0, 1])
+
+
+def build_spatial_distribution_by_case_rows(
+    *,
+    pred_eval: dict[str, np.ndarray],
+    true_eval: dict[str, np.ndarray],
+    mask_plasma: np.ndarray | None,
+    vars_for_summary: list[str] | None = None,
+    case_ids: list[str] | None = None,
+    top_fraction: float = 0.10,
+    eps: float = 1.0e-12,
+) -> list[dict[str, float | str]]:
+    """Build case-level distribution-shape metrics beyond pointwise R2/RMSE."""
+
+    target_vars = [str(v) for v in (vars_for_summary or sorted(set(pred_eval.keys()) & set(true_eval.keys())))]
+    rows: list[dict[str, float | str]] = []
+    for name in target_vars:
+        if name not in true_eval or name not in pred_eval:
+            continue
+        true_arr = _field_as_nhw(true_eval[name], key=f"true_eval[{name}]")
+        pred_arr = _field_as_nhw(pred_eval[name], key=f"pred_eval[{name}]")
+        if true_arr.shape != pred_arr.shape:
+            raise ValueError(f"distribution metric shape mismatch for {name}: {true_arr.shape} vs {pred_arr.shape}")
+        n_cases = int(true_arr.shape[0])
+        h, w = int(true_arr.shape[1]), int(true_arr.shape[2])
+        masks = _mask_as_nhw(mask_plasma, n_cases=n_cases, shape=(h, w))
+        case_keys = [str(v) for v in list(case_ids or [])]
+        if len(case_keys) != n_cases:
+            case_keys = [str(i) for i in range(n_cases)]
+        for case_idx in range(n_cases):
+            t = np.asarray(true_arr[case_idx], dtype=np.float64)
+            p = np.asarray(pred_arr[case_idx], dtype=np.float64)
+            m = masks[case_idx]
+            t_vals, p_vals = _masked_flat(t, p, m)
+            n_points = int(t_vals.size)
+            if n_points <= 0:
+                rows.append(
+                    {
+                        "case_id": str(case_keys[case_idx]),
+                        "case_index": float(case_idx),
+                        "var": str(name),
+                        "n_points": 0.0,
+                        "integral_true": float("nan"),
+                        "integral_pred": float("nan"),
+                        "integral_rel_error": float("nan"),
+                        "p95_true": float("nan"),
+                        "p95_pred": float("nan"),
+                        "p95_rel_error": float("nan"),
+                        "p99_true": float("nan"),
+                        "p99_pred": float("nan"),
+                        "p99_rel_error": float("nan"),
+                        "peak_location_error_px": float("nan"),
+                        "center_of_mass_error_px": float("nan"),
+                        "profile_rmse_r": float("nan"),
+                        "profile_rmse_z": float("nan"),
+                        "grad_rmse": float("nan"),
+                        "top10_rmse": float("nan"),
+                        "shape_corr": float("nan"),
+                        "distribution_error_score": float("nan"),
+                    }
+                )
+                continue
+            integral_true = float(np.sum(t_vals))
+            integral_pred = float(np.sum(p_vals))
+            p95_true = float(np.percentile(t_vals, 95.0))
+            p95_pred = float(np.percentile(p_vals, 95.0))
+            p99_true = float(np.percentile(t_vals, 99.0))
+            p99_pred = float(np.percentile(p_vals, 99.0))
+            peak_t = _peak_location(t, m)
+            peak_p = _peak_location(p, m)
+            peak_err = (
+                float(np.hypot(float(peak_p[0]) - float(peak_t[0]), float(peak_p[1]) - float(peak_t[1])))
+                if peak_t is not None and peak_p is not None
+                else float("nan")
+            )
+            com_t = _center_of_mass(t, m, eps=eps)
+            com_p = _center_of_mass(p, m, eps=eps)
+            com_err = (
+                float(np.hypot(float(com_p[0]) - float(com_t[0]), float(com_p[1]) - float(com_t[1])))
+                if com_t is not None and com_p is not None
+                else float("nan")
+            )
+            profile_r = _profile_rmse(t, p, m, reduce_axis=0)
+            profile_z = _profile_rmse(t, p, m, reduce_axis=1)
+            grad = _grad_rmse(t, p, m)
+            top_rmse = _top_fraction_rmse(t, p, m, fraction=top_fraction)
+            corr = _shape_corr(t_vals, p_vals)
+            true_std = float(np.std(t_vals))
+            top_nrmse = float(top_rmse / max(true_std, eps)) if np.isfinite(top_rmse) else float("nan")
+            score_parts = [
+                _safe_rel_abs(integral_pred, integral_true, eps=eps),
+                _safe_rel_abs(p99_pred, p99_true, eps=eps),
+                top_nrmse,
+                float(peak_err / max(h, w)) if np.isfinite(peak_err) else float("nan"),
+                float(com_err / max(h, w)) if np.isfinite(com_err) else float("nan"),
+                float(max(0.0, 1.0 - corr)) if np.isfinite(corr) else float("nan"),
+            ]
+            finite_parts = [v for v in score_parts if np.isfinite(float(v))]
+            rows.append(
+                {
+                    "case_id": str(case_keys[case_idx]),
+                    "case_index": float(case_idx),
+                    "var": str(name),
+                    "n_points": float(n_points),
+                    "integral_true": integral_true,
+                    "integral_pred": integral_pred,
+                    "integral_rel_error": _safe_rel_abs(integral_pred, integral_true, eps=eps),
+                    "p95_true": p95_true,
+                    "p95_pred": p95_pred,
+                    "p95_rel_error": _safe_rel_abs(p95_pred, p95_true, eps=eps),
+                    "p99_true": p99_true,
+                    "p99_pred": p99_pred,
+                    "p99_rel_error": _safe_rel_abs(p99_pred, p99_true, eps=eps),
+                    "peak_location_error_px": peak_err,
+                    "center_of_mass_error_px": com_err,
+                    "profile_rmse_r": profile_r,
+                    "profile_rmse_z": profile_z,
+                    "grad_rmse": grad,
+                    "top10_rmse": top_rmse,
+                    "shape_corr": corr,
+                    "distribution_error_score": float(np.mean(finite_parts)) if finite_parts else float("nan"),
+                }
+            )
+    return rows
+
+
+def build_spatial_distribution_summary_rows(
+    by_case_rows: list[dict[str, float | str]],
+) -> list[dict[str, float | str]]:
+    metric_names = [
+        "integral_rel_error",
+        "p95_rel_error",
+        "p99_rel_error",
+        "peak_location_error_px",
+        "center_of_mass_error_px",
+        "profile_rmse_r",
+        "profile_rmse_z",
+        "grad_rmse",
+        "top10_rmse",
+        "shape_corr",
+        "distribution_error_score",
+    ]
+    rows: list[dict[str, float | str]] = []
+    vars_seen = sorted({str(r.get("var", "")) for r in by_case_rows if str(r.get("var", ""))})
+    for name in vars_seen:
+        var_rows = [r for r in by_case_rows if str(r.get("var", "")) == name]
+        row: dict[str, float | str] = {"var": name, "n_cases": float(len(var_rows))}
+        for metric_name in metric_names:
+            values = np.asarray(
+                [float(r.get(metric_name, float("nan"))) for r in var_rows if np.isfinite(float(r.get(metric_name, float("nan"))))],
+                dtype=np.float64,
+            )
+            if values.size == 0:
+                row[f"{metric_name}_mean"] = float("nan")
+                row[f"{metric_name}_median"] = float("nan")
+                row[f"{metric_name}_p90"] = float("nan")
+                row[f"{metric_name}_max"] = float("nan")
+                continue
+            row[f"{metric_name}_mean"] = float(np.mean(values))
+            row[f"{metric_name}_median"] = float(np.median(values))
+            row[f"{metric_name}_p90"] = float(np.percentile(values, 90.0))
+            row[f"{metric_name}_max"] = float(np.max(values))
+        rows.append(row)
     return rows
 
 

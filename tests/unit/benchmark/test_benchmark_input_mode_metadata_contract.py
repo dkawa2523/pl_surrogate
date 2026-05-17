@@ -97,6 +97,8 @@ def test_inject_input_mode_metadata_into_row_adds_all_effective_keys(assert_inpu
     assert_input_mode_metadata_keys(row)
     for key, value in meta.items():
         assert row[key] == value
+    assert row["structure_input_kind_effective"] == "static_grid_features"
+    assert row["has_case_varying_structure_inputs_effective"] is False
 
 
 def test_inject_input_mode_metadata_into_row_rejects_missing_key() -> None:
