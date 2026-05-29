@@ -1,0 +1,17 @@
+{
+  "report": "C:\\Users\\user\\Desktop\\pl_surrogate\\reports\\icp_stage4_structure_feature_paper_report_20260529\\icp_stage4_structure_feature_paper_report.md",
+  "lines": 823,
+  "figure_count_in_markdown": 33,
+  "png_count_in_figures": 33,
+  "missing_links": [],
+  "unexpected_control_chars": 0,
+  "placeholders_remaining": false,
+  "html": "C:\\Users\\user\\Desktop\\pl_surrogate\\reports\\icp_stage4_structure_feature_paper_report_20260529\\icp_stage4_structure_feature_paper_report.html",
+  "html_image_count": 33,
+  "html_missing_links": [],
+  "mermaid_blocks_markdown": 2,
+  "mermaid_blocks_html": 2,
+  "figure_alt_numbers_sequential": true,
+  "figure_caption_numbers_sequential": true,
+  "html_generated_with": "python-markdown + MathJax + Mermaid"
+}
