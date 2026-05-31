@@ -9,7 +9,12 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.core.density_contract import resolve_density_key
-from plasma_surrogate.core.spatial_regions import build_boundary_type_masks, build_region_masks
+from plasma_surrogate.core.spatial_regions import (
+    build_boundary_type_masks,
+    build_region_masks,
+    normalize_target_region_by_var,
+    target_region_for_var,
+)
 from plasma_surrogate.eval.metrics import (
     finite_pair_stats,
     poisson_residual_norm,
@@ -758,12 +763,14 @@ def build_spatial_distribution_by_case_rows(
     mask_plasma: np.ndarray | None,
     vars_for_summary: list[str] | None = None,
     case_ids: list[str] | None = None,
+    target_region_by_var: dict[str, str] | None = None,
     top_fraction: float = 0.10,
     eps: float = 1.0e-12,
 ) -> list[dict[str, float | str]]:
     """Build case-level distribution-shape metrics beyond pointwise R2/RMSE."""
 
     target_vars = [str(v) for v in (vars_for_summary or sorted(set(pred_eval.keys()) & set(true_eval.keys())))]
+    region_by_var = normalize_target_region_by_var(target_region_by_var, target_vars=target_vars)
     rows: list[dict[str, float | str]] = []
     for name in target_vars:
         if name not in true_eval or name not in pred_eval:
@@ -774,7 +781,12 @@ def build_spatial_distribution_by_case_rows(
             raise ValueError(f"distribution metric shape mismatch for {name}: {true_arr.shape} vs {pred_arr.shape}")
         n_cases = int(true_arr.shape[0])
         h, w = int(true_arr.shape[1]), int(true_arr.shape[2])
-        masks = _mask_as_nhw(mask_plasma, n_cases=n_cases, shape=(h, w))
+        target_region = target_region_for_var(region_by_var, name)
+        masks = (
+            np.ones((n_cases, h, w), dtype=bool)
+            if target_region == "all_domain"
+            else _mask_as_nhw(mask_plasma, n_cases=n_cases, shape=(h, w))
+        )
         case_keys = [str(v) for v in list(case_ids or [])]
         if len(case_keys) != n_cases:
             case_keys = [str(i) for i in range(n_cases)]
@@ -790,6 +802,7 @@ def build_spatial_distribution_by_case_rows(
                         "case_id": str(case_keys[case_idx]),
                         "case_index": float(case_idx),
                         "var": str(name),
+                        "target_region": str(target_region),
                         "n_points": 0.0,
                         "integral_true": float("nan"),
                         "integral_pred": float("nan"),
@@ -852,6 +865,7 @@ def build_spatial_distribution_by_case_rows(
                     "case_id": str(case_keys[case_idx]),
                     "case_index": float(case_idx),
                     "var": str(name),
+                    "target_region": str(target_region),
                     "n_points": float(n_points),
                     "integral_true": integral_true,
                     "integral_pred": integral_pred,
@@ -895,7 +909,12 @@ def build_spatial_distribution_summary_rows(
     vars_seen = sorted({str(r.get("var", "")) for r in by_case_rows if str(r.get("var", ""))})
     for name in vars_seen:
         var_rows = [r for r in by_case_rows if str(r.get("var", "")) == name]
-        row: dict[str, float | str] = {"var": name, "n_cases": float(len(var_rows))}
+        regions_seen = sorted({str(r.get("target_region", "")) for r in var_rows if str(r.get("target_region", ""))})
+        row: dict[str, float | str] = {
+            "var": name,
+            "target_region": regions_seen[0] if len(regions_seen) == 1 else "|".join(regions_seen),
+            "n_cases": float(len(var_rows)),
+        }
         for metric_name in metric_names:
             values = np.asarray(
                 [float(r.get(metric_name, float("nan"))) for r in var_rows if np.isfinite(float(r.get(metric_name, float("nan"))))],

@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import copy
-import csv
 import gc
 import itertools
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +39,7 @@ from plasma_surrogate.core.model_families import (
 )
 from plasma_surrogate.core.model_input_policy import resolve_effective_input_mode_metadata_for_model
 from plasma_surrogate.core.physics_contract import build_physics_cfg
+from plasma_surrogate.core.spatial_regions import normalize_target_region_by_var, target_region_for_var
 from plasma_surrogate.eval.metrics import r2_masked, rmse_masked
 from plasma_surrogate.eval.metrics_builder import (
     build_benchmark_eval_row,
@@ -621,9 +620,6 @@ class BenchmarkRunner:
         sample_mean_group_mode = str(loss_cfg.get("supervised", {}).get("sample_mean_group_mode", "batch"))
         if sample_mean_group_mode != "batch":
             raise ValueError("supervised.sample_mean_group_mode must be one of: batch")
-        sample_mean_weight_denominator = str(
-            loss_cfg.get("supervised", {}).get("sample_mean_weight_denominator", "weighted")
-        )
         use_plasma_mask = str(loss_cfg.get("supervised", {}).get("mask", "none")).strip().lower() == "plasma_only"
         eval_mask_mode = str(self.benchmark_cfg.get("eval", {}).get("mask_metrics", "none")).strip().lower()
         metric_mask = np.asarray(geom_ctx.mask_plasma, dtype=np.float32) if eval_mask_mode == "plasma_only" else None
@@ -738,7 +734,13 @@ class BenchmarkRunner:
             save_checkpoint(model, model_dir / "checkpoints", extra_meta=checkpoint_meta)
 
             viz = VizRunner(model_dir / "eval")
-            viz.plot_loss_curve(history, rel_path="plots/loss_curve.png")
+            eval_plot_cfg = dict(dict(self.benchmark_cfg.get("eval", {}) or {}).get("plots", {}) or {})
+            viz_cfg = dict(self.benchmark_cfg.get("viz", {}) or {})
+            viz.plot_loss_curve(
+                history,
+                rel_path="plots/loss_curve.png",
+                yscale=str(viz_cfg.get("loss_yscale", eval_plot_cfg.get("loss_yscale", "linear"))),
+            )
             has_phi = "phi" in true_eval and "phi" in pred_eval
             single_qoi: dict[str, Any] = {"uniformity": 0.0, "boundary_gamma_uniformity": 0.0}
             single_diagnostics: dict[str, Any] = {"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0}
@@ -749,8 +751,18 @@ class BenchmarkRunner:
             )
             if has_phi and not case_spatial_inference_skip:
                 viz.plot_parity(true_eval["phi"].reshape(-1), pred_eval["phi"].reshape(-1), rel_path="plots/parity_phi.png")
-                viz.plot_field_triplet(true_eval["phi"][0, 0], pred_eval["phi"][0, 0], rel_path="plots/phi_triplet.png")
+                viz.plot_field_triplet(
+                    true_eval["phi"][0, 0],
+                    pred_eval["phi"][0, 0],
+                    rel_path="plots/phi_triplet.png",
+                    mask=metric_mask,
+                )
 
+                inference_cfg = dict(self.benchmark_cfg.get("inference", {}) or {})
+                ood_cfg = dict(inference_cfg.get("ood", {"poisson_residual_limit": 1e2}) or {})
+                for key in ("qoi", "postprocess"):
+                    if key in inference_cfg:
+                        ood_cfg[key] = dict(inference_cfg.get(key, {}) or {})
                 infer_engine = _build_benchmark_inference_engine(
                     model=model,
                     cond_schema=cond_schema,
@@ -762,7 +774,7 @@ class BenchmarkRunner:
                     phi_mode=profile_lock["phi_mode"],
                     phi_hybrid_steps=int(self.benchmark_cfg.get("phi_hybrid_steps", 1)),
                     poisson_refine_iters=int(profile_lock["poisson_refine_iters"]),
-                    ood_cfg=self.benchmark_cfg.get("inference", {}).get("ood", {"poisson_residual_limit": 1e2}),
+                    ood_cfg=ood_cfg,
                     feature_store=feature_store,
                     coord_scaler=bundle.transforms.get("coord_scaler", {}),
                     coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
@@ -796,6 +808,8 @@ class BenchmarkRunner:
                     geom={"geom_id": "default"},
                     axis=infer_axis,
                 )
+                optimize_cfg = dict(inference_cfg.get("optimize", {}) or {})
+                backend_cfg = dict(optimize_cfg.get("backend_cfg", {}) or {})
                 best = infer_engine.optimize_run(
                     # Keep benchmark optimize contract aligned with CLI/engine validation entrypoint.
                     space=cond_space_from_stats(
@@ -810,10 +824,13 @@ class BenchmarkRunner:
                         geom_ref={"geom_id": "default"},
                         label_prefix="inference.optimize",
                     ),
-                    n_trials=8,
+                    n_trials=int(optimize_cfg.get("n_trials", 8)),
                     geom={"geom_id": "default"},
                     axis=infer_axis,
                     seed=global_seed + 100 + model_idx,
+                    backend=str(optimize_cfg.get("backend", "random")),
+                    backend_cfg=backend_cfg,
+                    objective_cfg=dict(optimize_cfg.get("objective", {}) or {}),
                 )
                 single_qoi = dict(single.qoi)
                 single_diagnostics = dict(single.diagnostics)
@@ -951,6 +968,12 @@ class BenchmarkRunner:
             )
             distribution_cfg = dict(self.benchmark_cfg.get("eval", {}).get("spatial_distribution_audit", {}))
             if bool(distribution_cfg.get("enabled", True)):
+                distribution_loss_cfg = dict(dict(self.benchmark_cfg.get("train", {})).get("loss", {}))
+                supervised_cfg = dict(distribution_loss_cfg.get("supervised", {}))
+                target_region_by_var = normalize_target_region_by_var(
+                    supervised_cfg.get("target_region_by_var", {}),
+                    target_vars=spatial_vars,
+                )
                 raw_distribution_vars = distribution_cfg.get("vars", "density")
                 density_vars = [v for v in ["ne", "ni"] if v in set(true_spatial.keys()) and v in set(pred_spatial.keys())]
                 if isinstance(raw_distribution_vars, list):
@@ -971,6 +994,7 @@ class BenchmarkRunner:
                     mask_plasma=metric_mask,
                     vars_for_summary=distribution_vars,
                     case_ids=eval_case_ids,
+                    target_region_by_var=target_region_by_var,
                     top_fraction=float(distribution_cfg.get("top_fraction", 0.10)),
                 )
                 distribution_summary_rows = build_spatial_distribution_summary_rows(distribution_case_rows)
@@ -1028,6 +1052,16 @@ class BenchmarkRunner:
                             pred_field = pred_arr[case_idx]
                         else:
                             continue
+                        target_region = target_region_for_var(target_region_by_var, var_name)
+                        plot_mask = None
+                        if target_region == "plasma_only" and metric_mask is not None:
+                            mask_arr = np.asarray(metric_mask, dtype=bool)
+                            if mask_arr.ndim == 2:
+                                plot_mask = mask_arr
+                            elif mask_arr.ndim == 3 and int(mask_arr.shape[0]) == int(true_arr.shape[0]):
+                                plot_mask = mask_arr[case_idx]
+                            elif mask_arr.ndim == 3 and int(mask_arr.shape[0]) == 1:
+                                plot_mask = mask_arr[0]
                         case_token = "".join(
                             ch if ch.isalnum() or ch in {"-", "_"} else "_"
                             for ch in str(worst.get("case_id", case_idx))
@@ -1036,6 +1070,7 @@ class BenchmarkRunner:
                             true_field,
                             pred_field,
                             rel_path=f"plots/spatial_distribution_worst_{var_name}_{case_token}.png",
+                            mask=plot_mask,
                         )
             row["protocol_variant"] = protocol_variant if protocol_variant else "default"
             _attach_primary_metric_status(
@@ -1433,9 +1468,6 @@ class BenchmarkRunner:
             "active_model_scope": eval_protocol_scope,
             "target_family_mode": target_family_for_score_raw,
         }
-        guard_cfg = dict(self.benchmark_cfg.get("guardrails", {}))
-        checks = dict(guard_cfg.get("checks", {}))
-        guard_mode = str(guard_cfg.get("mode", "warn")).strip().lower()
         emit_unet_contract = bool(unet_contract_samples) or eval_protocol_scope not in _UNET_CONTRACT_OPTIONAL_SCOPES
         if emit_unet_contract:
             unet_contract_effective = self._aggregate_unet_contract_effective(
@@ -1976,12 +2008,12 @@ class BenchmarkRunner:
         v = self._first_str(unet_contract_samples, "unet_backend_effective")
         if v is not None:
             out["unet_backend_effective"] = v
-        l = self._first_list(unet_contract_samples, "unet_input_channels_effective")
-        if l is not None:
-            out["unet_input_channels_effective"] = [str(x) for x in l]
-        l = self._first_list(unet_contract_samples, "target_vars_effective")
-        if l is not None:
-            out["target_vars_effective"] = [str(x) for x in l]
+        values = self._first_list(unet_contract_samples, "unet_input_channels_effective")
+        if values is not None:
+            out["unet_input_channels_effective"] = [str(x) for x in values]
+        values = self._first_list(unet_contract_samples, "target_vars_effective")
+        if values is not None:
+            out["target_vars_effective"] = [str(x) for x in values]
         v = self._first_str(unet_contract_samples, "unet_selection_mode_effective")
         if v is not None:
             out["unet_selection_mode_effective"] = v
@@ -2117,24 +2149,24 @@ class BenchmarkRunner:
                 "init_h": float(axis_mix_cfg.get("init_h", 1.0)),
                 "init_w": float(axis_mix_cfg.get("init_w", 1.0)),
             }
-        l = self._first_list(contract_samples, "target_vars_effective")
-        if l is not None:
-            out["target_vars_effective"] = [str(x) for x in l]
+        values = self._first_list(contract_samples, "target_vars_effective")
+        if values is not None:
+            out["target_vars_effective"] = [str(x) for x in values]
         v = self._first_str(contract_samples, "target_family_effective")
         if v is not None:
             out["target_family_effective"] = v
         v = self._first_str(contract_samples, "input_features_mode")
         if v is not None:
             out["input_features_mode"] = v
-        l = self._first_list(contract_samples, "input_feature_channels")
-        if l is not None:
-            out["input_feature_channels"] = [str(x) for x in l]
+        values = self._first_list(contract_samples, "input_feature_channels")
+        if values is not None:
+            out["input_feature_channels"] = [str(x) for x in values]
         v = self._first_str(contract_samples, f"{prefix}_backend_effective")
         if v is not None:
             out[f"{prefix}_backend_effective"] = v
-        l = self._first_list(contract_samples, f"{prefix}_input_channels_effective")
-        if l is not None:
-            out[f"{prefix}_input_channels_effective"] = [str(x) for x in l]
+        values = self._first_list(contract_samples, f"{prefix}_input_channels_effective")
+        if values is not None:
+            out[f"{prefix}_input_channels_effective"] = [str(x) for x in values]
         v = self._first_str(contract_samples, f"{prefix}_input_features_mode_effective")
         if v is not None:
             out[f"{prefix}_input_features_mode_effective"] = v
@@ -2399,9 +2431,9 @@ class BenchmarkRunner:
             },
             "strict_mainline_effective": bool(deeponet_cfg.get("strict_mainline", False)),
         }
-        l = self._first_list(deeponet_contract_samples, "target_vars_effective")
-        if l is not None:
-            out["target_vars_effective"] = [str(v) for v in l]
+        values = self._first_list(deeponet_contract_samples, "target_vars_effective")
+        if values is not None:
+            out["target_vars_effective"] = [str(v) for v in values]
         v = self._first_str(deeponet_contract_samples, "target_family_effective")
         if v is not None:
             out["target_family_effective"] = v

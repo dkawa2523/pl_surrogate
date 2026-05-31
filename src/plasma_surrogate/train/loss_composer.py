@@ -8,7 +8,12 @@ import warnings
 import numpy as np
 
 from plasma_surrogate.core.density_contract import resolve_density_key
-from plasma_surrogate.core.spatial_regions import build_boundary_type_masks, build_region_masks
+from plasma_surrogate.core.spatial_regions import (
+    build_boundary_type_masks,
+    build_region_masks,
+    normalize_target_region_by_var,
+    target_region_for_var,
+)
 from plasma_surrogate.core.torch_backend import require_torch
 from plasma_surrogate.train.losses import (
     build_signed_distance,
@@ -27,12 +32,18 @@ def _empty_components() -> dict[str, float]:
     return {k: 0.0 for k in _COMPONENT_KEYS}
 
 
+def _dict_or_empty(raw: Any) -> dict[str, Any]:
+    return dict(raw or {})
+
+
 def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
-    cfg = dict(loss_cfg or {})
-    sup = dict(cfg.get("supervised", {}))
-    mt = dict(cfg.get("multitask", {}))
-    region_weighting_cfg = dict(sup.get("region_weighting", {}))
-    region_balance_cfg = dict(sup.get("region_balance", {}))
+    cfg = _dict_or_empty(loss_cfg)
+    sup = _dict_or_empty(cfg.get("supervised"))
+    mt = _dict_or_empty(cfg.get("multitask"))
+    region_weighting_cfg = _dict_or_empty(sup.get("region_weighting"))
+    region_balance_cfg = _dict_or_empty(sup.get("region_balance"))
+    boundary_profile_weighting_cfg = _dict_or_empty(sup.get("boundary_profile_weighting"))
+    boundary_weight_cfg = _dict_or_empty(sup.get("boundary_weight"))
     if region_weighting_cfg and region_balance_cfg:
         raise ValueError(
             "supervised.region_balance and supervised.region_weighting cannot be specified together; "
@@ -48,33 +59,42 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("supervised.coord_objective is removed")
     if "sample_mean_group_scale" in sup:
         raise ValueError("supervised.sample_mean_group_scale is removed")
+    fixed_weights_by_var = _dict_or_empty(mt.get("fixed_weights_by_var"))
+    target_weights = _dict_or_empty(sup.get("target_weights"))
+    if target_weights and not fixed_weights_by_var:
+        fixed_weights_by_var = target_weights
+    supervised_type = str(sup.get("type", sup.get("base", "mse"))).strip().lower()
+    if supervised_type not in {"mse", "mae", "huber"}:
+        raise ValueError("supervised.base/type must be one of: mse, mae, huber")
     return {
-        "type": str(sup.get("type", "mse")).strip().lower(),
-        "delta": float(sup.get("delta", 1.0)),
-        "delta_by_var": dict(sup.get("delta_by_var", {})),
+        "type": supervised_type,
+        "delta": float(sup.get("delta", sup.get("huber_delta", 1.0))),
+        "delta_by_var": _dict_or_empty(sup.get("delta_by_var")),
         "normalization": str(sup.get("normalization", "pixel_mean")).strip().lower(),
         "sample_mean_group_mode": str(sup.get("sample_mean_group_mode", "batch")).strip().lower(),
         "sample_mean_weight_denominator": str(sup.get("sample_mean_weight_denominator", "weighted")).strip().lower(),
         "weighting": str(mt.get("weighting", "fixed")).strip().lower(),
-        "fixed_weights_by_var": dict(mt.get("fixed_weights_by_var", {})),
-        "sigma_init": dict(mt.get("sigma_init", {})),
+        "fixed_weights_by_var": fixed_weights_by_var,
+        "sigma_init": _dict_or_empty(mt.get("sigma_init")),
         "sigma_clamp": tuple(mt.get("sigma_clamp", [-3.0, 3.0])),
         "region_weighting": region_weighting_cfg,
-        "robust_weighting": dict(sup.get("robust_weighting", {})),
+        "robust_weighting": _dict_or_empty(sup.get("robust_weighting")),
         "nan_region_policy": str(sup.get("nan_region_policy", "mask_only")).strip().lower(),
-        "sdf_weighting": dict(sup.get("sdf_weighting", {})),
-        "chamber_weight_by_var": dict(sup.get("chamber_weight_by_var", {})),
+        "sdf_weighting": _dict_or_empty(sup.get("sdf_weighting")),
+        "chamber_weight_by_var": _dict_or_empty(sup.get("chamber_weight_by_var")),
         "global_target_region": str(sup.get("global_target_region", "")).strip().lower(),
+        "target_region_by_var": _dict_or_empty(sup.get("target_region_by_var")),
         "label_clip_from_scaler": bool(sup.get("label_clip_from_scaler", False)),
-        "robust_clip_stats": dict(sup.get("robust_clip_stats", {})),
+        "robust_clip_stats": _dict_or_empty(sup.get("robust_clip_stats")),
         "sdf_distance_contract": str(sup.get("sdf_distance_contract", "off")).strip().lower(),
-        "chamber_aux": dict(sup.get("chamber_aux", {})),
+        "chamber_aux": _dict_or_empty(sup.get("chamber_aux")),
         "region_balance": region_balance_cfg,
-        "boundary_type_weighting": dict(sup.get("boundary_type_weighting", {})),
-        "boundary_profile_weighting": dict(sup.get("boundary_profile_weighting", {})),
-        "density_positivity_penalty": dict(sup.get("density_positivity_penalty", {})),
-        "density_relative_weighting": dict(sup.get("density_relative_weighting", {})),
-        "spatial_consistency": dict(sup.get("spatial_consistency", {})),
+        "boundary_type_weighting": _dict_or_empty(sup.get("boundary_type_weighting")),
+        "boundary_profile_weighting": boundary_profile_weighting_cfg,
+        "boundary_weight": boundary_weight_cfg,
+        "density_positivity_penalty": _dict_or_empty(sup.get("density_positivity_penalty")),
+        "density_relative_weighting": _dict_or_empty(sup.get("density_relative_weighting")),
+        "spatial_consistency": _dict_or_empty(sup.get("spatial_consistency")),
     }
 
 
@@ -120,6 +140,39 @@ def _resolve_scale_payload(raw: Any, *, key_name: str, y_order: list[str]) -> di
     return out
 
 
+def _resolve_var_set(raw: Any, *, default: list[str], y_order: list[str], key_name: str) -> set[str]:
+    if raw is None:
+        values = list(default)
+    elif isinstance(raw, str):
+        values = [raw]
+    else:
+        values = list(raw)
+    out = {str(v) for v in values}
+    unknown = sorted(out - set(y_order))
+    if unknown:
+        raise ValueError(f"{key_name} contains unknown vars: {unknown}")
+    return out
+
+
+def _resolve_boundary_weight_cfg(raw: Any, *, y_order: list[str]) -> dict[str, Any]:
+    cfg = dict(raw or {})
+    enabled = bool(cfg.get("enabled", False))
+    alpha = float(cfg.get("alpha", 2.0))
+    tau = float(cfg.get("tau", 2.0))
+    vars_set = _resolve_var_set(
+        cfg.get("vars", list(y_order)),
+        default=list(y_order),
+        y_order=y_order,
+        key_name="supervised.boundary_weight.vars",
+    )
+    if enabled:
+        if not np.isfinite(alpha) or alpha < 0.0:
+            raise ValueError("supervised.boundary_weight.alpha must be finite and >= 0")
+        if not np.isfinite(tau) or tau <= 0.0:
+            raise ValueError("supervised.boundary_weight.tau must be finite and > 0")
+    return {"enabled": enabled, "vars": vars_set, "alpha": alpha, "tau": tau}
+
+
 def _huber_loss_and_grad(err: np.ndarray, *, delta: float) -> tuple[np.ndarray, np.ndarray]:
     d = float(max(delta, 1e-8))
     abs_err = np.abs(err)
@@ -143,6 +196,27 @@ def _apply_chamber_override_numpy(
     chamber_w = float(chamber_weight_by_var[var_name])
     chamber = (mask <= 0.5).astype(np.float32)
     return sw * (1.0 - chamber) + chamber * chamber_w
+
+
+def _apply_boundary_band_weight_numpy(
+    sw: np.ndarray,
+    distance: np.ndarray | None,
+    *,
+    alpha: float,
+    tau: float,
+) -> np.ndarray:
+    if distance is None:
+        return sw
+    dist = _as_bhw(distance, key="supervised.boundary_weight.distance")
+    if dist.shape[0] == 1 and sw.shape[0] > 1:
+        dist = np.repeat(dist, sw.shape[0], axis=0)
+    if dist.shape != sw.shape:
+        raise ValueError(
+            "supervised.boundary_weight distance shape must match supervised loss map, "
+            f"got distance={dist.shape}, loss={sw.shape}"
+        )
+    band = np.exp(-np.abs(dist).astype(np.float32) / float(tau)).astype(np.float32)
+    return (sw * (1.0 + float(alpha) * band)).astype(np.float32)
 
 
 def _weighted_reduce_numpy(
@@ -348,11 +422,6 @@ def compose_supervised_numpy(
     cfg = _resolve_supervised_cfg(loss_cfg)
     mask_arr = None if mask is None else _as_bhw(mask, key="mask")
     distance_arr = None if distance_any is None else _as_bhw(distance_any, key="distance_any")
-    region_cfg = dict(cfg.get("region_weighting", {}))
-    use_region = bool(region_cfg.get("enabled", False))
-    boundary_delta = float(region_cfg.get("boundary_delta", 2.0))
-    w_bulk = float(region_cfg.get("w_bulk", 1.0))
-    w_boundary = float(region_cfg.get("w_boundary", 3.0))
     robust_cfg = dict(cfg.get("robust_weighting", {}))
     use_robust = bool(robust_cfg.get("enabled", False))
     robust_vars = {str(v) for v in robust_cfg.get("vars", ["phi", "Te"])}
@@ -390,6 +459,12 @@ def compose_supervised_numpy(
         effective_region_policy = "mask_only"
     elif global_target_region == "sdf_continuous":
         effective_region_policy = "sdf_continuous"
+    target_region_by_var = normalize_target_region_by_var(
+        cfg.get("target_region_by_var", {}),
+        target_vars=y_order,
+        key_name="supervised.target_region_by_var",
+        reject_unknown=True,
+    )
     sdf_cfg = dict(cfg.get("sdf_weighting", {}))
     chamber_weight_by_var = dict(cfg.get("chamber_weight_by_var", {}))
     chamber_aux_cfg = dict(cfg.get("chamber_aux", {}))
@@ -435,6 +510,11 @@ def compose_supervised_numpy(
             raise ValueError(
                 f"supervised.boundary_profile_weighting.vars contains unknown vars: {unknown_boundary_profile_vars}"
             )
+    boundary_weight = _resolve_boundary_weight_cfg(cfg.get("boundary_weight", {}), y_order=y_order)
+    boundary_weight_enabled = bool(boundary_weight["enabled"])
+    boundary_weight_vars = set(boundary_weight["vars"])
+    boundary_weight_alpha = float(boundary_weight["alpha"])
+    boundary_weight_tau = float(boundary_weight["tau"])
     boundary_profile_mid_px = float(boundary_profile_cfg.get("mid_plasma_px", boundary_profile_cfg.get("deep_plasma_px", 10.0)))
     boundary_profile_deep_px = float(boundary_profile_cfg.get("deep_plasma_px", 10.0))
     boundary_profile_parts_raw = dict(boundary_profile_cfg.get("parts", {}))
@@ -528,16 +608,15 @@ def compose_supervised_numpy(
     spatial_consistency_delta = float(spatial_consistency_cfg.get("delta", 1.0))
     if spatial_consistency_delta <= 0.0:
         raise ValueError("supervised.spatial_consistency.delta must be > 0")
-    spatial_consistency_vars = {str(v) for v in spatial_consistency_cfg.get("vars", y_order)}
-    unknown_spatial_consistency_vars = sorted(spatial_consistency_vars - set(y_order))
-    if unknown_spatial_consistency_vars:
-        raise ValueError(
-            "supervised.spatial_consistency.vars contains unknown vars: "
-            f"{unknown_spatial_consistency_vars}"
-        )
+    spatial_consistency_vars = _resolve_var_set(
+        spatial_consistency_cfg.get("vars", y_order),
+        default=list(y_order),
+        y_order=y_order,
+        key_name="supervised.spatial_consistency.vars",
+    )
     spatial_consistency_region = str(spatial_consistency_cfg.get("apply_region", "plasma_only")).strip().lower()
-    if spatial_consistency_region not in {"plasma_only"}:
-        raise ValueError("supervised.spatial_consistency.apply_region must be: plasma_only")
+    if spatial_consistency_region not in {"plasma_only", "all_domain", "target_region"}:
+        raise ValueError("supervised.spatial_consistency.apply_region must be one of: plasma_only, all_domain, target_region")
     spatial_consistency_normalize = bool(spatial_consistency_cfg.get("normalize_by_var_scale", False))
     spatial_consistency_scale_by_var = _resolve_scale_payload(
         spatial_consistency_cfg.get("scale_by_var", {}),
@@ -587,6 +666,11 @@ def compose_supervised_numpy(
     chamber_aux_band_px = float(chamber_aux_cfg.get("band_px", 2.0))
     chamber_aux_weight_by_var = dict(chamber_aux_cfg.get("weight_by_var", {}))
     chamber_aux_grad_clip_abs = float(chamber_aux_cfg.get("grad_clip_abs", 3.0))
+    region_cfg = dict(cfg.get("region_weighting", {}))
+    use_region = bool(region_cfg.get("enabled", False))
+    boundary_delta = float(region_cfg.get("boundary_delta", 2.0))
+    w_bulk = float(region_cfg.get("w_bulk", 1.0))
+    w_boundary = float(region_cfg.get("w_boundary", 3.0))
     robust_clip_stats = dict(cfg.get("robust_clip_stats", {}))
     grads: dict[str, np.ndarray] = {}
     per_var_loss: dict[str, float] = {}
@@ -618,12 +702,40 @@ def compose_supervised_numpy(
         var_delta = float(delta_by_var.get(name, cfg["delta"])) if delta_by_var else float(cfg["delta"])
         if cfg["type"] == "huber":
             loss_map, grad_map = _huber_loss_and_grad(err, delta=var_delta)
+        elif cfg["type"] == "mae":
+            loss_map = np.abs(err).astype(np.float32)
+            grad_map = np.sign(err).astype(np.float32)
         else:
             loss_map = 0.5 * err * err
             grad_map = err
 
-        if mask_arr is None:
+        target_region = target_region_for_var(target_region_by_var, name, default="")
+        force_all_domain = target_region == "all_domain"
+        var_region_policy = "mask_only" if target_region == "plasma_only" else effective_region_policy
+        m = None
+        d_map = distance_arr
+        d_signed = None
+        if mask_arr is not None:
+            m = mask_arr
+            if m.shape[0] == 1 and pred.shape[0] > 1:
+                m = np.repeat(m, pred.shape[0], axis=0)
+            if d_map is not None and d_map.shape[0] == 1 and pred.shape[0] > 1:
+                d_map = np.repeat(d_map, pred.shape[0], axis=0)
+            if signed_arr is not None and signed_arr.shape[0] == 1 and pred.shape[0] > 1:
+                signed_arr = np.repeat(signed_arr, pred.shape[0], axis=0)
+
+        if mask_arr is None or force_all_domain:
             sw = np.ones_like(loss_map, dtype=np.float32)
+            if boundary_weight_enabled and name in boundary_weight_vars:
+                bw_distance = signed_arr if signed_arr is not None else distance_arr
+                if force_all_domain and d_map is not None:
+                    bw_distance = signed_arr if signed_arr is not None else d_map
+                sw = _apply_boundary_band_weight_numpy(
+                    sw,
+                    bw_distance,
+                    alpha=boundary_weight_alpha,
+                    tau=boundary_weight_tau,
+                )
             base_loss, grad = _weighted_reduce_numpy(
                 loss_map,
                 grad_map,
@@ -634,16 +746,7 @@ def compose_supervised_numpy(
                 group_mode=sample_mean_group_mode,
             )
         else:
-            m = mask_arr
-            d_map = distance_arr
-            d_signed = None
-            if m.shape[0] == 1 and pred.shape[0] > 1:
-                m = np.repeat(m, pred.shape[0], axis=0)
-            if d_map is not None and d_map.shape[0] == 1 and pred.shape[0] > 1:
-                d_map = np.repeat(d_map, pred.shape[0], axis=0)
-            if signed_arr is not None and signed_arr.shape[0] == 1 and pred.shape[0] > 1:
-                signed_arr = np.repeat(signed_arr, pred.shape[0], axis=0)
-            if effective_region_policy == "sdf_continuous":
+            if var_region_policy == "sdf_continuous":
                 if d_map is None:
                     raise ValueError("nan_region_policy=sdf_continuous requires distance_any")
                 d_signed = build_signed_distance(m, d_map)
@@ -736,12 +839,20 @@ def compose_supervised_numpy(
                         if np.isfinite(prof_mean) and prof_mean > 1.0e-12:
                             profile_mult = (profile_mult / prof_mean).astype(np.float32)
                 sw = sw * profile_mult
-            if global_target_region != "plasma_only":
+            if target_region != "plasma_only" and global_target_region != "plasma_only":
                 sw = _apply_chamber_override_numpy(
                     sw,
                     mask=m,
                     var_name=name,
                     chamber_weight_by_var=chamber_weight_by_var,
+                )
+            if boundary_weight_enabled and name in boundary_weight_vars:
+                bw_distance = signed_arr if signed_arr is not None else d_map
+                sw = _apply_boundary_band_weight_numpy(
+                    sw,
+                    bw_distance,
+                    alpha=boundary_weight_alpha,
+                    tau=boundary_weight_tau,
                 )
             if use_robust and name in robust_vars:
                 active = sw > 0.5
@@ -853,24 +964,30 @@ def compose_supervised_numpy(
                     chamber_aux_total += float(aux_loss)
 
         if spatial_consistency_enabled and name in spatial_consistency_vars and spatial_consistency_lambda > 0.0:
-            if mask_arr is None:
-                raise ValueError("supervised.spatial_consistency requires supervised.mask=plasma_only")
-            m_sp = m
-            d_sp = d_map
-            ds_sp = d_signed
-            if d_sp is None and ds_sp is None:
-                raise ValueError("supervised.spatial_consistency requires distance_any or distance_signed")
-            if ds_sp is None:
-                ds_sp = np.where(m_sp > 0.5, d_sp, -d_sp).astype(np.float32)
-            region_masks_sc = build_region_masks(
-                mask_plasma=m_sp,
-                distance_any=d_sp,
-                distance_signed=ds_sp,
-                boundary_in_px=2.0,
-                mid_plasma_px=10.0,
-                deep_plasma_px=10.0,
-            )
-            sc_region = np.asarray(region_masks_sc["all_plasma"], dtype=np.float32)
+            sc_region_mode = spatial_consistency_region
+            if sc_region_mode == "target_region":
+                sc_region_mode = "all_domain" if target_region == "all_domain" else "plasma_only"
+            if sc_region_mode == "all_domain":
+                sc_region = np.ones_like(pred, dtype=np.float32)
+            else:
+                if m is None:
+                    raise ValueError("supervised.spatial_consistency requires supervised.mask=plasma_only")
+                m_sp = m
+                d_sp = d_map
+                ds_sp = d_signed
+                if d_sp is None and ds_sp is None:
+                    raise ValueError("supervised.spatial_consistency requires distance_any or distance_signed")
+                if ds_sp is None:
+                    ds_sp = np.where(m_sp > 0.5, d_sp, -d_sp).astype(np.float32)
+                region_masks_sc = build_region_masks(
+                    mask_plasma=m_sp,
+                    distance_any=d_sp,
+                    distance_signed=ds_sp,
+                    boundary_in_px=2.0,
+                    mid_plasma_px=10.0,
+                    deep_plasma_px=10.0,
+                )
+                sc_region = np.asarray(region_masks_sc["all_plasma"], dtype=np.float32)
             pred_sc = (
                 pred / float(max(spatial_consistency_scale_by_var.get(name, 1.0), 1.0e-12))
                 if spatial_consistency_normalize
@@ -1023,6 +1140,22 @@ def _apply_chamber_override_torch(
     return sw * (1.0 - chamber) + chamber * chamber_w
 
 
+def _apply_boundary_band_weight_torch(sw, distance, *, alpha: float, tau: float):
+    if distance is None:
+        return sw
+    torch = require_torch()
+    dist = torch.as_tensor(distance, dtype=sw.dtype, device=sw.device)
+    if int(dist.shape[0]) == 1 and int(sw.shape[0]) > 1:
+        dist = dist.expand(int(sw.shape[0]), -1, -1, -1)
+    if tuple(dist.shape) != tuple(sw.shape):
+        raise ValueError(
+            "supervised.boundary_weight distance shape must match supervised loss map, "
+            f"got distance={tuple(dist.shape)}, loss={tuple(sw.shape)}"
+        )
+    band = torch.exp(-torch.abs(dist) / float(tau))
+    return sw * (1.0 + float(alpha) * band)
+
+
 def _weighted_reduce_torch(base_map, sw, *, normalization: str, weight_denominator: str = "weighted"):
     torch = require_torch()
     norm = normalization
@@ -1049,6 +1182,48 @@ def _weighted_mean_count_torch(base_map, sw, region_mask):
     numer = (base_map * sw * reg).sum()
     denom = torch.clamp((reg > 0.0).to(dtype=sw.dtype).sum(), min=1.0)
     return numer / denom
+
+
+def _avg_pool2d_torch(x, scale: int):
+    torch = require_torch()
+    s = int(max(int(scale), 1))
+    if s <= 1:
+        return x
+    h = int(x.shape[-2])
+    w = int(x.shape[-1])
+    h_eff = (h // s) * s
+    w_eff = (w // s) * s
+    if h_eff <= 0 or w_eff <= 0:
+        return x
+    return torch.nn.functional.avg_pool2d(x[..., :h_eff, :w_eff], kernel_size=s, stride=s)
+
+
+def _spatial_consistency_grad_huber_torch(pred, target, region_mask, *, delta: float):
+    torch = require_torch()
+    reg = torch.as_tensor(region_mask, dtype=pred.dtype, device=pred.device)
+    if tuple(reg.shape) != tuple(pred.shape):
+        raise ValueError(
+            "supervised.spatial_consistency region shape must match prediction, "
+            f"got region={tuple(reg.shape)}, pred={tuple(pred.shape)}"
+        )
+    dx_err = (pred[..., :, 1:] - pred[..., :, :-1]) - (target[..., :, 1:] - target[..., :, :-1])
+    dy_err = (pred[..., 1:, :] - pred[..., :-1, :]) - (target[..., 1:, :] - target[..., :-1, :])
+    rx = reg[..., :, 1:] * reg[..., :, :-1]
+    ry = reg[..., 1:, :] * reg[..., :-1, :]
+    lx = torch.nn.functional.huber_loss(
+        dx_err,
+        torch.zeros_like(dx_err),
+        delta=float(delta),
+        reduction="none",
+    )
+    ly = torch.nn.functional.huber_loss(
+        dy_err,
+        torch.zeros_like(dy_err),
+        delta=float(delta),
+        reduction="none",
+    )
+    denom = torch.clamp(rx.sum() + ry.sum(), min=1.0)
+    return ((lx * rx).sum() + (ly * ry).sum()) / denom
 
 
 def _resolve_torch_region_contract(
@@ -1108,24 +1283,18 @@ def compose_supervised_torch(
     if int(tgt.shape[1]) != len(y_order):
         raise ValueError(f"target channel mismatch: expected {len(y_order)}, got {int(tgt.shape[1])}")
 
+    d_any = None
+    if distance_any is not None:
+        d_any = _as_bchw(distance_any, key="distance_any", device=tgt.device)
+        if int(d_any.shape[0]) == 1 and int(tgt.shape[0]) > 1:
+            d_any = d_any.expand(int(tgt.shape[0]), -1, -1, -1)
     if mask is None:
         m = None
-        d_any = None
     else:
         m = _as_bchw(mask, key="mask", device=tgt.device)
         if int(m.shape[0]) == 1 and int(tgt.shape[0]) > 1:
             m = m.expand(int(tgt.shape[0]), -1, -1, -1)
-        d_any = None
-        if distance_any is not None:
-            d_any = _as_bchw(distance_any, key="distance_any", device=tgt.device)
-            if int(d_any.shape[0]) == 1 and int(tgt.shape[0]) > 1:
-                d_any = d_any.expand(int(tgt.shape[0]), -1, -1, -1)
 
-    region_cfg = dict(cfg.get("region_weighting", {}))
-    use_region = bool(region_cfg.get("enabled", False))
-    boundary_delta = float(region_cfg.get("boundary_delta", 2.0))
-    w_bulk = float(region_cfg.get("w_bulk", 1.0))
-    w_boundary = float(region_cfg.get("w_boundary", 3.0))
     robust_cfg = dict(cfg.get("robust_weighting", {}))
     use_robust = bool(robust_cfg.get("enabled", False))
     robust_vars = {str(v) for v in robust_cfg.get("vars", ["phi", "Te"])}
@@ -1168,6 +1337,17 @@ def compose_supervised_torch(
     unknown_fixed_weight_vars = sorted(set(str(k) for k in fixed_weights_by_var.keys()) - set(y_order))
     if unknown_fixed_weight_vars:
         raise ValueError(f"multitask.fixed_weights_by_var contains unknown vars: {unknown_fixed_weight_vars}")
+    target_region_by_var = normalize_target_region_by_var(
+        cfg.get("target_region_by_var", {}),
+        target_vars=y_order,
+        key_name="supervised.target_region_by_var",
+        reject_unknown=True,
+    )
+    boundary_weight = _resolve_boundary_weight_cfg(cfg.get("boundary_weight", {}), y_order=y_order)
+    boundary_weight_enabled = bool(boundary_weight["enabled"])
+    boundary_weight_vars = set(boundary_weight["vars"])
+    boundary_weight_alpha = float(boundary_weight["alpha"])
+    boundary_weight_tau = float(boundary_weight["tau"])
     nan_region_policy = str(cfg.get("nan_region_policy", "mask_only")).strip().lower()
     if nan_region_policy not in {"mask_only", "sdf_continuous"}:
         raise ValueError(f"Unsupported supervised.nan_region_policy: {nan_region_policy}")
@@ -1229,8 +1409,47 @@ def compose_supervised_torch(
                 "supervised.density_relative_weighting.vars contains unknown vars: "
                 f"{unknown_density_rel_vars}"
             )
+    spatial_consistency_cfg = dict(cfg.get("spatial_consistency", {}))
+    spatial_consistency_enabled = bool(spatial_consistency_cfg.get("enabled", False))
+    spatial_consistency_mode = str(spatial_consistency_cfg.get("mode", "grad_huber")).strip().lower()
+    if spatial_consistency_mode not in {"grad_huber"}:
+        raise ValueError("supervised.spatial_consistency.mode must be: grad_huber")
+    spatial_consistency_lambda = float(spatial_consistency_cfg.get("lambda", 0.05))
+    if spatial_consistency_lambda < 0.0:
+        raise ValueError("supervised.spatial_consistency.lambda must be >= 0")
+    spatial_consistency_delta = float(spatial_consistency_cfg.get("delta", 1.0))
+    if spatial_consistency_delta <= 0.0:
+        raise ValueError("supervised.spatial_consistency.delta must be > 0")
+    spatial_consistency_vars = _resolve_var_set(
+        spatial_consistency_cfg.get("vars", y_order),
+        default=list(y_order),
+        y_order=y_order,
+        key_name="supervised.spatial_consistency.vars",
+    )
+    spatial_consistency_region = str(spatial_consistency_cfg.get("apply_region", "plasma_only")).strip().lower()
+    if spatial_consistency_region not in {"plasma_only", "all_domain", "target_region"}:
+        raise ValueError("supervised.spatial_consistency.apply_region must be one of: plasma_only, all_domain, target_region")
+    spatial_consistency_normalize = bool(spatial_consistency_cfg.get("normalize_by_var_scale", False))
+    spatial_consistency_scale_by_var = _resolve_scale_payload(
+        spatial_consistency_cfg.get("scale_by_var", {}),
+        key_name="supervised.spatial_consistency.scale_by_var",
+        y_order=y_order,
+    )
+    spatial_consistency_ms_cfg = dict(spatial_consistency_cfg.get("multiscale", {}))
+    spatial_consistency_ms_enabled = bool(spatial_consistency_ms_cfg.get("enabled", False))
+    spatial_consistency_ms_scales_raw = spatial_consistency_ms_cfg.get("scales", [1, 2, 4])
+    if not isinstance(spatial_consistency_ms_scales_raw, list) or len(spatial_consistency_ms_scales_raw) == 0:
+        raise ValueError("supervised.spatial_consistency.multiscale.scales must be a non-empty list")
+    spatial_consistency_ms_scales = [int(max(int(v), 1)) for v in spatial_consistency_ms_scales_raw]
+    spatial_consistency_ms_weights_raw = spatial_consistency_ms_cfg.get("scale_weights", [1.0] * len(spatial_consistency_ms_scales))
+    if not isinstance(spatial_consistency_ms_weights_raw, list) or len(spatial_consistency_ms_weights_raw) != len(spatial_consistency_ms_scales):
+        raise ValueError("supervised.spatial_consistency.multiscale.scale_weights must match scales length")
+    spatial_consistency_ms_weights = [float(v) for v in spatial_consistency_ms_weights_raw]
+    if any((not np.isfinite(v) or v < 0.0) for v in spatial_consistency_ms_weights):
+        raise ValueError("supervised.spatial_consistency.multiscale.scale_weights must be finite and >= 0")
     total = torch.zeros((), dtype=torch.float32, device=tgt.device)
     per_var: dict[str, float] = {}
+    spatial_consistency_total = torch.zeros((), dtype=torch.float32, device=tgt.device)
     region_masks_torch: dict[str, Any] | None = None
     if region_balance_enabled:
         if m is None or d_any is None:
@@ -1261,10 +1480,15 @@ def compose_supervised_torch(
                 reduction="none",
             )
             grad_scale = 1.0  # autograd handles exact derivative.
+        elif cfg["type"] == "mae":
+            base_map = torch.abs(err)
+            grad_scale = 1.0
         else:
             base_map = 0.5 * err * err
             grad_scale = 1.0
-        if m is not None:
+        target_region = target_region_for_var(target_region_by_var, name, default="")
+        force_all_domain = target_region == "all_domain"
+        if m is not None and not force_all_domain:
             if nan_region_policy == "sdf_continuous":
                 if d_any is None:
                     raise ValueError("nan_region_policy=sdf_continuous requires distance_any")
@@ -1296,12 +1520,20 @@ def compose_supervised_torch(
                     sw = boundary * w_boundary + bulk * w_bulk
                 else:
                     sw = m
-            sw = _apply_chamber_override_torch(
-                sw,
-                mask=m,
-                var_name=name,
-                chamber_weight_by_var=chamber_weight_by_var,
-            )
+            if target_region != "plasma_only":
+                sw = _apply_chamber_override_torch(
+                    sw,
+                    mask=m,
+                    var_name=name,
+                    chamber_weight_by_var=chamber_weight_by_var,
+                )
+            if boundary_weight_enabled and name in boundary_weight_vars:
+                sw = _apply_boundary_band_weight_torch(
+                    sw,
+                    d_any,
+                    alpha=boundary_weight_alpha,
+                    tau=boundary_weight_tau,
+                )
             if use_robust and name in robust_vars:
                 active = sw > 0.5
                 if bool(torch.any(active)):
@@ -1321,6 +1553,13 @@ def compose_supervised_torch(
             )
         else:
             sw = torch.ones_like(base_map, dtype=base_map.dtype)
+            if boundary_weight_enabled and name in boundary_weight_vars:
+                sw = _apply_boundary_band_weight_torch(
+                    sw,
+                    d_any,
+                    alpha=boundary_weight_alpha,
+                    tau=boundary_weight_tau,
+                )
             base = _weighted_reduce_torch(
                 base_map,
                 sw,
@@ -1346,6 +1585,51 @@ def compose_supervised_torch(
                 base = region_loss
             else:
                 base = base + float(region_balance_lambda) * region_loss
+
+        if spatial_consistency_enabled and name in spatial_consistency_vars and spatial_consistency_lambda > 0.0:
+            sc_region_mode = spatial_consistency_region
+            if sc_region_mode == "target_region":
+                sc_region_mode = "all_domain" if target_region == "all_domain" else "plasma_only"
+            if sc_region_mode == "all_domain":
+                sc_region = torch.ones_like(base_map, dtype=base_map.dtype, device=base_map.device)
+            else:
+                if m is None:
+                    raise ValueError("supervised.spatial_consistency requires supervised.mask=plasma_only")
+                sc_region = m.to(dtype=base_map.dtype)
+            pred_sc = (
+                pred / float(max(spatial_consistency_scale_by_var.get(name, 1.0), 1.0e-12))
+                if spatial_consistency_normalize
+                else pred
+            )
+            tgt_sc = (
+                tgt[:, i : i + 1] / float(max(spatial_consistency_scale_by_var.get(name, 1.0), 1.0e-12))
+                if spatial_consistency_normalize
+                else tgt[:, i : i + 1]
+            )
+            if spatial_consistency_ms_enabled:
+                sc_loss = torch.zeros((), dtype=base_map.dtype, device=base_map.device)
+                for sc_scale, sc_weight in zip(spatial_consistency_ms_scales, spatial_consistency_ms_weights):
+                    if sc_weight <= 0.0:
+                        continue
+                    pred_s = _avg_pool2d_torch(pred_sc, int(sc_scale))
+                    tgt_s = _avg_pool2d_torch(tgt_sc, int(sc_scale))
+                    reg_s = _avg_pool2d_torch(sc_region, int(sc_scale))
+                    reg_s = (reg_s > 0.5).to(dtype=base_map.dtype)
+                    sc_loss = sc_loss + float(sc_weight) * _spatial_consistency_grad_huber_torch(
+                        pred_s,
+                        tgt_s,
+                        reg_s,
+                        delta=spatial_consistency_delta,
+                    )
+            else:
+                sc_loss = _spatial_consistency_grad_huber_torch(
+                    pred_sc,
+                    tgt_sc,
+                    sc_region,
+                    delta=spatial_consistency_delta,
+                )
+            base = base + float(spatial_consistency_lambda) * sc_loss
+            spatial_consistency_total = spatial_consistency_total + float(spatial_consistency_lambda) * sc_loss
 
         if density_pos_enabled and name in density_pos_vars and density_pos_lambda > 0.0:
             mean_aff, std_aff = density_pos_affine_by_var.get(name, (0.0, 1.0))
@@ -1388,6 +1672,8 @@ def compose_supervised_torch(
         per_var[name] = float(weighted.detach().cpu().item())
         total = total + weighted
 
+    if spatial_consistency_enabled and spatial_consistency_lambda > 0.0:
+        per_var["__spatial_consistency__"] = float(spatial_consistency_total.detach().cpu().item())
     return total, per_var
 
 

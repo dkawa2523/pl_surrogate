@@ -8,6 +8,8 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.core.spatial_regions import normalize_target_region_by_var, target_region_for_var
+
 
 def load_deeponet_task_artifacts(
     pre_dir: Path,
@@ -129,13 +131,21 @@ def allvars_plasma_balance_score(
     y_vars: list[str],
     weights: dict[str, float],
     plasma_mask: np.ndarray,
+    target_region_by_var: dict[str, str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     parts: dict[str, float] = {}
     score_total = 0.0
     score_weight = 0.0
+    region_by_var = normalize_target_region_by_var(target_region_by_var, target_vars=y_vars)
+    mask_base = np.asarray(plasma_mask, dtype=bool)
     for idx, name in enumerate(y_vars):
-        r2_val = masked_r2_score(target[:, idx], pred[:, idx], plasma_mask)
-        parts[f"r2_{name}_plasma"] = float(r2_val)
+        region = target_region_for_var(region_by_var, str(name))
+        mask_eff = np.ones_like(mask_base, dtype=bool) if region == "all_domain" else mask_base
+        r2_val = masked_r2_score(target[:, idx], pred[:, idx], mask_eff)
+        suffix = "all_domain" if region == "all_domain" else "plasma"
+        parts[f"r2_{name}_{suffix}"] = float(r2_val)
+        if suffix != "plasma":
+            parts[f"r2_{name}_plasma"] = float(masked_r2_score(target[:, idx], pred[:, idx], mask_base))
         w = float(weights.get(name, 0.0))
         if w > 0.0 and np.isfinite(r2_val):
             score_total += w * float(r2_val)

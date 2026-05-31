@@ -22,6 +22,7 @@ tests/fixtures/pipeline_*_run/
 tests/fixtures/pipeline_run/
 tests/fixtures/deeponet_contract_run/
 tests/fixtures/generated/
+configs/experimental/icp_stage4/generated*/
 
 # Local datasets and generated conversion outputs
 data/
