@@ -1,0 +1,26 @@
+{
+  "plot_count": 21,
+  "plots": [
+    "plots\\learning_curve_cno.png",
+    "plots\\learning_curve_compare.png",
+    "plots\\learning_curve_ffno.png",
+    "plots\\learning_curve_unet.png",
+    "plots\\r2_compare.png",
+    "plots\\spatial_density_mean_compare_ne_linear.png",
+    "plots\\spatial_density_mean_compare_ni_linear.png",
+    "plots\\spatial_fields_extrap_case_case_g008_op01_cno.png",
+    "plots\\spatial_fields_extrap_case_case_g008_op01_ffno.png",
+    "plots\\spatial_fields_extrap_case_case_g008_op01_unet.png",
+    "plots\\spatial_fields_extrap_mean_72cases_cno.png",
+    "plots\\spatial_fields_extrap_mean_72cases_ffno.png",
+    "plots\\spatial_fields_extrap_mean_72cases_unet.png",
+    "plots\\spatial_region_compare_all_plasma.png",
+    "plots\\spatial_region_compare_boundary_in.png",
+    "plots\\spatial_region_compare_plasma_deep.png",
+    "plots\\spatial_region_r2_cno.png",
+    "plots\\spatial_region_r2_ffno.png",
+    "plots\\spatial_region_r2_unet.png",
+    "plots\\spatial_region_rmse_ne.png",
+    "plots\\spatial_region_rmse_ni.png"
+  ]
+}

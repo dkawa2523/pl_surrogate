@@ -1,0 +1,17 @@
+{
+  "boundary_gamma_mean": 594597.4375,
+  "boundary_gamma_uniformity": 0.8559626076261785,
+  "uniformity": 0.18124983352200802,
+  "uniformity_col_end": 400.0,
+  "uniformity_col_start": 0.0,
+  "uniformity_max_density": 5.017394813960454e+18,
+  "uniformity_mean_density": 4.1143909313849626e+18,
+  "uniformity_min_density": 2.241854731012014e+18,
+  "uniformity_p95_density": 5.007673481903473e+18,
+  "uniformity_region": "fixed_row",
+  "uniformity_relative": 0.18124983352200802,
+  "uniformity_row_index": 150.0,
+  "uniformity_sample_count": 401.0,
+  "uniformity_score_mode": "relative",
+  "uniformity_target": "ne"
+}

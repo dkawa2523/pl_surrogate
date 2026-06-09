@@ -1,0 +1,138 @@
+{
+  "layout_center_span": 2.5,
+  "layout_size_max_scale": 1.8,
+  "layout_size_min_scale": 0.35,
+  "optimization_space": "coil_layout_rectangles_v1",
+  "param_specs": {
+    "layout.coil_01.height": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_01.r_center": {
+      "default": 4.02295,
+      "max": 6.52295,
+      "min": 1.5229499999999998
+    },
+    "layout.coil_01.width": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_01.z_center": {
+      "default": 15.17845,
+      "max": 17.678449999999998,
+      "min": 12.67845
+    },
+    "layout.coil_02.height": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_02.r_center": {
+      "default": 8.348616667,
+      "max": 10.848616667,
+      "min": 5.848616667
+    },
+    "layout.coil_02.width": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_02.z_center": {
+      "default": 15.17845,
+      "max": 17.678449999999998,
+      "min": 12.67845
+    },
+    "layout.coil_03.height": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_03.r_center": {
+      "default": 12.67428333,
+      "max": 15.17428333,
+      "min": 10.17428333
+    },
+    "layout.coil_03.width": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_03.z_center": {
+      "default": 15.17845,
+      "max": 17.678449999999998,
+      "min": 12.67845
+    },
+    "layout.coil_04.height": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_04.r_center": {
+      "default": 16.99995,
+      "max": 19.49995,
+      "min": 14.499949999999998
+    },
+    "layout.coil_04.width": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_04.z_center": {
+      "default": 15.17845,
+      "max": 17.678449999999998,
+      "min": 12.67845
+    },
+    "layout.coil_05.height": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_05.r_center": {
+      "default": 21.32561667,
+      "max": 23.82561667,
+      "min": 18.82561667
+    },
+    "layout.coil_05.width": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_05.z_center": {
+      "default": 15.17845,
+      "max": 17.678449999999998,
+      "min": 12.67845
+    },
+    "layout.coil_06.height": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_06.r_center": {
+      "default": 25.65128333,
+      "max": 28.15128333,
+      "min": 23.15128333
+    },
+    "layout.coil_06.width": {
+      "default": 0.5543,
+      "max": 0.9977400000000001,
+      "min": 0.19400499999999998
+    },
+    "layout.coil_06.z_center": {
+      "default": 15.17845,
+      "max": 17.678449999999998,
+      "min": 12.67845
+    }
+  },
+  "part_ids": [
+    "coil_01",
+    "coil_02",
+    "coil_03",
+    "coil_04",
+    "coil_05",
+    "coil_06"
+  ],
+  "plasma_mode": "preserve",
+  "reference_case_id": "case_g002_op01"
+}

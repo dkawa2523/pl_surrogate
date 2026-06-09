@@ -1,0 +1,22 @@
+{
+  "backend": "two_stage",
+  "backend_cfg": {
+    "local_radius_frac": 0.25,
+    "local_trials_per_seed": 8,
+    "n_initial": 320,
+    "top_k": 24
+  },
+  "best_value": 0.15270568782419275,
+  "geom_param_keys_effective": [
+    "series.llcoil",
+    "series.nncoil",
+    "series.rrc",
+    "series.rrce",
+    "series.zzc"
+  ],
+  "geom_space_enabled_effective": true,
+  "invalid_trial_count": 0,
+  "n_trials": 512,
+  "objective_key": "uniformity_over_density_max",
+  "seed": 17
+}

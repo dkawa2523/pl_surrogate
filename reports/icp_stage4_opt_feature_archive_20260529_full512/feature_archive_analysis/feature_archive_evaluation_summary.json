@@ -1,0 +1,50 @@
+{
+  "report_dir": "reports\\icp_stage4_opt_feature_archive_20260529_full512",
+  "analysis_dir": "reports\\icp_stage4_opt_feature_archive_20260529_full512\\feature_archive_analysis",
+  "sampler": "feature_archive -> csv evaluator",
+  "feature_archive_sampler_summary": {
+    "candidate_csv": "reports\\icp_stage4_opt_feature_archive_20260529_full512\\feature_archive_candidates.csv",
+    "coil_counts": [
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "continuous_keys": [
+      "pp",
+      "pp0",
+      "series.llcoil",
+      "series.rrc",
+      "series.rrce",
+      "series.zzc"
+    ],
+    "dedupe_bins": 64,
+    "descriptor_dim": 22,
+    "pool_size_requested": 4096,
+    "pool_size_valid": 4100,
+    "selected_count": 512,
+    "unique_signature_count": 512
+  },
+  "best_value": 0.1174223501836472,
+  "previous_two_stage_best_value": 0.1323982968063745,
+  "objective_improvement_vs_base_fraction": 0.4921852888267624,
+  "line_cv_base": 0.23123069812680033,
+  "line_cv_best": 0.267567269951526,
+  "line_cv_relative_change": 0.1571442378502863,
+  "density_max_ratio": 2.2786741155585264,
+  "density_mean_ratio": 2.0143162694348367,
+  "best_trial": 450,
+  "best_cond": {
+    "pp": 2777.059202581465,
+    "pp0": 0.0994044848511219
+  },
+  "best_geom": {
+    "series.nncoil": 6.0,
+    "series.llcoil": 0.9322004616260527,
+    "series.rrc": 3.4557164907455444,
+    "series.rrce": 20.6734661757946,
+    "series.zzc": 0.8308439701795578
+  },
+  "pareto_candidate_count": 15
+}

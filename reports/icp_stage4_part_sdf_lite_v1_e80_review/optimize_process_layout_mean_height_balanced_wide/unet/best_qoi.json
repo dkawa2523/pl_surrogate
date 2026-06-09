@@ -1,0 +1,17 @@
+{
+  "boundary_gamma_mean": 1176863.75,
+  "boundary_gamma_uniformity": 0.7051544815337146,
+  "uniformity": 0.7021678686572731,
+  "uniformity_density_gain": 1.213125543080534,
+  "uniformity_density_ref": 9.14123957795361e+17,
+  "uniformity_low_density_penalty": 0.0,
+  "uniformity_mean_density": 1.1089471227434246e+18,
+  "uniformity_mean_height_row": 132.0,
+  "uniformity_mid_height_row": 132.0,
+  "uniformity_negative_penalty": 1.2501189457842704e-07,
+  "uniformity_region": "plasma_mean_height",
+  "uniformity_relative": 0.7733802061174473,
+  "uniformity_sample_count": 600.0,
+  "uniformity_score_mode": "cv_over_density_gain",
+  "uniformity_target": "ne"
+}

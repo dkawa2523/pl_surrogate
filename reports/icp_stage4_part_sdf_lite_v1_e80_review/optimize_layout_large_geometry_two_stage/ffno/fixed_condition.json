@@ -1,0 +1,58 @@
+{
+  "axis": {
+    "mode": "steady",
+    "value": 0.0
+  },
+  "backend": "two_stage",
+  "backend_cfg": {
+    "local_radius_frac": 0.35,
+    "local_trials_per_seed": 8,
+    "n_initial": 100,
+    "top_k": 10
+  },
+  "cond": {
+    "pp": 2823.804,
+    "pp0": 0.08349
+  },
+  "condition_mode": "fixed",
+  "condition_space": {
+    "pp": [
+      2823.804,
+      2823.804
+    ],
+    "pp0": [
+      0.08349,
+      0.08349
+    ]
+  },
+  "layout_center_span": 2.5,
+  "layout_size_max_scale": 1.8,
+  "layout_size_min_scale": 0.35,
+  "mid_height_band_px": 2,
+  "objective": {
+    "boundary_penalty": {
+      "enabled": true,
+      "weight": 0.1
+    },
+    "main": "uniformity",
+    "negative_penalty": {
+      "enabled": true,
+      "weight": 10.0
+    },
+    "physics_penalty": {
+      "enabled": true,
+      "weight": 0.05
+    }
+  },
+  "positive_floor": 1e-30,
+  "positive_vars": [
+    "ne",
+    "ni",
+    "Te"
+  ],
+  "reference_case_id": "case_g002_op01",
+  "space_mode": "layout",
+  "uniformity_region": "plasma_mean_height",
+  "uniformity_score_mode": "relative",
+  "uniformity_target": "ne"
+}

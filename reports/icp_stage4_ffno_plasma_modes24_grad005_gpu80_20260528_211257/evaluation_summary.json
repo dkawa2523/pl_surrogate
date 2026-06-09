@@ -1,0 +1,30 @@
+{
+  "run_dir": "runs\\icp_stage4_multifield_plasma_ffno_modes24_e80\\full\\ffno_plasma_modes24_grad005_gpu80_20260528_211257",
+  "report_dir": "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257",
+  "walltime_seconds": 8428.043285999913,
+  "best_epoch": 71,
+  "best_val_score": 0.9949803795182732,
+  "primary_metric": "test_r2_plasma_mean_extrap",
+  "primary_metric_value": 0.9825569062675507,
+  "target_metrics_valid": "True",
+  "r2_plasma": {
+    "ne": 0.9772787796380114,
+    "ni": 0.9777951298900724,
+    "Te": 0.9928996652368566,
+    "phi": 0.9822540503052625
+  },
+  "continuity": {
+    "grad_ratio_all_plasma": 0.8650607457841084,
+    "lap_ratio_all_plasma": 1.0509220300751743
+  },
+  "plots": [
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\learning_curve_log_loss.png",
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\plasma_r2_by_target.png",
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\distribution_metrics_by_target.png",
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\spatial_ne_best_median_worst_colorbar.png",
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\spatial_ni_best_median_worst_colorbar.png",
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\spatial_Te_best_median_worst_colorbar.png",
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\spatial_phi_best_median_worst_colorbar.png",
+    "reports\\icp_stage4_ffno_plasma_modes24_grad005_gpu80_20260528_211257\\midheight_profiles_best_median_worst.png"
+  ]
+}

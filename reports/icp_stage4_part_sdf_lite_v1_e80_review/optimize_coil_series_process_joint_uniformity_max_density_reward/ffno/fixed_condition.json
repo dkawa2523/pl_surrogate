@@ -1,0 +1,70 @@
+{
+  "axis": {
+    "mode": "steady",
+    "value": 0.0
+  },
+  "backend": "two_stage",
+  "backend_cfg": {
+    "local_radius_frac": 0.25,
+    "local_trials_per_seed": 8,
+    "n_initial": 320,
+    "top_k": 24
+  },
+  "cond": {
+    "pp": 2823.804,
+    "pp0": 0.08349
+  },
+  "condition_mode": "dataset_bounds",
+  "condition_space": {
+    "pp": [
+      505.725,
+      2999.798
+    ],
+    "pp0": [
+      0.003005,
+      0.099809
+    ]
+  },
+  "layout_center_span": 0.45,
+  "layout_size_max_scale": 1.25,
+  "layout_size_min_scale": 0.75,
+  "mid_height_band_px": 2,
+  "objective": {
+    "boundary_penalty": {
+      "enabled": false,
+      "weight": 0.0
+    },
+    "density_floor_penalty": {
+      "enabled": false,
+      "min_ratio": 0.0,
+      "reference": 2.8659124217972183e+18,
+      "weight": 0.0
+    },
+    "density_reward": {
+      "enabled": true,
+      "key": "uniformity_max_density",
+      "reference": 4.044179688820572e+18,
+      "weight": 0.2
+    },
+    "main": "uniformity",
+    "negative_penalty": {
+      "enabled": false,
+      "weight": 0.0
+    },
+    "physics_penalty": {
+      "enabled": false,
+      "weight": 0.0
+    }
+  },
+  "positive_floor": 1e-30,
+  "positive_vars": [
+    "ne",
+    "ni",
+    "Te"
+  ],
+  "reference_case_id": "case_g002_op01",
+  "space_mode": "coil_series",
+  "uniformity_region": "plasma_mean_height",
+  "uniformity_score_mode": "relative",
+  "uniformity_target": "ne"
+}

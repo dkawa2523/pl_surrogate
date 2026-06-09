@@ -1,0 +1,25 @@
+{
+  "run_dir": "runs\\icp_stage4_multifield_8field_part_sdf_lite_v1_e80\\full\\ffno_gpu80_20260528_101020",
+  "report_dir": "reports\\icp_stage4_ffno_gpu80_20260528_101020",
+  "seconds": 9821.842221736908,
+  "hours": 2.72828950603803,
+  "best_epoch_so_far": 71,
+  "best_score_so_far": 0.9777851259195639,
+  "final_epoch_completed": 79,
+  "final_val_loss": 0.1696066765210271,
+  "primary_metric": "test_r2_plasma_mean_extrap",
+  "primary_metric_value": 0.951970456334535,
+  "score_r2_plasma_mean": 0.951970456334535,
+  "continuity_grad_ratio_all_plasma": 0.9329958410912593,
+  "continuity_lap_ratio_all_plasma": 1.4387587629950784,
+  "plots": [
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\benchmark_loss_curve.png",
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\distribution_error_by_target.png",
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\learning_curve_log_loss.png",
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\region_aware_r2_by_target.png",
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\shape_correlation_by_target.png",
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\spatial_distribution_worst_Bz_case_g027_op03.png",
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\spatial_distribution_worst_ne_case_g027_op03.png",
+    "reports\\icp_stage4_ffno_gpu80_20260528_101020\\validation_balance_score.png"
+  ]
+}

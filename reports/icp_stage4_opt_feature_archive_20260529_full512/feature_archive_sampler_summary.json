@@ -1,0 +1,24 @@
+{
+  "candidate_csv": "reports\\icp_stage4_opt_feature_archive_20260529_full512\\feature_archive_candidates.csv",
+  "coil_counts": [
+    2,
+    3,
+    4,
+    5,
+    6
+  ],
+  "continuous_keys": [
+    "pp",
+    "pp0",
+    "series.llcoil",
+    "series.rrc",
+    "series.rrce",
+    "series.zzc"
+  ],
+  "dedupe_bins": 64,
+  "descriptor_dim": 22,
+  "pool_size_requested": 4096,
+  "pool_size_valid": 4100,
+  "selected_count": 512,
+  "unique_signature_count": 512
+}

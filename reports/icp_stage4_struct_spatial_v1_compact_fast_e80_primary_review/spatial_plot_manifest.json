@@ -1,0 +1,18 @@
+{
+  "run": "runs\\icp_stage4_core4\\struct_spatial_v1_compact_fast_e80_primary\\full\\unet",
+  "model": "unet",
+  "split": "extrap",
+  "n_cases": 72,
+  "selected_case": "case_g008_op01",
+  "units": "linear physical units; no log scaling",
+  "spatial_source": "compact_case_spatial_pack",
+  "plots": [
+    "plots\\r2_summary.png",
+    "plots\\spatial_density_case_ne_linear.png",
+    "plots\\spatial_density_case_ni_linear.png",
+    "plots\\spatial_density_mean_ne_linear.png",
+    "plots\\spatial_density_mean_ni_linear.png",
+    "plots\\spatial_fields_extrap_case_case_g008_op01.png",
+    "plots\\spatial_fields_extrap_mean_72cases.png"
+  ]
+}

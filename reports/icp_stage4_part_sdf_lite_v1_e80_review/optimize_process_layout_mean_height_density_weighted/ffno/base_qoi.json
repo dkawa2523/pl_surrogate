@@ -1,0 +1,13 @@
+{
+  "boundary_gamma_mean": 750347.5625,
+  "boundary_gamma_uniformity": 0.7903564984463768,
+  "uniformity": 1.0159113020464204e+18,
+  "uniformity_mean_density": 2.8666223554843796e+18,
+  "uniformity_mean_height_row": 132.0,
+  "uniformity_mid_height_row": 132.0,
+  "uniformity_region": "plasma_mean_height",
+  "uniformity_relative": 0.3543931414972725,
+  "uniformity_sample_count": 600.0,
+  "uniformity_score_mode": "relative_times_mean_abs",
+  "uniformity_target": "ne"
+}

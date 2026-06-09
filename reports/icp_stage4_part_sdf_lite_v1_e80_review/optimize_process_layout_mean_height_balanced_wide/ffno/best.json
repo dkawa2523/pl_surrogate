@@ -1,0 +1,33 @@
+{
+  "best_cond": {
+    "pp": 2827.9413404426364,
+    "pp0": 0.09500901504888626
+  },
+  "best_geom_param": {
+    "layout.coil_01.height": 0.8220371948268472,
+    "layout.coil_01.r_center": 4.918144694690866,
+    "layout.coil_01.width": 0.3308462601923473,
+    "layout.coil_01.z_center": 14.703847396693067,
+    "layout.coil_02.height": 0.33105581189820826,
+    "layout.coil_02.r_center": 8.610051300318554,
+    "layout.coil_02.width": 0.7790841231592518,
+    "layout.coil_02.z_center": 15.736860058303321,
+    "layout.coil_03.height": 0.5096770786017806,
+    "layout.coil_03.r_center": 12.539433159166515,
+    "layout.coil_03.width": 0.5135467428620324,
+    "layout.coil_03.z_center": 14.555329107294082,
+    "layout.coil_04.height": 0.3701005469365746,
+    "layout.coil_04.r_center": 17.44321665862055,
+    "layout.coil_04.width": 0.33731014906606116,
+    "layout.coil_04.z_center": 15.02540772373683,
+    "layout.coil_05.height": 0.6009776479908411,
+    "layout.coil_05.r_center": 20.88419749543859,
+    "layout.coil_05.width": 0.5173966819106165,
+    "layout.coil_05.z_center": 15.641848692471015,
+    "layout.coil_06.height": 0.4981230430315077,
+    "layout.coil_06.r_center": 25.375478481623727,
+    "layout.coil_06.width": 0.71353267622251,
+    "layout.coil_06.z_center": 14.474611954859691
+  },
+  "best_value": 0.306884105029086
+}
