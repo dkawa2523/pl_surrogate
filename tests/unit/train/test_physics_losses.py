@@ -41,8 +41,8 @@ def test_physics_loss_and_grad_combines_terms():
     phi = np.random.default_rng(0).normal(size=(2, 6, 6)).astype(np.float32)
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.1,
-        "lambda_bc": 0.2,
+        "poisson_weight": 0.1,
+        "boundary_weight": 0.2,
         "bc_mask": np.ones((6, 6), dtype=np.float32),
         "bc_value": np.zeros((6, 6), dtype=np.float32),
     }
@@ -77,11 +77,11 @@ def test_physics_loss_includes_boundary_operator_term():
     mask_band[0:2, :] = 1.0
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
+        "poisson_weight": 0.0,
+        "boundary_weight": 0.0,
         "boundary_operator": {
             "enabled": True,
-            "lambda": 0.5,
+            "weight": 0.5,
             "mask_band": mask_band,
             "target_coeffs": {"log_ne": 0.1, "Te": 0.1, "bias": 0.0},
         },
@@ -102,11 +102,11 @@ def test_boundary_operator_mode_operator_prior_runs():
     mask_band[0:2, :] = 1.0
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
+        "poisson_weight": 0.0,
+        "boundary_weight": 0.0,
         "boundary_operator": {
             "enabled": True,
-            "lambda": 0.5,
+            "weight": 0.5,
             "mode": "operator_prior",
             "mask_band": mask_band,
             "prior_coeffs": {"log_ne": 0.08, "Te": 0.06, "E_n": 0.04, "bias": 0.0},
@@ -129,11 +129,11 @@ def test_boundary_operator_mode_operator_prior_with_handle_runs():
     op = BoundaryOperatorStub(w_log_ne=0.09, w_te=0.05, w_en=0.02, bias=0.0)
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
+        "poisson_weight": 0.0,
+        "boundary_weight": 0.0,
         "boundary_operator": {
             "enabled": True,
-            "lambda": 0.5,
+            "weight": 0.5,
             "mode": "operator_prior",
             "mask_band": mask_band,
             "operator_handle": op,
@@ -156,11 +156,11 @@ def test_boundary_operator_mode_external_operator_runs():
     op = BoundaryOperatorStub(w_log_ne=0.07, w_te=0.05, w_en=0.03, bias=0.0)
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
+        "poisson_weight": 0.0,
+        "boundary_weight": 0.0,
         "boundary_operator": {
             "enabled": True,
-            "lambda": 0.5,
+            "weight": 0.5,
             "mode": "external_operator",
             "mask_band": mask_band,
             "external_operator_handle": op,

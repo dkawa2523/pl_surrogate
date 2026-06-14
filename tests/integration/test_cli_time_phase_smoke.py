@@ -6,7 +6,7 @@ from pathlib import Path
 import yaml
 
 from plasma_surrogate.cli.main import main
-from tests._config_presets import default_target_transforms_ne_ni_te_phi, runtime_table_only
+from tests._config_presets import default_target_transforms_four_field_example, runtime_table_only
 
 
 def test_cli_time_phase_pipeline_smoke(tmp_path: Path):
@@ -26,7 +26,7 @@ def test_cli_time_phase_pipeline_smoke(tmp_path: Path):
         "preprocessing": {
             "split": {"seed": 0, "ratios": [0.7, 0.15, 0.15]},
             "axis_schema": {"mode": "phase_sincos", "harmonics": 1},
-            "scalers": {"target_transforms": default_target_transforms_ne_ni_te_phi()},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
         },
         "model": {"name": "global_mlp"},
         "train": {"epochs": 3, "lr": 0.01},

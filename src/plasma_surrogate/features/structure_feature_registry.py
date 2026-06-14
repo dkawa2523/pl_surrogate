@@ -19,6 +19,11 @@ ALLOWED_SPATIAL_CHANNELS: tuple[str, ...] = (
     "normal_x",
     "normal_y",
     "curvature_proxy",
+    "boundary_band",
+    "part_sdf_nearest",
+    "part_sdf_second",
+    "part_gap_proxy",
+    "solid_proximity",
     "sdf_coil_01",
     "sdf_coil_02",
     "sdf_coil_03",
@@ -48,7 +53,7 @@ FEATURE_PROFILE_CHANNELS: dict[str, tuple[str, ...]] = {
         "normal_y",
         "curvature_proxy",
     ),
-    # Reserved profile names are already resolvable in Phase 1b; part lanes are Phase 2+.
+    # part_lite_v1 uses order-invariant summaries; semantic/ICP profiles keep their existing shapes.
     "part_lite_v1": (
         "x",
         "y",
@@ -58,6 +63,11 @@ FEATURE_PROFILE_CHANNELS: dict[str, tuple[str, ...]] = {
         "normal_x",
         "normal_y",
         "curvature_proxy",
+        "boundary_band",
+        "part_sdf_nearest",
+        "part_sdf_second",
+        "part_gap_proxy",
+        "solid_proximity",
     ),
     "part_semantic_v1": (
         "x",
@@ -97,7 +107,7 @@ FEATURE_PROFILE_CHANNELS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-DESCRIPTOR_PROFILES: tuple[str, ...] = ("struct_desc_v1", "struct_desc_v2")
+DESCRIPTOR_PROFILES: tuple[str, ...] = ("struct_desc_v1", "struct_desc_v2", "struct_desc_lite_v1")
 LATENT_PROFILES: tuple[str, ...] = ("shape_ae_v1", "part_latent_v1")
 
 

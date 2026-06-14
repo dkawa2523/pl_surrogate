@@ -21,6 +21,12 @@ ICP_STRUCT_STATIC_CHANNELS: tuple[str, ...] = (
 )
 ICP_STRUCT_CASE_CHANNELS: tuple[str, ...] = ("mask_coil", "distance_coil", "coil_proximity")
 ICP_PART_SDF_CHANNELS: tuple[str, ...] = tuple(f"sdf_coil_{i:02d}" for i in range(1, 7))
+PART_SDF_SUMMARY_CHANNELS: tuple[str, ...] = (
+    "part_sdf_nearest",
+    "part_sdf_second",
+    "part_gap_proxy",
+    "solid_proximity",
+)
 ICP_PART_SDF_LITE_CASE_CHANNELS: tuple[str, ...] = (*ICP_STRUCT_CASE_CHANNELS, *ICP_PART_SDF_CHANNELS)
 
 
@@ -53,6 +59,46 @@ def part_sdf_maps_from_stack(part_mask_stack: np.ndarray, *, slot_count: int = 6
         else:
             out[name] = fill.copy()
     return out
+
+
+def boundary_band_from_signed_distance(
+    distance_signed: np.ndarray,
+    *,
+    tau: float = 2.0,
+) -> np.ndarray:
+    ds = np.asarray(distance_signed, dtype=np.float32)
+    tau_eff = max(float(tau), 1.0e-6)
+    out = np.exp(-np.abs(ds) / tau_eff).astype(np.float32)
+    return np.clip(out, 0.0, 1.0).astype(np.float32)
+
+
+def part_sdf_summary_maps_from_stack(
+    part_mask_stack: np.ndarray,
+    *,
+    proximity_tau: float = 4.0,
+) -> dict[str, np.ndarray]:
+    stack = np.asarray(part_mask_stack, dtype=np.float32)
+    if stack.ndim != 3:
+        raise ValueError(f"part_mask_stack must be [P,H,W], got {stack.shape}")
+    h, w = stack.shape[1:]
+    fill = np.full((h, w), float(max(h, w)), dtype=np.float32)
+    if int(stack.shape[0]) <= 0:
+        nearest = fill.copy()
+        second = fill.copy()
+    else:
+        distances = [np.abs(sdf_from_part_mask(stack[i])).astype(np.float32) for i in range(int(stack.shape[0]))]
+        sorted_dist = np.sort(np.stack(distances, axis=0), axis=0).astype(np.float32)
+        nearest = sorted_dist[0].astype(np.float32)
+        second = sorted_dist[1].astype(np.float32) if int(stack.shape[0]) >= 2 else fill.copy()
+    gap_proxy = np.maximum(second - nearest, 0.0).astype(np.float32)
+    tau_eff = max(float(proximity_tau), 1.0e-6)
+    solid_proximity = np.exp(-np.maximum(nearest, 0.0) / tau_eff).astype(np.float32)
+    return {
+        "part_sdf_nearest": nearest.astype(np.float32),
+        "part_sdf_second": second.astype(np.float32),
+        "part_gap_proxy": gap_proxy.astype(np.float32),
+        "solid_proximity": solid_proximity.astype(np.float32),
+    }
 
 
 def coord_xy_rows_from_geom(geom_ctx: Any, *, h: int, w: int) -> tuple[np.ndarray, str]:
@@ -90,6 +136,7 @@ def derive_geom_feature_maps(
     mask_plasma: np.ndarray,
     h: int,
     w: int,
+    part_mask_stack: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     signed_2d = np.asarray(distance_signed, dtype=np.float32).reshape(h, w)
     gy, gx = np.gradient(signed_2d, edge_order=1)
@@ -100,7 +147,7 @@ def derive_geom_feature_maps(
     dnx_dy, dnx_dx = np.gradient(gx / gnorm, edge_order=1)
     dny_dy, dny_dx = np.gradient(gy / gnorm, edge_order=1)
     curvature_proxy = (dnx_dx + dny_dy).reshape(-1).astype(np.float32)
-    return {
+    mapping = {
         "x": coord_xy[:, 0],
         "y": coord_xy[:, 1],
         "distance_signed": np.asarray(distance_signed, dtype=np.float32).reshape(-1),
@@ -109,7 +156,12 @@ def derive_geom_feature_maps(
         "normal_x": normal_x,
         "normal_y": normal_y,
         "curvature_proxy": curvature_proxy,
+        "boundary_band": boundary_band_from_signed_distance(signed_2d).reshape(-1),
     }
+    if part_mask_stack is not None:
+        for name, arr in part_sdf_summary_maps_from_stack(part_mask_stack).items():
+            mapping[name] = np.asarray(arr, dtype=np.float32).reshape(-1)
+    return mapping
 
 
 def apply_coord_feature_scaling(
@@ -160,7 +212,6 @@ def resolve_distance_transform_effective(
     cfg: dict[str, Any],
     *,
     stats: dict[str, Any] | None,
-    warnings_out: list[str] | None = None,
 ) -> tuple[dict[str, Any], str]:
     mode = str(cfg.get("mode", "raw")).strip().lower()
     out = dict(cfg)
@@ -169,18 +220,13 @@ def resolve_distance_transform_effective(
     raw_stats = dict(stats or {})
     s_tau = float(raw_stats.get("signed_tanh_tau_auto", 0.0))
     p_tau = float(raw_stats.get("proximity_tau_auto", 0.0))
-    if s_tau > 0.0 and p_tau > 0.0:
-        out["signed_tanh_tau"] = s_tau
-        out["proximity_tau"] = p_tau
-        out["signed_quantile"] = float(raw_stats.get("signed_quantile", 0.75))
-        out["proximity_quantile"] = float(raw_stats.get("proximity_quantile", 0.50))
-        return out, "artifact"
-    if warnings_out is not None:
-        warnings_out.append(
-            "bounded_auto fallback: preprocessing/scalers/distance_transform_stats.json is missing "
-            "or invalid; using configured tau values"
-        )
-    return out, "fallback_default"
+    if not (np.isfinite(s_tau) and np.isfinite(p_tau) and s_tau > 0.0 and p_tau > 0.0):
+        raise ValueError("distance_transform.mode=bounded_auto requires preprocessing distance_transform_stats")
+    out["signed_tanh_tau"] = s_tau
+    out["proximity_tau"] = p_tau
+    out["signed_quantile"] = float(raw_stats.get("signed_quantile", 0.75))
+    out["proximity_quantile"] = float(raw_stats.get("proximity_quantile", 0.50))
+    return out, "artifact"
 
 
 def apply_distance_transform(
@@ -245,6 +291,11 @@ def build_coord_feature_rows(
         else:
             distance_signed = np.asarray(raw_signed, dtype=np.float32).reshape(-1)
         mask_plasma = np.asarray(getattr(geom_ctx, "mask_plasma"), dtype=np.float32).reshape(-1)
+    part_mask_stack = None
+    if geom_ctx is not None:
+        regions = dict(getattr(geom_ctx, "regions", {}) or {})
+        if "part_mask_stack" in regions:
+            part_mask_stack = np.asarray(regions["part_mask_stack"], dtype=np.float32)
     mapping = derive_geom_feature_maps(
         coord_xy=coord_xy,
         distance_signed=distance_signed,
@@ -252,6 +303,7 @@ def build_coord_feature_rows(
         mask_plasma=mask_plasma,
         h=h,
         w=w,
+        part_mask_stack=part_mask_stack,
     )
     feats = np.stack([np.asarray(mapping[name], dtype=np.float32) for name in channels], axis=1).astype(np.float32)
     return feats, "runtime_geom"

@@ -8,7 +8,7 @@ import yaml
 
 from plasma_surrogate.cli.main import main
 from tests._config_presets import (
-    default_target_transforms_ne_ni_te_phi,
+    default_target_transforms_four_field_example,
     runtime_table_plus_structure,
 )
 from tests._runtime_requirements import require_torch_runtime
@@ -26,7 +26,7 @@ def test_train_deeponet_pde_coupled_smoke(tmp_path: Path):
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
             "scalers": {
-                "target_transforms": default_target_transforms_ne_ni_te_phi(),
+                "target_transforms": default_target_transforms_four_field_example(),
             },
             "sampling": {
                 "deeponet": {
@@ -47,10 +47,12 @@ def test_train_deeponet_pde_coupled_smoke(tmp_path: Path):
             },
             "physics": {
                 "enabled": True,
-                "lambda_poisson": 0.02,
+                "terms": {
+                    "poisson": {"weight": 0.02},
+                    "boundary_operator": {"weight": 0.01},
+                },
                 "boundary_operator": {
                     "enabled": True,
-                    "lambda": 0.01,
                     "mode": "operator_prior",
                     "primary_qoi_key": "Gamma_i",
                     "sample_idx_source": "deeponet_task:boundary_operator.sensor_indices",

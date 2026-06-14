@@ -1,0 +1,116 @@
+﻿benchmark:
+  output_dir: runs/periodic_real_tuned_v83/benchmark_m7_coord_mlp_siren_isolated
+  profile: m7_coord_mlp_siren_isolated
+  seed: 411
+  phi_mode: direct
+  eval:
+    mask_metrics: plasma_only
+    interp_mode: overlap
+    protocol_variant: coord_mlp_siren_isolated
+    target_family_for_score: allvars
+    target_vars_for_score: [ne, ni, Te, phi]
+    primary_metric: surrogate_quality_score
+    objective_mode: min
+  eval_protocol:
+    mode: dual_axis
+    scope: coord_mlp_siren_isolated
+    primary_split: interp
+    interp_weight: 0.5
+    extrap_weight: 0.5
+    frozen_ref_tag: periodic_global_frozen_v2
+  dataset:
+    type: csv_npz
+    root: data/outputs_merged_td_csv_periodic
+    index_csv: index.csv
+    targets:
+      - {id: ne, source_key: log_ne, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: ni, source_key: log_ni, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: Te, source_key: Te, value_transform: identity, units: "eV", dtype: float32}
+      - {id: phi, source_key: phi, value_transform: identity, units: "V", dtype: float32}
+    cond_columns: [PP0, Td, gamma]
+    axis_column: axis
+    fields_npz_column: fields_npz
+    case_id_column: case_id
+    base_case_id_column: base_case_id
+    split_group_column: split_group
+    geometry_root: geometry
+  split:
+    seed: 7
+    ratios: [0.7, 0.15, 0.15]
+  preprocessing:
+    scalers:
+      enforce_target_transforms: true
+      y_fit_policy: plasma_only
+      target_transforms:
+        ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        phi: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+    distance_contract:
+      require_negative_outside: error
+    coord_grid_contract:
+      require_requested_source: error
+    coord_grid_source: coord_grid
+    coord_features:
+      enabled: true
+      output: features/coord_feature_pack.npz
+      channels: [x, y, mask_plasma, distance_signed, distance_any]
+      scaling:
+        enabled: true
+        mode: zscore
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
+      distance_transform_stats:
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
+        signed_quantile: 0.45
+        proximity_quantile: 0.25
+  train:
+    unet_like:
+      batch_size_cases: 6
+      shuffle_cases: true
+    coord_mlp_siren:
+      epochs: 160
+      lr: 0.0003
+      optimizer:
+        type: adamw
+        schedule: cosine
+        warmup_epochs: 20
+      selection:
+        mode: best_val_allvars_balance
+      target_family: allvars
+      target_vars: [ne, ni, Te, phi]
+      input_features:
+        mode: geom_feature_pack
+        features: [x, y, mask_plasma, distance_signed, distance_any]
+        distance_transform:
+          mode: bounded_auto
+      model_cfg:
+        cond_hidden: [128, 128]
+        latent_dim: 128
+        decoder_hidden: [256, 256, 256]
+        embedding:
+          type: none
+        siren:
+          enabled: true
+          fusion: split_add
+          w0_initial: 10.0
+          w0_hidden: 1.0
+          fusion_cfg:
+            cond_gain_init: 0.7
+            point_gain_init: 1.3
+            branch_norm: true
+        decoder_input_norm:
+          enabled: true
+        residual_head:
+          enabled: true
+          init_scale: 0.0
+  physics:
+    enabled: false
+  inference:
+    axis:
+      mode: steady
+      value: 0.0

@@ -56,7 +56,7 @@ def test_table_only_populates_effective_metadata(tmp_path: Path) -> None:
         },
     )
     assert pre.runtime_input_mode_meta["input_mode_effective"] == "table_only"
-    assert pre.runtime_input_mode_meta["has_structure_inputs_effective"] is False
+    assert pre.runtime_input_mode_meta["structure_adapter_mode_effective"] == "none"
 
 
 def test_table_plus_structure_rejects_direct_channels(tmp_path: Path) -> None:

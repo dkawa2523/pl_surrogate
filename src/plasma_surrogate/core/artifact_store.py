@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -33,10 +34,10 @@ class ArtifactStore:
 
     def save_csv(self, rel_path: str | Path, header: list[str], rows: list[list[Any]]) -> Path:
         path = self._path(rel_path)
-        with path.open("w", encoding="utf-8") as f:
-            f.write(",".join(header) + "\n")
-            for row in rows:
-                f.write(",".join(str(v) for v in row) + "\n")
+        with path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(header)
+            writer.writerows(rows)
         return path
 
     def save_npz(self, rel_path: str | Path, **arrays: np.ndarray) -> Path:

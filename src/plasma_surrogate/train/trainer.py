@@ -5,15 +5,15 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.deeponet_contract import allvars_plasma_balance_score, masked_r2_score
-from plasma_surrogate.core.density_contract import resolve_density_key, resolve_density_pair
 from plasma_surrogate.core.physics_contract import resolve_epoch_scaled_physics
 from plasma_surrogate.core.spatial_regions import align_bhw_batch, build_region_masks
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
 from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy
@@ -50,14 +50,33 @@ def _backward_model(model: Any, grad_output: np.ndarray, *, lr: float, weight_de
     return False
 
 
-def _resolve_log_ne_field(pred_fields: np.ndarray, y_vars: list[str]) -> np.ndarray:
-    density_ne_key = resolve_density_key(list(y_vars), canonical="ne", prefer_linear=True)
-    if density_ne_key is None:
-        raise ValueError("physics-aware training requires one of ne/log_ne in model output_keys")
-    ne_arr = np.asarray(pred_fields[:, y_vars.index(density_ne_key)], dtype=np.float32)
-    if density_ne_key == "log_ne":
-        return ne_arr
-    return np.log10(np.maximum(ne_arr, np.float32(1.0e-30))).astype(np.float32)
+def _resolve_numpy_trainer_physics_fields(
+    pred_fields: np.ndarray,
+    y_vars: list[str],
+    physics_cfg: dict[str, Any] | None,
+) -> tuple[dict[str, np.ndarray], int]:
+    cfg = dict(physics_cfg or {})
+    role_schema = cfg.get("target_role_schema")
+    if role_schema is None:
+        role_schema = cfg.get("target_roles")
+    resolved = resolve_physics_symbol_keys(
+        [str(v) for v in y_vars],
+        symbols=dict(cfg.get("symbols", {}) or {}),
+        target_role_schema=dict(role_schema or {}),
+        context="physics-aware training",
+    )
+    density_key = resolved["density"]
+    temperature_key = resolved["temperature"]
+    potential_key = resolved["potential"]
+    density = np.asarray(pred_fields[:, y_vars.index(density_key)], dtype=np.float32)
+    return (
+        {
+            density_key: density,
+            temperature_key: np.asarray(pred_fields[:, y_vars.index(temperature_key)], dtype=np.float32),
+            potential_key: np.asarray(pred_fields[:, y_vars.index(potential_key)], dtype=np.float32),
+        },
+        int(y_vars.index(potential_key)),
+    )
 
 
 def _clone_model_state_numpy(model: Any) -> dict[str, np.ndarray]:
@@ -78,12 +97,7 @@ def _masked_r2(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> floa
 
 
 def _normalize_unet_selection_mode(raw_mode: Any) -> str:
-    mode = str(raw_mode).strip().lower()
-    legacy_aliases = {
-        "best_val_allvars_boundary_balance": "best_val_allvars_balance",
-        "best_val_field_boundary_balance": "best_val_allvars_balance",
-    }
-    return legacy_aliases.get(mode, mode)
+    return str(raw_mode).strip().lower()
 
 
 def _unet_allvars_boundary_balance_score(
@@ -96,6 +110,7 @@ def _unet_allvars_boundary_balance_score(
     weights: dict[str, float],
     boundary_band_px: float,
     boundary_bonus_weight: float = 0.25,
+    target_region_by_var: dict[str, str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     batch_size = int(pred.shape[0])
     if distance_any is None:
@@ -122,7 +137,6 @@ def _unet_allvars_boundary_balance_score(
         plasma_mask = np.asarray(region_masks["all_plasma"], dtype=bool)
         boundary_mask = np.asarray(region_masks["boundary_in"], dtype=bool)
     parts: dict[str, float] = {}
-    density_keys = resolve_density_pair(list(y_vars), prefer_linear=True)
     score_names = list(y_vars)
     deep_mask = np.zeros_like(plasma_mask, dtype=bool)
     if distance_any is not None:
@@ -141,18 +155,9 @@ def _unet_allvars_boundary_balance_score(
         y_vars=list(y_vars),
         weights=dict(weights),
         plasma_mask=plasma_mask,
+        target_region_by_var=target_region_by_var,
     )
     parts.update(base_parts)
-    for name in density_keys:
-        if name not in y_vars:
-            continue
-        idx = y_vars.index(name)
-        density_pred = np.asarray(pred[:, idx], dtype=np.float32)
-        plasma_vals = density_pred[plasma_mask]
-        if plasma_vals.size == 0:
-            parts[f"neg_ratio_{name}_plasma"] = float("nan")
-        else:
-            parts[f"neg_ratio_{name}_plasma"] = float(np.mean((plasma_vals < 0.0).astype(np.float32)))
     if not np.isfinite(base_score):
         return float("nan"), parts
     boundary_total = 0.0
@@ -292,8 +297,8 @@ def _resolve_global_clip(
     out_channels: int,
 ) -> tuple[str, float]:
     cfg = dict(grad_clip_cfg or {})
-    legacy_default_mode = "global" if float(grad_clip_norm) > 0.0 else "off"
-    raw_mode = cfg.get("mode", legacy_default_mode)
+    del grad_clip_norm
+    raw_mode = cfg.get("mode", "off")
     if isinstance(raw_mode, bool):
         mode = "global" if raw_mode else "off"
     else:
@@ -302,7 +307,7 @@ def _resolve_global_clip(
         mode = "global"
     if mode not in {"off", "global", "per_sample"}:
         raise ValueError("global_mlp.grad_clip.mode must be one of: off, global, per_sample")
-    base_norm = float(cfg.get("norm", grad_clip_norm))
+    base_norm = float(cfg.get("norm", 0.0))
     if mode == "off" or base_norm <= 0.0:
         return "off", 0.0
     adaptive = bool(cfg.get("adaptive_by_dim", False))
@@ -409,13 +414,6 @@ def train_one_epoch_global_physics(
 
     h, w = model.grid_shape
     y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
-    grad_diag_keys = ["phi", "Te"]
-    density_ne_key = resolve_density_key(y_vars, canonical="ne", prefer_linear=True)
-    density_ni_key = resolve_density_key(y_vars, canonical="ni", prefer_linear=True)
-    if density_ne_key is not None:
-        grad_diag_keys.append(density_ne_key)
-    if density_ni_key is not None:
-        grad_diag_keys.append(density_ni_key)
     accum = {
         "total": 0.0,
         "data": 0.0,
@@ -425,12 +423,6 @@ def train_one_epoch_global_physics(
         "boundary_operator": 0.0,
         "rho": 0.0,
         "grad_l2_total": 0.0,
-        "grad_l2_phi": 0.0,
-        "grad_l2_Te": 0.0,
-        "grad_l2_ne": 0.0,
-        "grad_l2_ni": 0.0,
-        "grad_l2_log_ne": 0.0,
-        "grad_l2_log_ni": 0.0,
         "active_weight_ratio": 0.0,
         "step_rel_hidden_mean": 0.0,
         "step_rel_output": 0.0,
@@ -479,15 +471,9 @@ def train_one_epoch_global_physics(
         terms = {"poisson": 0.0, "boundary": 0.0, "boundary_operator": 0.0, "rho": 0.0}
 
         if physics_cfg and bool(physics_cfg.get("enabled", False)):
-            if "phi" not in y_vars or "Te" not in y_vars:
-                raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
-            phi_idx = y_vars.index("phi")
+            physics_pred_fields, phi_idx = _resolve_numpy_trainer_physics_fields(pred_fields, y_vars, physics_cfg)
             phys_loss, grad_phi, terms = compose_numpy(
-                {
-                    "log_ne": _resolve_log_ne_field(pred_fields, y_vars),
-                    "Te": pred_fields[:, y_vars.index("Te")],
-                    "phi": pred_fields[:, phi_idx],
-                },
+                physics_pred_fields,
                 physics_cfg=physics_cfg,
                 resolved_terms=resolved_terms,
             )
@@ -546,15 +532,6 @@ def train_one_epoch_global_physics(
 
         grad_flat = grad_y.reshape(seen, -1)
         accum["grad_l2_total"] += float(np.mean(np.linalg.norm(grad_flat, axis=1))) * seen
-        for key in grad_diag_keys:
-            if key in grad_by_var:
-                gflat = grad_by_var[key].reshape(seen, -1)
-                target_metric_key = f"grad_l2_{key}"
-                if key == density_ne_key:
-                    target_metric_key = "grad_l2_log_ne"
-                elif key == density_ni_key:
-                    target_metric_key = "grad_l2_log_ni"
-                accum[target_metric_key] += float(np.mean(np.linalg.norm(gflat, axis=1))) * seen
         accum["active_weight_ratio"] += float(np.mean(np.abs(grad_y) > 0.0)) * seen
 
     denom = float(max(total_seen, 1))
@@ -600,10 +577,6 @@ def train_one_epoch_unet(
         "boundary": 0.0,
         "boundary_operator": 0.0,
         "grad_l2_total": 0.0,
-        "grad_l2_phi": 0.0,
-        "grad_l2_Te": 0.0,
-        "grad_l2_ne": 0.0,
-        "grad_l2_ni": 0.0,
         "active_weight_ratio": 0.0,
         "step_rel_hidden_mean": 0.0,
         "step_rel_output": 0.0,
@@ -643,15 +616,9 @@ def train_one_epoch_unet(
         rho_loss = 0.0
 
         if physics_cfg and bool(physics_cfg.get("enabled", False)):
-            if "phi" not in y_vars or "Te" not in y_vars:
-                raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
-            phi_idx = y_vars.index("phi")
+            physics_pred_fields, phi_idx = _resolve_numpy_trainer_physics_fields(pred, y_vars, physics_cfg)
             phys_loss, grad_phi, terms = compose_numpy(
-                {
-                    "log_ne": _resolve_log_ne_field(pred, y_vars),
-                    "Te": pred[:, y_vars.index("Te")],
-                    "phi": pred[:, phi_idx],
-                },
+                physics_pred_fields,
                 physics_cfg=physics_cfg,
                 resolved_terms=resolved_terms,
             )
@@ -663,7 +630,11 @@ def train_one_epoch_unet(
             rho_pred = raw_pred[:, model.out_channels : model.out_channels + 1]
             rho_target = -laplacian2d(y_batch[:, phi_idx]).astype(np.float32)[:, None]
             rho_err = rho_pred - rho_target
-            rho_weight = float(physics_cfg.get("lambda_rho", 0.05)) if physics_cfg else 0.05
+            rho_weight = 0.0
+            for row in list(resolved_terms or []):
+                if str(row.get("name", "")).strip().lower() == "rho" and bool(row.get("enabled", False)):
+                    rho_weight = float(row.get("weight", 0.0))
+                    break
             rho_loss = float(np.mean(rho_err**2))
             total_loss += rho_weight * rho_loss
             raw_grad[:, model.out_channels : model.out_channels + 1] += (
@@ -752,18 +723,6 @@ def train_one_epoch_unet(
         accum["boundary"] += float(terms.get("boundary", 0.0)) * seen
         accum["boundary_operator"] += float(terms.get("boundary_operator", 0.0)) * seen
         accum["grad_l2_total"] += float(np.mean(np.linalg.norm(raw_grad.reshape(seen, -1), axis=1))) * seen
-        if "phi" in y_vars:
-            accum["grad_l2_phi"] += float(np.mean(np.abs(raw_grad[:, y_vars.index("phi")]))) * seen
-        if "Te" in y_vars:
-            accum["grad_l2_Te"] += float(np.mean(np.abs(raw_grad[:, y_vars.index("Te")]))) * seen
-        density_ne_key = resolve_density_key(y_vars, canonical="ne", prefer_linear=True)
-        density_ni_key = resolve_density_key(y_vars, canonical="ni", prefer_linear=True)
-        if density_ne_key is not None and density_ne_key in y_vars:
-            ne_grad = float(np.mean(np.abs(raw_grad[:, y_vars.index(density_ne_key)]))) * seen
-            accum["grad_l2_ne"] += ne_grad
-        if density_ni_key is not None and density_ni_key in y_vars:
-            ni_grad = float(np.mean(np.abs(raw_grad[:, y_vars.index(density_ni_key)]))) * seen
-            accum["grad_l2_ni"] += ni_grad
         accum["active_weight_ratio"] += float(np.mean(np.abs(raw_grad) > 0.0)) * seen
         accum["step_rel_hidden_mean"] += float(back_diag.get("step_rel_hidden_mean", 0.0)) * seen
         accum["step_rel_output"] += float(back_diag.get("step_rel_output", 0.0)) * seen
@@ -907,11 +866,9 @@ class Trainer:
             {
                 "enabled": bool(cfg.get("enabled", False)),
                 "resolved_terms": list(cfg.get("resolved_terms", [])),
-                "lambda_poisson": float(cfg.get("lambda_poisson", 0.0)),
-                "lambda_bc": float(cfg.get("lambda_bc", 0.0)),
                 "boundary_operator": {
                     "enabled": bool(cfg.get("boundary_operator", {}).get("enabled", False)),
-                    "lambda": float(cfg.get("boundary_operator", {}).get("lambda", 0.0)),
+                    "weight": float(cfg.get("boundary_operator", {}).get("weight", 0.0)),
                     "mode": str(cfg.get("boundary_operator", {}).get("mode", "proxy")),
                     "primary_qoi_key": str(cfg.get("boundary_operator", {}).get("primary_qoi_key", "Gamma_i")),
                 },
@@ -997,15 +954,10 @@ class Trainer:
             )
             val_phys_loss = 0.0
             if epoch_physics_cfg and bool(epoch_physics_cfg.get("enabled", False)):
-                if "phi" not in y_vars or "Te" not in y_vars:
-                    raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
+                physics_val_fields, _ = _resolve_numpy_trainer_physics_fields(val_fields, y_vars, epoch_physics_cfg)
                 val_phys_loss = float(
                     compose_numpy(
-                        {
-                            "log_ne": _resolve_log_ne_field(val_fields, y_vars),
-                            "Te": val_fields[:, y_vars.index("Te")],
-                            "phi": val_fields[:, y_vars.index("phi")],
-                        },
+                        physics_val_fields,
                         physics_cfg=epoch_physics_cfg,
                         resolved_terms=resolved_terms,
                     )[0]
@@ -1030,10 +982,6 @@ class Trainer:
                 {
                     "epoch": float(epoch),
                     "grad_l2_total": float(stats.get("grad_l2_total", 0.0)),
-                    "grad_l2_phi": float(stats.get("grad_l2_phi", 0.0)),
-                    "grad_l2_Te": float(stats.get("grad_l2_Te", 0.0)),
-                    "grad_l2_log_ne": float(stats.get("grad_l2_log_ne", 0.0)),
-                    "grad_l2_log_ni": float(stats.get("grad_l2_log_ni", 0.0)),
                     "active_weight_ratio": float(stats.get("active_weight_ratio", 0.0)),
                     "step_rel_hidden_mean": float(stats.get("step_rel_hidden_mean", 0.0)),
                     "step_rel_output": float(stats.get("step_rel_output", 0.0)),
@@ -1214,15 +1162,10 @@ class Trainer:
             )
             val_phys_loss = 0.0
             if epoch_physics_cfg and bool(epoch_physics_cfg.get("enabled", False)):
-                if "phi" not in y_vars or "Te" not in y_vars:
-                    raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
+                physics_val_fields, _ = _resolve_numpy_trainer_physics_fields(val_pred, y_vars, epoch_physics_cfg)
                 val_phys_loss = float(
                     compose_numpy(
-                        {
-                            "log_ne": _resolve_log_ne_field(val_pred, y_vars),
-                            "Te": val_pred[:, y_vars.index("Te")],
-                            "phi": val_pred[:, y_vars.index("phi")],
-                        },
+                        physics_val_fields,
                         physics_cfg=epoch_physics_cfg,
                         resolved_terms=resolved_terms,
                     )[0]
@@ -1254,6 +1197,9 @@ class Trainer:
                     weights=selection_allvars_weights,
                     boundary_band_px=selection_band_px,
                     boundary_bonus_weight=0.0,
+                    target_region_by_var=dict(
+                        dict(dict(loss_cfg or {}).get("supervised", {})).get("target_region_by_var", {})
+                    ),
                 )
                 val_balance_score = float(score)
                 selection_score_te = float(parts.get("r2_Te_plasma", float("nan")))
@@ -1291,10 +1237,6 @@ class Trainer:
                     {
                         "epoch": float(epoch),
                         "grad_l2_total": float(stats.get("grad_l2_total", 0.0)),
-                        "grad_l2_phi": float(stats.get("grad_l2_phi", 0.0)),
-                        "grad_l2_Te": float(stats.get("grad_l2_Te", 0.0)),
-                        "grad_l2_ne": float(stats.get("grad_l2_ne", 0.0)),
-                        "grad_l2_ni": float(stats.get("grad_l2_ni", 0.0)),
                         "active_weight_ratio": float(stats.get("active_weight_ratio", 0.0)),
                         "step_rel_hidden_mean": float(stats.get("step_rel_hidden_mean", 0.0)),
                         "step_rel_output": float(stats.get("step_rel_output", 0.0)),

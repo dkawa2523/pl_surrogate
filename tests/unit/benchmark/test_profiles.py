@@ -9,19 +9,10 @@ from plasma_surrogate.benchmark.profiles import resolve_profile_lock
     "name",
     [
         "m7_global_frozen_ref",
-        "m7_unet_isolated",
-        "m7_unetpp_isolated",
         "m7_unetpp_attn_isolated",
-        "m7_unet_operator_v2",
         "m7_fno_isolated",
         "m7_ffno_isolated",
-        "m7_coord_mlp_fourier_experimental",
-        "m7_coord_mlp_siren_experimental",
-        "m7_coord_mlp_pod_residual",
-        "m7_deeponet_pod_experimental",
-        "m7_deeponet_plasma_pod",
-        "m7_geom_deeponet_pod",
-        "m7_cno_operator_unet",
+        "m7_coord_mlp_siren_isolated",
         "m7_deeponet_isolated",
     ],
 )
@@ -40,28 +31,16 @@ def test_resolve_profile_lock_alias_and_copy():
     assert "x" not in b["models"]
 
 
-def test_resolve_profile_lock_unetpp_alias():
-    profile = resolve_profile_lock("m7_unetpp")
-    assert profile["profile"] == "m7_unetpp_isolated"
-    assert profile["models"] == ["unetpp"]
-
-
-def test_resolve_profile_lock_unetpp_attn_alias():
-    profile = resolve_profile_lock("m7_unetpp_attn")
-    assert profile["profile"] == "m7_unetpp_attn_isolated"
-    assert profile["models"] == ["unetpp_attn"]
-
-
-def test_resolve_profile_lock_unet_v2_alias():
-    profile = resolve_profile_lock("m7_unet_v2")
-    assert profile["profile"] == "m7_unet_operator_v2"
-    assert profile["models"] == ["unet_operator_v2"]
-
-
 def test_resolve_profile_lock_ffno_alias():
     profile = resolve_profile_lock("m7_ffno")
     assert profile["profile"] == "m7_ffno_isolated"
     assert profile["models"] == ["ffno"]
+
+
+def test_resolve_profile_lock_coord_mlp_siren_alias():
+    profile = resolve_profile_lock("m7_coord_mlp_siren")
+    assert profile["profile"] == "m7_coord_mlp_siren_isolated"
+    assert profile["models"] == ["coord_mlp_siren"]
 
 
 def test_resolve_profile_lock_unsupported_raises():

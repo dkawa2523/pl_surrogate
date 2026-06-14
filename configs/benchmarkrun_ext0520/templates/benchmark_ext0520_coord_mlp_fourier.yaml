@@ -13,8 +13,8 @@ benchmark:
     - ni
     - Te
     - phi
-    primary_metric: test_r2_plasma_mean_dual
-    primary_mode: max
+    primary_metric: surrogate_quality_score
+    objective_mode: min
   eval_protocol:
     mode: dual_axis
     scope: common
@@ -172,8 +172,6 @@ benchmark:
       value: 0.0
   runtime:
     input_mode: table_plus_structure
-    strict_input_mode: error
-    allow_mode_fallback: false
     structure:
       feature_profile: geom_v1_mainline
       descriptor_profile: none
@@ -182,8 +180,6 @@ benchmark:
       provider_mode: fixed
 runtime:
   input_mode: table_plus_structure
-  strict_input_mode: error
-  allow_mode_fallback: false
   structure:
     feature_profile: geom_v1_mainline
     descriptor_profile: none

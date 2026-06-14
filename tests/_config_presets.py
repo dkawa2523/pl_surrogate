@@ -4,18 +4,8 @@ from typing import Any
 
 
 def runtime_table_only() -> dict[str, Any]:
-    return runtime_table_only_with_controls()
-
-
-def runtime_table_only_with_controls(
-    *,
-    strict_input_mode: str = "error",
-    allow_mode_fallback: bool = False,
-) -> dict[str, Any]:
     return {
         "input_mode": "table_only",
-        "strict_input_mode": str(strict_input_mode),
-        "allow_mode_fallback": bool(allow_mode_fallback),
         "structure": {
             "feature_profile": "none",
             "descriptor_profile": "none",
@@ -33,13 +23,9 @@ def runtime_table_plus_structure(
     descriptor_profile: str = "none",
     latent_profile: str = "none",
     provider_mode: str = "fixed",
-    strict_input_mode: str = "error",
-    allow_mode_fallback: bool = False,
 ) -> dict[str, Any]:
     return {
         "input_mode": "table_plus_structure",
-        "strict_input_mode": str(strict_input_mode),
-        "allow_mode_fallback": bool(allow_mode_fallback),
         "structure": {
             "feature_profile": str(feature_profile),
             "descriptor_profile": str(descriptor_profile),
@@ -50,7 +36,7 @@ def runtime_table_plus_structure(
     }
 
 
-def csv_npz_targets_with_ne_te_phi() -> list[dict[str, str]]:
+def csv_npz_targets_three_field_example() -> list[dict[str, str]]:
     return [
         {"id": "ne", "source_key": "log_ne", "value_transform": "pow10"},
         {"id": "Te", "source_key": "Te", "value_transform": "identity"},
@@ -58,7 +44,7 @@ def csv_npz_targets_with_ne_te_phi() -> list[dict[str, str]]:
     ]
 
 
-def csv_npz_targets_with_ne_ni_te_phi() -> list[dict[str, str]]:
+def csv_npz_targets_four_field_example() -> list[dict[str, str]]:
     return [
         {"id": "ne", "source_key": "ne", "value_transform": "identity"},
         {"id": "ni", "source_key": "ni", "value_transform": "identity"},
@@ -67,7 +53,7 @@ def csv_npz_targets_with_ne_ni_te_phi() -> list[dict[str, str]]:
     ]
 
 
-def default_target_transforms_ne_ni_te_phi() -> dict[str, dict[str, Any]]:
+def default_target_transforms_four_field_example() -> dict[str, dict[str, Any]]:
     return {
         "ne": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
         "ni": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},

@@ -1,4 +1,4 @@
-benchmark:
+﻿benchmark:
   output_dir: runs/periodic_real_tuned_v83/benchmark_m7_coord_mlp_fourier_experimental
   profile: m7_coord_mlp_fourier_experimental
   seed: 411
@@ -49,7 +49,7 @@ benchmark:
     distance_contract:
       require_negative_outside: error
     coord_grid_contract:
-      require_requested_source: warn
+      require_requested_source: error
     coord_grid_source: coord_grid
     coord_features:
       enabled: true
@@ -85,7 +85,6 @@ benchmark:
       target_vars: [ne, ni, Te, phi]
       input_features:
         mode: geom_feature_pack
-        require_pack: error
         features: [x, y, mask_plasma, distance_signed, distance_any]
         distance_transform:
           mode: bounded_auto

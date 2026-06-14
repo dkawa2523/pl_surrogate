@@ -23,7 +23,6 @@ pytestmark = pytest.mark.torch_runtime
                 "target_family": "allvars",
                 "input_features": {
                     "mode": "geom_feature_pack",
-                    "require_pack": "error",
                     "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
                     "distance_transform": {"mode": "raw"},
                 },
@@ -42,7 +41,6 @@ pytestmark = pytest.mark.torch_runtime
                 "target_family": "allvars",
                 "input_features": {
                     "mode": "geom_feature_pack",
-                    "require_pack": "error",
                     "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
                     "distance_transform": {"mode": "raw"},
                 },

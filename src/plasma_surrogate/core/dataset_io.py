@@ -50,15 +50,15 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
         if key in ds_cfg:
             raise ValueError(
                 f"dataset.{key} is removed from mainline. "
-                "Use dataset.targets=[{id, source_key, units, dtype, value_transform}]"
+                "Use dataset.targets=[{id, source_key, units, dtype, value_transform, role, positive, field_family}]"
             )
     targets_raw = ds_cfg.get("targets")
     if not isinstance(targets_raw, list) or len(targets_raw) == 0:
         raise ValueError(
             "dataset.type=csv_npz requires non-empty dataset.targets "
-            "with entries: {id, source_key?, units?, dtype?, value_transform?}"
+            "with entries: {id, source_key?, units?, dtype?, value_transform?, role?, positive?, field_family?}"
         )
-    targets: list[dict[str, str]] = []
+    targets: list[dict[str, Any]] = []
     seen_target_ids: set[str] = set()
     for i, entry in enumerate(targets_raw):
         if not isinstance(entry, dict):
@@ -77,13 +77,27 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
             raise ValueError(
                 f"dataset.targets[{i}].value_transform must be one of: identity, pow10, exp10; got={value_transform}"
             )
-        targets.append(
-            {
-                "id": target_id,
-                "source_key": source_key,
-                "value_transform": value_transform,
-            }
-        )
+        target_meta: dict[str, Any] = {
+            "id": target_id,
+            "source_key": source_key,
+            "value_transform": value_transform,
+        }
+        for key in ("units", "dtype", "role", "field_family", "default_region"):
+            if key in entry and entry.get(key) is not None:
+                value = str(entry.get(key)).strip()
+                if value:
+                    target_meta[key] = value
+        if "positive" in entry:
+            raw_positive = entry.get("positive")
+            if isinstance(raw_positive, bool):
+                target_meta["positive"] = raw_positive
+            elif isinstance(raw_positive, str) and raw_positive.strip().lower() in {"true", "1", "yes", "on"}:
+                target_meta["positive"] = True
+            elif isinstance(raw_positive, str) and raw_positive.strip().lower() in {"false", "0", "no", "off"}:
+                target_meta["positive"] = False
+            else:
+                raise ValueError(f"dataset.targets[{i}].positive must be boolean-compatible")
+        targets.append(target_meta)
     axis_column = str(ds_cfg.get("axis_column", "axis"))
     fields_col = str(ds_cfg.get("fields_npz_column", "fields_npz"))
     structure_col_raw = ds_cfg.get("structure_npz_column")
@@ -197,6 +211,7 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
         geometry_root=geometry_root,
         shape=expected_shape,
         structure_root=root,
+        target_metadata=targets,
     )
 
 

@@ -61,7 +61,7 @@ def test_train_one_epoch_unet_passes_case_spatial_batches() -> None:
     assert float(np.mean(model.spatial_batches[1][..., 1])) == 2.0
 
 
-def test_compact_case_spatial_source_matches_legacy_pack() -> None:
+def test_compact_case_spatial_source_matches_combined_pack() -> None:
     h, w = 4, 5
     channels = [
         "x",
@@ -84,7 +84,7 @@ def test_compact_case_spatial_source_matches_legacy_pack() -> None:
     case_data[1, 1] = 21.0
     case_data[1, 2] = 22.0
 
-    legacy = np.concatenate(
+    combined = np.concatenate(
         [
             np.broadcast_to(static_data.reshape(1, 5, h, w), (2, 5, h, w)),
             case_data,
@@ -95,7 +95,7 @@ def test_compact_case_spatial_source_matches_legacy_pack() -> None:
         channels=channels,
         h=h,
         w=w,
-        pack={"data": legacy, "channels": np.asarray(channels)},
+        pack={"data": combined, "channels": np.asarray(channels)},
         static_pack={"data": static_data, "channels": np.asarray(channels[:5])},
         case_pack={"data": case_data, "channels": np.asarray(channels[5:])},
         distance_transform_cfg={"mode": "raw"},
@@ -105,5 +105,5 @@ def test_compact_case_spatial_source_matches_legacy_pack() -> None:
     assert source_name == "compact_case_spatial_pack"
     assert source is not None
     got = source.batch(np.asarray([1, 0], dtype=np.int64))
-    expected = np.stack([legacy[1].transpose(1, 2, 0), legacy[0].transpose(1, 2, 0)], axis=0)
+    expected = np.stack([combined[1].transpose(1, 2, 0), combined[0].transpose(1, 2, 0)], axis=0)
     np.testing.assert_allclose(got, expected)

@@ -34,6 +34,37 @@ def test_geom_v1_mainline_resolves_exact_five_channels() -> None:
     )
 
 
+def test_part_lite_v1_resolves_lightweight_boundary_and_part_channels() -> None:
+    assert resolve_spatial_channels_for_feature_profile("part_lite_v1") == (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "normal_x",
+        "normal_y",
+        "curvature_proxy",
+        "boundary_band",
+        "part_sdf_nearest",
+        "part_sdf_second",
+        "part_gap_proxy",
+        "solid_proximity",
+    )
+
+
+def test_part_semantic_v1_keeps_existing_boundary_plus_channels() -> None:
+    assert resolve_spatial_channels_for_feature_profile("part_semantic_v1") == (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "normal_x",
+        "normal_y",
+        "curvature_proxy",
+    )
+
+
 def test_icp_part_sdf_lite_resolves_exact_fourteen_channels() -> None:
     assert resolve_spatial_channels_for_feature_profile("icp_part_sdf_lite_v1") == (
         "x",
@@ -54,7 +85,7 @@ def test_icp_part_sdf_lite_resolves_exact_fourteen_channels() -> None:
 
 
 def test_descriptor_and_latent_profile_lists() -> None:
-    assert list_descriptor_profiles() == ("struct_desc_v1", "struct_desc_v2")
+    assert list_descriptor_profiles() == ("struct_desc_v1", "struct_desc_v2", "struct_desc_lite_v1")
     assert list_latent_profiles() == ("shape_ae_v1", "part_latent_v1")
 
 
@@ -71,3 +102,5 @@ def test_validate_coord_feature_channels_accepts_and_rejects() -> None:
     with pytest.raises(ValueError, match="duplicates"):
         validate_coord_feature_channels(["x", "x"])
     assert "mask_plasma" in set(ALLOWED_SPATIAL_CHANNELS)
+    assert "boundary_band" in set(ALLOWED_SPATIAL_CHANNELS)
+    assert "part_sdf_nearest" in set(ALLOWED_SPATIAL_CHANNELS)

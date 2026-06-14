@@ -1,4 +1,4 @@
-benchmark:
+﻿benchmark:
   output_dir: runs/periodic_real_tuned_v83/benchmark_m7_unetpp_attn_isolated_mainline
   profile: m7_unetpp_attn_isolated
   seed: 411
@@ -9,14 +9,8 @@ benchmark:
     protocol_variant: unetpp_attn_isolated_mainline
     target_family_for_score: allvars
     target_vars_for_score: [ne, ni, Te, phi]
-    primary_metric: test_r2_plasma_mean_dual
-    primary_mode: max
-    aggregate_score:
-      enabled: true
-      rmse_weight: 0.5
-      r2_weight: 0.4
-      boundary_penalty_weight: 0.1
-      use_plasma_metrics: true
+    primary_metric: surrogate_quality_score
+    objective_mode: min
     region_bands:
       mode: fixed_px
       boundary_in_px: 2.0
@@ -61,7 +55,7 @@ benchmark:
     distance_contract:
       require_negative_outside: error
     coord_grid_contract:
-      require_requested_source: warn
+      require_requested_source: error
     coord_grid_source: coord_grid
     coord_features:
       enabled: true
@@ -93,7 +87,6 @@ benchmark:
       target_vars: [ne, ni, Te, phi]
       input_features:
         mode: geom_feature_pack
-        require_pack: error
         features: [x, y, mask_plasma, distance_signed, distance_any]
         distance_transform:
           mode: bounded_auto

@@ -48,19 +48,19 @@ def _build_plasma_operator_from_meta(
     return DeepONetPlasmaOperatorTorch(
         cond_dim=int(root.get("cond_dim", meta.get("cond_dim"))),
         grid_shape=tuple(_get_meta_value(meta, root, "grid_shape", meta.get("grid_shape"))),
-        output_keys=list(output_keys if output_keys is not None else meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+        output_keys=list(output_keys if output_keys is not None else meta.get("output_keys", ["target_0", "target_1", "target_2", "target_3"])),
         latent_dim=int(_get_meta_value(meta, root, "latent_dim", 32)),
         hidden_dim=int(_get_meta_value(meta, root, "hidden_dim", 64)),
         sensor_indices=np.asarray(_get_meta_value(meta, root, "sensor_indices", []), dtype=np.int64),
         query_indices=np.asarray(_get_meta_value(meta, root, "query_indices", []), dtype=np.int64),
         flatten_order=str(_get_meta_value(meta, root, "flatten_order", "C")),
         sensor_feature_names=list(_get_meta_value(meta, root, "sensor_feature_names", DEFAULT_SENSOR_FEATURE_NAMES)),
-        trunk_input_mode=str(_get_meta_value(meta, root, "trunk_input_mode", "legacy_xy_fourier")),
+        trunk_input_mode=str(_get_meta_value(meta, root, "trunk_input_mode", "geom_feature_pack")),
         sensor_pool_mode=str(_get_meta_value(meta, root, "sensor_pool_mode", "moments")),
         sensor_embed_dim=int(_get_meta_value(meta, root, "sensor_embed_dim", 32)),
         branch_mode=str(_get_meta_value(meta, root, "branch_mode", "moments")),
         trunk_fourier_n_freq=int(_get_meta_value(meta, root, "trunk_fourier_n_freq", 1)),
-        trunk_fourier_mode=str(_get_meta_value(meta, root, "trunk_fourier_mode", "legacy")),
+        trunk_fourier_mode=str(_get_meta_value(meta, root, "trunk_fourier_mode", "symmetric")),
         trunk_cond_modulation=str(_get_meta_value(meta, root, "trunk_cond_modulation", "none")),
         trunk_cond_mod_hidden=int(_get_meta_value(meta, root, "trunk_cond_mod_hidden", 64)),
         residual_head_enabled=bool(_get_meta_value(meta, root, "residual_head_enabled", False)),
@@ -75,7 +75,7 @@ def _build_plasma_operator_from_meta(
         output_path_fused_hidden_dim=int(_get_meta_value(meta, root, "output_path_fused_hidden_dim", 96)),
         output_path_global_local_enabled=bool(_get_meta_value(meta, root, "output_path_global_local_enabled", False)),
         output_path_global_hidden_dim=int(_get_meta_value(meta, root, "output_path_global_hidden_dim", 64)),
-        missing_geom_feature_policy=str(_get_meta_value(meta, root, "missing_geom_feature_policy", "warn_zero")),
+        missing_geom_feature_policy=str(_get_meta_value(meta, root, "missing_geom_feature_policy", "error")),
     )
 
 

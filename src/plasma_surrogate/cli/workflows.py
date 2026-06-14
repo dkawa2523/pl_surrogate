@@ -17,19 +17,18 @@ from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.data_cleaning_audit import run_data_audit
 from plasma_surrogate.core.input_modes import (
     GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
-    INPUT_MODE_FALLBACK_APPLIED_KEY,
     INPUT_MODE_EFFECTIVE_KEY,
     STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
     STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
     STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+    attach_runtime_schema_hashes,
     build_input_mode_effective_metadata,
-    extract_descriptor_latent_metadata,
     load_checkpoint_metadata_with_input_mode,
     merge_effective_runtime_metadata,
-    resolve_runtime_controls,
 )
 from plasma_surrogate.core.model_input_policy import resolve_effective_input_mode_metadata_for_model
 from plasma_surrogate.core.physics_contract import build_physics_cfg
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.data.geometry_provider import build_geometry_provider
 from plasma_surrogate.eval.metrics_builder import (
     build_eval_metrics_payload,
@@ -55,6 +54,7 @@ from plasma_surrogate.train.model_dispatch import (
     run_model_train_predict,
     validate_runtime_model_policy,
 )
+from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
 from plasma_surrogate.viz.runner import VizRunner
 
 DEFAULT_TASK_SPEC: dict[str, Any] = {}
@@ -103,11 +103,18 @@ def _build_inference_engine_from_bundle(
     model_name: str | None = None,
 ) -> InferenceEngine:
     cfg = dict(bundle.cfg or {})
-    strict_input_mode, allow_mode_fallback = resolve_runtime_controls(cfg)
-    effective_input_mode_meta = dict(input_mode_meta or build_input_mode_effective_metadata(cfg))
+    effective_input_mode_meta = attach_runtime_schema_hashes(
+        dict(input_mode_meta or build_input_mode_effective_metadata(cfg)),
+        schemas=dict(bundle.schemas or {}),
+        schema_hashes=dict(bundle.schemas.get("runtime_schema_hashes", {}) or {}),
+    )
     effective_checkpoint_input_mode_meta = dict(checkpoint_input_mode_meta or {})
     model_cfg = cfg.get("model", {})
     inf_cfg = cfg.get("inference", {})
+    ood_cfg = dict(inf_cfg.get("ood", {"poisson_residual_limit": 1e2}) or {})
+    for key in ("qoi", "postprocess"):
+        if key in inf_cfg:
+            ood_cfg[key] = dict(inf_cfg.get(key, {}) or {})
     resolved_model_name = str(model_name or model_cfg.get("name", "unet"))
     provider_mode = str(effective_input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")).strip().lower() or "fixed"
     geometry_provider = build_geometry_provider(dataset_root, provider_mode=provider_mode)
@@ -122,17 +129,16 @@ def _build_inference_engine_from_bundle(
         phi_mode=str(model_cfg.get("phi_mode", "direct")),
         phi_hybrid_steps=int(model_cfg.get("phi_hybrid_steps", 1)),
         poisson_refine_iters=int(inf_cfg.get("poisson_refine", {}).get("iters", 0)),
-        ood_cfg=inf_cfg.get("ood", {"poisson_residual_limit": 1e2}),
+        ood_cfg=ood_cfg,
         feature_store=feature_store,
         coord_scaler=bundle.transforms.get("coord_scaler", {}),
         coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
         coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
         coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
         input_mode_meta=effective_input_mode_meta,
-        strict_input_mode=strict_input_mode,
-        allow_mode_fallback=allow_mode_fallback,
         checkpoint_meta=dict(checkpoint_meta or {}),
         checkpoint_input_mode_meta=effective_checkpoint_input_mode_meta,
+        target_role_schema=bundle.schemas.get("target_role_schema", {}),
         structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
         latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
         deeponet_head=(
@@ -211,8 +217,6 @@ def _resolve_physics_cfg(cfg: dict[str, Any], dataset_root: Path) -> dict[str, A
         geom_ctx=geom_ctx,
         default_enabled=False,
         default_primary_qoi_key="Gamma_i",
-        default_lambda_poisson=0.05,
-        default_lambda_bc=0.02,
     )
 
 
@@ -232,8 +236,50 @@ def _resolve_optimize_backend(opt_cfg: dict[str, Any]) -> str:
         return "csv"
     raise ValueError(
         "Unsupported inference.optimize.sampler. "
-        "Use backend='random|optuna|csv' (legacy sampler supports random|optuna_grid|csv)."
+        "Use backend='random|optuna|csv|two_stage' (legacy sampler supports random|optuna_grid|csv)."
     )
+
+
+def _load_target_role_schema(run_dir: Path) -> dict[str, Any]:
+    path = run_dir / "preprocessing" / "schema" / "target_role_schema.json"
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as f:
+        return dict(json.load(f) or {})
+
+
+def _combined_inference_symbols(cfg: dict[str, Any]) -> dict[str, Any]:
+    inf_cfg = dict(cfg.get("inference", {}) or {})
+    ood_cfg = dict(inf_cfg.get("ood", {}) or {})
+    symbols: dict[str, Any] = {}
+    for section_name in ("physics", "boundary_operator"):
+        section = dict(ood_cfg.get(section_name, {}) or {})
+        raw = section.get("symbols")
+        if isinstance(raw, dict):
+            symbols.update({str(k): v for k, v in raw.items()})
+    return symbols
+
+
+def _resolve_viz_density_key(
+    *,
+    field_keys: list[str],
+    target_role_schema: dict[str, Any],
+    cfg: dict[str, Any],
+) -> str | None:
+    symbols = _combined_inference_symbols(cfg)
+    try:
+        resolved = resolve_physics_symbol_keys(
+            field_keys,
+            symbols=symbols,
+            target_role_schema=target_role_schema,
+            required=("density",),
+            context="viz region metrics",
+        )
+    except ValueError:
+        if symbols.get("density") is not None:
+            raise
+        return None
+    return resolved["density"]
 
 
 def _parse_box_space(raw_space: dict[str, Any], *, cfg_key: str) -> dict[str, tuple[float, float]]:
@@ -257,7 +303,6 @@ def _parse_box_space(raw_space: dict[str, Any], *, cfg_key: str) -> dict[str, tu
 def _inference_case_summary_row(*, role: str, case: InferenceCase, result: Any) -> dict[str, Any]:
     qoi = dict(getattr(result, "qoi", {}) or {})
     diagnostics = dict(getattr(result, "diagnostics", {}) or {})
-    warnings = list(getattr(result, "warnings", []) or [])
     return {
         "role": str(role),
         "case_id": str(case.case_id),
@@ -270,13 +315,11 @@ def _inference_case_summary_row(*, role: str, case: InferenceCase, result: Any) 
         "poisson_residual_norm": _summary_float(diagnostics.get("poisson_residual_norm")),
         "bc_phi_mae": _summary_float(diagnostics.get("bc_phi_mae")),
         "boundary_operator_proxy_loss": _summary_float(diagnostics.get("boundary_operator_proxy_loss")),
-        "warnings": ";".join(str(w) for w in warnings),
         "cond": dict(case.cond),
         "geom": dict(case.geom),
         "axis": dict(case.axis),
         "qoi": qoi,
         "diagnostics": diagnostics,
-        "warning_list": warnings,
     }
 
 
@@ -306,7 +349,6 @@ def _write_inference_case_summaries(run_dir: Path, rows: list[dict[str, Any]]) -
         "poisson_residual_norm",
         "bc_phi_mae",
         "boundary_operator_proxy_loss",
-        "warnings",
     ]
     csv_rows = [["" if row.get(key) is None else row.get(key, "") for key in csv_header] for row in rows]
     csv_path = store.save_csv("cases_summary.csv", csv_header, csv_rows)
@@ -348,7 +390,11 @@ def run_preprocess(config_path: str | Path) -> dict[str, Any]:
         runtime_input_mode_meta=input_mode_meta,
         runtime_cfg=dict(cfg.get("runtime", {})),
     )
-    output = pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
+    output = pre.run(
+        cases=dataset.cases,
+        geometry_root=dataset.geometry_root,
+        target_metadata=getattr(dataset, "target_metadata", []),
+    )
     audit = run_data_audit(
         cases=dataset.cases,
         cond_order=dataset.cond_order,
@@ -441,7 +487,11 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     y_vars = _resolve_y_vars(dataset.cases)
     if bundle is None:
         raise RuntimeError("RuntimeContext missing RunBundle for train")
-    input_mode_meta = build_input_mode_effective_metadata(cfg)
+    input_mode_meta = attach_runtime_schema_hashes(
+        build_input_mode_effective_metadata(cfg),
+        schemas=dict(bundle.schemas or {}),
+        schema_hashes=dict(bundle.schemas.get("runtime_schema_hashes", {}) or {}),
+    )
 
     _write_run_metadata(run_dir, cfg, dataset.shape, y_vars)
     split = bundle.split_random()
@@ -474,9 +524,13 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     train_cfg = cfg.get("train", {})
     epochs = int(train_cfg.get("epochs", 20))
     lr = float(train_cfg.get("lr", 1e-2))
-    loss_cfg = dict(train_cfg.get("loss", {}))
+    loss_cfg = resolve_loss_protocol(
+        dict(train_cfg.get("loss", {})),
+        target_role_schema=bundle.schemas.get("target_role_schema", {}),
+    )
     curriculum_cfg = dict(train_cfg.get("curriculum", {}))
     physics_cfg = _resolve_physics_cfg(cfg, dataset_root=dataset.geometry_root)
+    physics_cfg["target_role_schema"] = bundle.schemas.get("target_role_schema", {})
     geom_ctx = None
     use_plasma_mask = str(loss_cfg.get("supervised", {}).get("mask", "none")).strip().lower() == "plasma_only"
     if phi_mode != "direct" or physics_cfg.get("enabled") or use_plasma_mask:
@@ -659,7 +713,11 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
     feat_store = ctx.feature_store
     if bundle is None:
         raise RuntimeError("RuntimeContext missing RunBundle for infer")
-    input_mode_meta = build_input_mode_effective_metadata(cfg)
+    input_mode_meta = attach_runtime_schema_hashes(
+        build_input_mode_effective_metadata(cfg),
+        schemas=dict(bundle.schemas or {}),
+        schema_hashes=dict(bundle.schemas.get("runtime_schema_hashes", {}) or {}),
+    )
     checkpoint_meta_path = run_dir / "checkpoints" / "meta.json"
     checkpoint_meta, checkpoint_input_mode_meta = load_checkpoint_metadata_with_input_mode(checkpoint_meta_path)
 
@@ -700,7 +758,6 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
         single_case = parse_single_case(single_cfg, cond_schema=cond_schema, axis_schema=axis_schema)
         single = engine.single_run_aggregated(cond=single_case.cond, geom=single_case.geom, axis=single_case.axis)
         results["single_qoi"] = single.qoi
-        results["single_warnings"] = list(single.warnings)
         case_summary_rows.append(_inference_case_summary_row(role="single", case=single_case, result=single))
 
     batch_cfg = inf_cfg.get("batch", {})
@@ -720,7 +777,7 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
         _write_batch_summary_from_case_rows(engine, batch_summary_rows)
         results["batch_count"] = len(batch_cases)
 
-    opt_cfg = inf_cfg.get("optimize", {})
+    opt_cfg = dict(inf_cfg.get("optimize", {}) or {})
     if opt_cfg.get("enabled", False):
         axis = opt_cfg.get("axis", {"mode": axis_schema.mode, "value": 0.0})
         space_cfg = opt_cfg.get("space")
@@ -760,6 +817,9 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
             seed=int(opt_cfg.get("seed", 0)),
             backend=backend,
             backend_cfg=backend_cfg,
+            objective_cfg=dict(opt_cfg.get("objective", {}) or {}),
+            constraints_cfg=opt_cfg.get("constraints", []) or [],
+            output_cfg=dict(opt_cfg.get("output", {}) or {}),
         )
         results["optimize"] = best
     case_summary_paths = _write_inference_case_summaries(run_dir, case_summary_rows)
@@ -771,8 +831,6 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
         }
     infer_summary = {
         **input_mode_meta,
-        **extract_descriptor_latent_metadata(checkpoint_meta),
-        INPUT_MODE_FALLBACK_APPLIED_KEY: bool(getattr(engine, "input_mode_fallback_applied", False)),
         "result_keys": sorted(list(results.keys())),
         "inference_case_count": len(case_summary_rows),
     }
@@ -803,14 +861,19 @@ def run_evaluate(config_path: str | Path) -> dict[str, Any]:
     if metrics_path.exists():
         payload = dict(json.loads(metrics_path.read_text(encoding="utf-8")))
     ckpt_meta_path = run_dir / "checkpoints" / "meta.json"
-    if ckpt_meta_path.exists():
-        ckpt_meta = json.loads(ckpt_meta_path.read_text(encoding="utf-8"))
-        payload.update(extract_descriptor_latent_metadata(ckpt_meta))
     model_name = normalize_model_name(dict(ctx.cfg.get("model", {})).get("name", "global_mlp"))
+    bundle = ctx.bundle
+    input_mode_meta = build_input_mode_effective_metadata(ctx.cfg)
+    if bundle is not None:
+        input_mode_meta = attach_runtime_schema_hashes(
+            input_mode_meta,
+            schemas=dict(bundle.schemas or {}),
+            schema_hashes=dict(bundle.schemas.get("runtime_schema_hashes", {}) or {}),
+        )
     payload.update(
         resolve_effective_input_mode_metadata_for_model(
             model_name=model_name,
-            input_mode_meta=build_input_mode_effective_metadata(ctx.cfg),
+            input_mode_meta=input_mode_meta,
         )
     )
     out_path = ArtifactStore(eval_dir).save_json("summary.json", payload)
@@ -861,6 +924,7 @@ def run_viz(config_path: str | Path) -> dict[str, Any]:
 
     run_dir = Path(cfg.get("run_dir", "runs/cycle1"))
     viz = VizRunner(run_dir / "viz")
+    target_role_schema = _load_target_role_schema(run_dir)
 
     metrics_csv = run_dir / "train" / "scalars" / "metrics.csv"
     plots: list[str] = []
@@ -914,23 +978,24 @@ def run_viz(config_path: str | Path) -> dict[str, Any]:
         for cdir in case_dirs:
             diag_rows.append(build_single_case_physics_metrics(cdir))
 
-            fields = np.load(cdir / "fields_phys.npz")
-            density_key = "ne" if "ne" in fields.files else "log_ne"
-            if density_key not in fields.files:
-                raise KeyError(f"fields_phys.npz must include ne or log_ne: {cdir}")
-            density_map = np.asarray(fields[density_key], dtype=np.float32)[0]
-            if density_key == "log_ne":
-                density_map = np.power(10.0, density_map.astype(np.float64)).astype(np.float32)
-            region_rows.append(
-                build_region_metrics(
-                    case_key=cdir.name,
-                    density=density_map,
-                    density_key="ne",
-                    mask_plasma=mask_plasma,
-                    mask_bulk=mask_bulk,
-                    mask_boundary=mask_boundary,
+            with np.load(cdir / "fields_phys.npz") as fields:
+                density_key = _resolve_viz_density_key(
+                    field_keys=[str(k) for k in fields.files],
+                    target_role_schema=target_role_schema,
+                    cfg=cfg,
                 )
-            )
+                if density_key is not None:
+                    density_map = np.asarray(fields[density_key], dtype=np.float32)[0]
+                    region_rows.append(
+                        build_region_metrics(
+                            case_key=cdir.name,
+                            density=density_map,
+                            density_key=density_key,
+                            mask_plasma=mask_plasma,
+                            mask_bulk=mask_bulk,
+                            mask_boundary=mask_boundary,
+                        )
+                )
 
         if diag_rows:
             table_payload = build_viz_tables_payload(diag_rows=diag_rows, region_rows=region_rows)

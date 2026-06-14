@@ -62,7 +62,6 @@ def test_infer_ffno_smoke(tmp_path: Path, local_skip_enabled: bool) -> None:
                 "target_family": "allvars",
                 "input_features": {
                     "mode": "geom_feature_pack",
-                    "require_pack": "error",
                     "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
                     "distance_transform": {"mode": "raw"},
                 },

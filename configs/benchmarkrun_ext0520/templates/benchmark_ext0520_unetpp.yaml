@@ -13,14 +13,8 @@ benchmark:
     - ni
     - Te
     - phi
-    primary_metric: test_r2_plasma_mean_dual
-    primary_mode: max
-    aggregate_score:
-      enabled: true
-      rmse_weight: 0.5
-      r2_weight: 0.4
-      boundary_penalty_weight: 0.1
-      use_plasma_metrics: true
+    primary_metric: surrogate_quality_score
+    objective_mode: min
     region_bands:
       mode: fixed_px
       boundary_in_px: 2.0
@@ -229,8 +223,6 @@ benchmark:
       value: 0.0
   runtime:
     input_mode: table_plus_structure
-    strict_input_mode: error
-    allow_mode_fallback: false
     structure:
       feature_profile: geom_v1_mainline
       descriptor_profile: none
@@ -239,8 +231,6 @@ benchmark:
       provider_mode: fixed
 runtime:
   input_mode: table_plus_structure
-  strict_input_mode: error
-  allow_mode_fallback: false
   structure:
     feature_profile: geom_v1_mainline
     descriptor_profile: none

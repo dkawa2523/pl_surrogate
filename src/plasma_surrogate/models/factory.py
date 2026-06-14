@@ -2,22 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Callable
 
-from plasma_surrogate.core.model_families import (
-    CNO_FAMILY_MODELS,
-    COORD_MLP_FAMILY_MODELS,
-    GEOM_DEEPONET_SIREN_FAMILY_MODELS,
-    POD_DEEPONET_FAMILY_MODELS,
-    UNETPP_FAMILY_MODELS,
-    UNO_FAMILY_MODELS,
-)
+from plasma_surrogate.core.model_specs import get_model_spec
+from plasma_surrogate.core.model_families import COORD_MLP_FAMILY_MODELS
 from plasma_surrogate.models.cno.operator_unet import CNOOperatorUNet, normalize_cno_operator_unet_cfg
 from plasma_surrogate.models.cno.simple_cno import CNOBaseline, normalize_cno_cfg
 from plasma_surrogate.models.deeponet.geom_deeponet_siren import (
     GeomDeepONetSIREN,
     normalize_geom_deeponet_siren_cfg,
 )
+from plasma_surrogate.models.deeponet.plasma_operator_torch import DeepONetPlasmaOperatorTorch
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import (
     PODBasisBundle,
     PODDeepONetTorch,
@@ -38,6 +33,62 @@ from plasma_surrogate.models.uno.simple_uno import UNOBaseline, normalize_uno_cf
 
 __all__ = ["build_model_from_name"]
 
+_MODEL_BUILDER = Callable[..., Any]
+
+
+def _build_global_mlp_family_model(
+    *,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    seed: int,
+    **_: Any,
+) -> GlobalMLP:
+    return GlobalMLP(
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        seed=int(seed),
+        hidden=list(cfg.get("hidden", [128, 128])),
+        dropout=float(cfg.get("dropout", 0.1)),
+        weight_decay=float(cfg.get("weight_decay", 0.0)),
+    )
+
+
+def _build_unet_family_model(
+    *,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    with_rho: bool,
+    unet_feature_channels: list[str] | None,
+    seed: int,
+    **_: Any,
+) -> UNetBaseline:
+    conv_cfg = dict(cfg.get("conv_cfg", {}))
+    if "base_channels" in cfg and "base_channels" not in conv_cfg:
+        conv_cfg["base_channels"] = int(cfg.get("base_channels", 32))
+    if "upsample_mode" in cfg and "upsample_mode" not in conv_cfg:
+        conv_cfg["upsample_mode"] = str(cfg.get("upsample_mode"))
+    return UNetBaseline(
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        with_rho_eff_head=with_rho,
+        head_mlp=dict(cfg.get("head_mlp", {})),
+        backend=str(cfg.get("backend", "torch")),
+        input_feature_channels=list(unet_feature_channels or ["x", "y"]),
+        conv_cfg=conv_cfg,
+        output_heads=dict(cfg.get("output_heads", {})),
+        seed=int(seed),
+    )
+
 
 def _build_unetpp_family_model(
     *,
@@ -50,6 +101,7 @@ def _build_unetpp_family_model(
     with_rho: bool,
     unet_feature_channels: list[str] | None,
     seed: int,
+    **_: Any,
 ) -> UNetPPBaseline:
     conv_cfg = dict(cfg.get("conv_cfg", {}))
     if "base_channels" in cfg and "base_channels" not in conv_cfg:
@@ -77,6 +129,73 @@ def _build_unetpp_family_model(
     )
 
 
+def _build_unet_operator_family_model(
+    *,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    with_rho: bool,
+    unet_feature_channels: list[str] | None,
+    seed: int,
+    **_: Any,
+) -> UNetOperatorV2:
+    backend = str(cfg.get("backend", "torch")).strip().lower()
+    if backend != "torch":
+        raise ValueError("train.unet_operator_v2.model_cfg.backend must be torch")
+    return UNetOperatorV2(
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        with_rho_eff_head=with_rho,
+        head_mlp=dict(cfg.get("head_mlp", {})),
+        input_feature_channels=list(
+            unet_feature_channels or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
+        ),
+        unet_operator_v2_cfg=normalize_unet_operator_v2_cfg(dict(cfg.get("unet_operator_v2_cfg", {}))),
+        seed=int(seed),
+        backend=backend,
+    )
+
+
+def _build_spectral_family_model(
+    *,
+    model_name: str,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    with_rho: bool,
+    unet_feature_channels: list[str] | None,
+    seed: int,
+    **_: Any,
+) -> FNOBaseline | FFNOBaseline:
+    model_key = str(model_name).strip().lower()
+    model_cls: type[FNOBaseline] | type[FFNOBaseline]
+    if model_key == "fno":
+        model_cls = FNOBaseline
+    elif model_key == "ffno":
+        model_cls = FFNOBaseline
+    else:
+        raise ValueError(f"Unsupported spectral model family member: {model_name}")
+    return model_cls(
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        with_rho_eff_head=with_rho,
+        n_modes=int(cfg.get("fno_n_modes", cfg.get("n_modes", 2))),
+        head_mlp=dict(cfg.get("head_mlp", {})),
+        input_feature_channels=list(unet_feature_channels or ["x", "y"]),
+        spectral_cfg=dict(cfg.get("spectral_cfg", {})),
+        seed=int(seed),
+        backend=str(cfg.get("backend", "torch")),
+    )
+
+
 def _build_coord_mlp_family_model(
     *,
     model_name: str,
@@ -88,6 +207,7 @@ def _build_coord_mlp_family_model(
     unet_feature_channels: list[str] | None,
     seed: int,
     pod_basis_bundle: PODBasisBundle | None = None,
+    **_: Any,
 ) -> Any:
     model_key = str(model_name).strip().lower()
     if model_key not in COORD_MLP_FAMILY_MODELS:
@@ -134,6 +254,7 @@ def _build_uno_family_model(
     with_rho: bool,
     unet_feature_channels: list[str] | None,
     seed: int,
+    **_: Any,
 ) -> UNOBaseline:
     backend = str(cfg.get("backend", "torch")).strip().lower()
     if backend != "torch":
@@ -164,6 +285,7 @@ def _build_cno_family_model(
     with_rho: bool,
     unet_feature_channels: list[str] | None,
     seed: int,
+    **_: Any,
 ) -> Any:
     backend = str(cfg.get("backend", "torch")).strip().lower()
     if backend != "torch":
@@ -207,6 +329,7 @@ def _build_geom_deeponet_siren_family_model(
     with_rho: bool,
     unet_feature_channels: list[str] | None,
     seed: int,
+    **_: Any,
 ) -> GeomDeepONetSIREN:
     backend = str(cfg.get("backend", "torch")).strip().lower()
     if backend != "torch":
@@ -226,6 +349,55 @@ def _build_geom_deeponet_siren_family_model(
     )
 
 
+def _build_deeponet_plasma_family_model(
+    *,
+    cfg: dict[str, Any],
+    input_dim: int,
+    grid_shape: tuple[int, int],
+    out_channels: int,
+    output_keys: list[str] | None,
+    unet_feature_channels: list[str] | None,
+    seed: int,
+    **_: Any,
+) -> DeepONetPlasmaOperatorTorch:
+    model_cfg = dict(cfg.get("model_cfg", cfg))
+    residual_head_cfg = dict(model_cfg.get("residual_head", {}))
+    output_path_cfg = dict(model_cfg.get("output_path", {}))
+    keys = list(output_keys or [f"target_{idx}" for idx in range(int(out_channels))])
+    return DeepONetPlasmaOperatorTorch(
+        cond_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        output_keys=keys,
+        latent_dim=int(model_cfg.get("latent_dim", 32)),
+        hidden_dim=int(model_cfg.get("hidden_dim", 64)),
+        sensor_feature_names=list(
+            unet_feature_channels or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
+        ),
+        trunk_input_mode=str(model_cfg.get("trunk_input_mode", "geom_feature_pack")),
+        sensor_pool_mode=str(model_cfg.get("sensor_pool_mode", "moments")),
+        sensor_embed_dim=int(model_cfg.get("sensor_embed_dim", 32)),
+        branch_mode=str(model_cfg.get("branch_mode", "moments")),
+        trunk_fourier_n_freq=int(model_cfg.get("trunk_fourier_n_freq", 1)),
+        trunk_fourier_mode=str(model_cfg.get("trunk_fourier_mode", "symmetric")),
+        trunk_cond_modulation=str(model_cfg.get("trunk_cond_modulation", "none")),
+        trunk_cond_mod_hidden=int(model_cfg.get("trunk_cond_mod_hidden", 64)),
+        residual_head_enabled=bool(residual_head_cfg.get("enabled", False)),
+        residual_head_hidden_dim=int(residual_head_cfg.get("hidden_dim", 64)),
+        residual_head_scale_init=float(residual_head_cfg.get("scale_init", 0.0)),
+        residual_head_gain_mode=str(residual_head_cfg.get("gain_mode", "learned")),
+        residual_head_gain_value=float(residual_head_cfg.get("gain_value", 1.0)),
+        latent_layer_norm=bool(model_cfg.get("latent_layer_norm", False)),
+        output_path_mode=str(output_path_cfg.get("mode", "dot")),
+        output_path_dot_skip=float(output_path_cfg.get("dot_skip", 0.25)),
+        output_path_dot_skip_mode=str(output_path_cfg.get("dot_skip_mode", "fixed")),
+        output_path_fused_hidden_dim=int(output_path_cfg.get("fused_hidden_dim", 96)),
+        output_path_global_local_enabled=bool(output_path_cfg.get("global_local", {}).get("enabled", False)),
+        output_path_global_hidden_dim=int(output_path_cfg.get("global_hidden_dim", 64)),
+        missing_geom_feature_policy=str(model_cfg.get("missing_geom_feature_policy", "error")),
+        seed=int(seed),
+    )
+
+
 def _build_pod_deeponet_model(
     *,
     model_name: str,
@@ -236,6 +408,7 @@ def _build_pod_deeponet_model(
     output_keys: list[str] | None,
     seed: int,
     pod_basis_bundle: PODBasisBundle | None = None,
+    **_: Any,
 ) -> PODDeepONetTorch:
     model_type = str(model_name).strip().lower()
     cfg_local = normalize_pod_deeponet_model_cfg(cfg, model_type=model_type)
@@ -250,6 +423,21 @@ def _build_pod_deeponet_model(
         backend=str(dict(cfg).get("backend", "torch")),
         model_type=model_type,
     )
+
+
+_FAMILY_BUILDERS: dict[str, _MODEL_BUILDER] = {
+    "global_mlp": _build_global_mlp_family_model,
+    "unet": _build_unet_family_model,
+    "unetpp": _build_unetpp_family_model,
+    "unet_operator": _build_unet_operator_family_model,
+    "spectral": _build_spectral_family_model,
+    "coord_mlp": _build_coord_mlp_family_model,
+    "uno": _build_uno_family_model,
+    "cno": _build_cno_family_model,
+    "geom_deeponet_siren": _build_geom_deeponet_siren_family_model,
+    "deeponet_plasma": _build_deeponet_plasma_family_model,
+    "pod_deeponet": _build_pod_deeponet_model,
+}
 
 
 def build_model_from_name(
@@ -270,152 +458,20 @@ def build_model_from_name(
 
     cfg = dict(model_cfg or {})
     with_rho = bool(cfg.get("rho_eff_head", str(phi_mode) == "poisson_hybrid"))
-    name = str(model_name)
-    if name == "global_mlp":
-        return GlobalMLP(
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            seed=int(seed),
-            hidden=list(cfg.get("hidden", [128, 128])),
-            dropout=float(cfg.get("dropout", 0.1)),
-            weight_decay=float(cfg.get("weight_decay", 0.0)),
-        )
-    if name == "unet":
-        conv_cfg = dict(cfg.get("conv_cfg", {}))
-        if "base_channels" in cfg and "base_channels" not in conv_cfg:
-            conv_cfg["base_channels"] = int(cfg.get("base_channels", 32))
-        if "upsample_mode" in cfg and "upsample_mode" not in conv_cfg:
-            conv_cfg["upsample_mode"] = str(cfg.get("upsample_mode"))
-        return UNetBaseline(
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho_eff_head=with_rho,
-            head_mlp=dict(cfg.get("head_mlp", {})),
-            backend=str(cfg.get("backend", "numpy")),
-            input_feature_channels=list(unet_feature_channels or ["x", "y"]),
-            conv_cfg=conv_cfg,
-            output_heads=dict(cfg.get("output_heads", {})),
-            seed=int(seed),
-        )
-    if name in UNETPP_FAMILY_MODELS:
-        return _build_unetpp_family_model(
-            model_name=name,
-            cfg=cfg,
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho=with_rho,
-            unet_feature_channels=unet_feature_channels,
-            seed=int(seed),
-        )
-    if name == "unet_operator_v2":
-        backend = str(cfg.get("backend", "torch")).strip().lower()
-        if backend != "torch":
-            raise ValueError("train.unet_operator_v2.model_cfg.backend must be torch")
-        return UNetOperatorV2(
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho_eff_head=with_rho,
-            head_mlp=dict(cfg.get("head_mlp", {})),
-            input_feature_channels=list(
-                unet_feature_channels or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
-            ),
-            unet_operator_v2_cfg=normalize_unet_operator_v2_cfg(
-                dict(cfg.get("unet_operator_v2_cfg", {}))
-            ),
-            seed=int(seed),
-            backend=backend,
-        )
-    if name in COORD_MLP_FAMILY_MODELS:
-        return _build_coord_mlp_family_model(
-            model_name=name,
-            cfg=cfg,
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            unet_feature_channels=unet_feature_channels,
-            seed=int(seed),
-            pod_basis_bundle=pod_basis_bundle,
-        )
-    if name in UNO_FAMILY_MODELS:
-        return _build_uno_family_model(
-            cfg=cfg,
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho=with_rho,
-            unet_feature_channels=unet_feature_channels,
-            seed=int(seed),
-        )
-    if name in CNO_FAMILY_MODELS:
-        return _build_cno_family_model(
-            model_name=name,
-            cfg=cfg,
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho=with_rho,
-            unet_feature_channels=unet_feature_channels,
-            seed=int(seed),
-        )
-    if name in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
-        return _build_geom_deeponet_siren_family_model(
-            cfg=cfg,
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho=with_rho,
-            unet_feature_channels=unet_feature_channels,
-            seed=int(seed),
-        )
-    if name in POD_DEEPONET_FAMILY_MODELS:
-        return _build_pod_deeponet_model(
-            model_name=name,
-            cfg=cfg,
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            seed=int(seed),
-            pod_basis_bundle=pod_basis_bundle,
-        )
-    if name == "fno":
-        return FNOBaseline(
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho_eff_head=with_rho,
-            n_modes=int(cfg.get("fno_n_modes", cfg.get("n_modes", 2))),
-            head_mlp=dict(cfg.get("head_mlp", {})),
-            input_feature_channels=list(unet_feature_channels or ["x", "y"]),
-            spectral_cfg=dict(cfg.get("spectral_cfg", {})),
-            seed=int(seed),
-            backend=str(cfg.get("backend", "torch")),
-        )
-    if name == "ffno":
-        return FFNOBaseline(
-            input_dim=int(input_dim),
-            grid_shape=tuple(grid_shape),
-            out_channels=int(out_channels),
-            output_keys=output_keys,
-            with_rho_eff_head=with_rho,
-            n_modes=int(cfg.get("fno_n_modes", cfg.get("n_modes", 2))),
-            head_mlp=dict(cfg.get("head_mlp", {})),
-            input_feature_channels=list(unet_feature_channels or ["x", "y"]),
-            spectral_cfg=dict(cfg.get("spectral_cfg", {})),
-            seed=int(seed),
-            backend=str(cfg.get("backend", "torch")),
-        )
-    raise ValueError(f"Unsupported model.name: {model_name}")
+    spec = get_model_spec(model_name)
+    builder = _FAMILY_BUILDERS.get(spec.family)
+    if builder is None:
+        raise ValueError(f"Unsupported model family: model={spec.name}, family={spec.family}")
+    return builder(
+        model_name=spec.name,
+        cfg=cfg,
+        input_dim=int(input_dim),
+        grid_shape=tuple(grid_shape),
+        out_channels=int(out_channels),
+        output_keys=output_keys,
+        coord_feature_dim=int(coord_feature_dim),
+        with_rho=with_rho,
+        unet_feature_channels=unet_feature_channels,
+        seed=int(seed),
+        pod_basis_bundle=pod_basis_bundle,
+    )

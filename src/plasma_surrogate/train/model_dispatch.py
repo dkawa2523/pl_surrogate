@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -28,9 +28,6 @@ from plasma_surrogate.core.model_input_policy import (
     validate_model_input_mode,
 )
 from plasma_surrogate.core.model_specs import normalize_model_name
-from plasma_surrogate.core.density_contract import (
-    resolve_allvars_order,
-)
 from plasma_surrogate.core.model_families import POD_DEEPONET_FAMILY_MODELS
 from plasma_surrogate.core.deeponet_contract import (
     load_supervised_boundary_targets,
@@ -52,6 +49,7 @@ from plasma_surrogate.train.model_adapters import (
     resolve_train_model_adapter,
 )
 from plasma_surrogate.train.deeponet_stages import resolve_deeponet_stages
+from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
 from plasma_surrogate.train.spatial_features import (
     apply_coord_feature_scaling as _apply_coord_feature_scaling,
     apply_distance_transform as _apply_distance_transform,
@@ -378,7 +376,7 @@ def _validate_deeponet_mainline_contract(
     if operator_mode != "plain":
         raise ValueError(f"{cfg_prefix}.operator_mode must be plain for mainline")
     model_cfg = dict(deeponet_cfg.get("model_cfg", {}))
-    trunk_mode = str(model_cfg.get("trunk_input_mode", "legacy_xy_fourier")).strip().lower()
+    trunk_mode = str(model_cfg.get("trunk_input_mode", "geom_feature_pack")).strip().lower()
     if trunk_mode != "geom_feature_pack":
         raise ValueError(f"{cfg_prefix}.model_cfg.trunk_input_mode must be geom_feature_pack for mainline")
     branch_mode = str(model_cfg.get("branch_mode", "moments")).strip().lower()
@@ -408,15 +406,15 @@ def _validate_deeponet_mainline_contract(
     trunk_fourier_n_freq = int(model_cfg.get("trunk_fourier_n_freq", 1))
     if trunk_fourier_n_freq < 1:
         raise ValueError(f"{cfg_prefix}.model_cfg.trunk_fourier_n_freq must be >= 1")
-    trunk_fourier_mode = str(model_cfg.get("trunk_fourier_mode", "legacy")).strip().lower()
-    if trunk_fourier_mode not in {"legacy", "symmetric"}:
-        raise ValueError(f"{cfg_prefix}.model_cfg.trunk_fourier_mode must be one of: legacy, symmetric")
+    trunk_fourier_mode = str(model_cfg.get("trunk_fourier_mode", "symmetric")).strip().lower()
+    if trunk_fourier_mode != "symmetric":
+        raise ValueError(f"{cfg_prefix}.model_cfg.trunk_fourier_mode must be symmetric")
     trunk_cond_modulation = str(model_cfg.get("trunk_cond_modulation", "none")).strip().lower()
     if trunk_cond_modulation not in {"none", "film"}:
         raise ValueError(f"{cfg_prefix}.model_cfg.trunk_cond_modulation must be one of: none, film")
-    missing_geom_feature_policy = str(model_cfg.get("missing_geom_feature_policy", "warn_zero")).strip().lower()
-    if missing_geom_feature_policy not in {"warn_zero", "error"}:
-        raise ValueError(f"{cfg_prefix}.model_cfg.missing_geom_feature_policy must be one of: warn_zero, error")
+    missing_geom_feature_policy = str(model_cfg.get("missing_geom_feature_policy", "error")).strip().lower()
+    if missing_geom_feature_policy != "error":
+        raise ValueError(f"{cfg_prefix}.model_cfg.missing_geom_feature_policy must be error")
     sel_mode = str(selection_cfg.get("mode", "last")).strip().lower()
     if sel_mode != "best_val_allvars_balance":
         raise ValueError(f"{cfg_prefix}.selection.mode must be best_val_allvars_balance for mainline")
@@ -429,11 +427,6 @@ def _validate_deeponet_mainline_contract(
         target_vars=target_vars,
         cfg_prefix=cfg_prefix,
     )
-    sup_cfg = dict(loss_cfg.get("supervised", {}))
-    for forbidden_key in ("density_positivity_penalty", "density_relative_weighting"):
-        if forbidden_key in sup_cfg:
-            raise ValueError(f"train.loss.supervised.{forbidden_key} is removed from deeponet mainline")
-
 
 def _build_deeponet_contract_effective(
     *,
@@ -472,9 +465,9 @@ def _build_deeponet_contract_effective(
             "warmup_epochs": int(max(int(deeponet_optimizer_cfg.get("warmup_epochs", 0)), 0)),
         },
         "operator_mode_effective": str(operator_mode),
-        "trunk_input_mode_effective": str(model_cfg.get("trunk_input_mode", "legacy_xy_fourier")),
+        "trunk_input_mode_effective": str(model_cfg.get("trunk_input_mode", "geom_feature_pack")),
         "trunk_fourier_n_freq_effective": int(model_cfg.get("trunk_fourier_n_freq", 1)),
-        "trunk_fourier_mode_effective": str(model_cfg.get("trunk_fourier_mode", "legacy")),
+        "trunk_fourier_mode_effective": str(model_cfg.get("trunk_fourier_mode", "symmetric")),
         "trunk_cond_modulation_effective": str(model_cfg.get("trunk_cond_modulation", "none")),
         "trunk_cond_mod_hidden_effective": int(model_cfg.get("trunk_cond_mod_hidden", 64)),
         "residual_head_enabled_effective": bool(residual_cfg.get("enabled", False)),
@@ -490,7 +483,7 @@ def _build_deeponet_contract_effective(
         "output_path_global_hidden_dim_effective": int(output_path_cfg.get("global_hidden_dim", 64)),
         "sensor_pool_mode_effective": str(model_cfg.get("sensor_pool_mode", "moments")),
         "branch_mode_effective": str(model_cfg.get("branch_mode", "moments")),
-        "missing_geom_feature_policy_effective": str(model_cfg.get("missing_geom_feature_policy", "warn_zero")).strip().lower(),
+        "missing_geom_feature_policy_effective": str(model_cfg.get("missing_geom_feature_policy", "error")).strip().lower(),
         "latent_layer_norm_effective": bool(model_cfg.get("latent_layer_norm", False)),
         "distance_transform_effective": dict(deeponet_distance_transform_effective),
         "strict_mainline_effective": bool(strict_mainline),
@@ -508,7 +501,7 @@ def resolve_deeponet_runtime(
     h, w = ctx.h, ctx.w
     model_cfg = dict(deeponet_plasma_cfg.get("model_cfg", deeponet_plasma_cfg))
     branch_mode = str(model_cfg.get("branch_mode", "moments")).strip().lower()
-    missing_geom_feature_policy = str(model_cfg.get("missing_geom_feature_policy", "warn_zero")).strip().lower()
+    missing_geom_feature_policy = str(model_cfg.get("missing_geom_feature_policy", "error")).strip().lower()
     residual_head_cfg = dict(model_cfg.get("residual_head", {}))
     output_path_cfg = dict(model_cfg.get("output_path", {}))
     mode = str(operator_mode).strip().lower()
@@ -535,12 +528,12 @@ def resolve_deeponet_runtime(
             query_indices=query_idx,
             flatten_order=flatten_order,
             sensor_feature_names=list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]),
-            trunk_input_mode=str(model_cfg.get("trunk_input_mode", "legacy_xy_fourier")),
+            trunk_input_mode=str(model_cfg.get("trunk_input_mode", "geom_feature_pack")),
             sensor_pool_mode=str(model_cfg.get("sensor_pool_mode", "moments")),
             sensor_embed_dim=int(model_cfg.get("sensor_embed_dim", 32)),
             branch_mode=branch_mode,
             trunk_fourier_n_freq=int(model_cfg.get("trunk_fourier_n_freq", 1)),
-            trunk_fourier_mode=str(model_cfg.get("trunk_fourier_mode", "legacy")),
+            trunk_fourier_mode=str(model_cfg.get("trunk_fourier_mode", "symmetric")),
             trunk_cond_modulation=str(model_cfg.get("trunk_cond_modulation", "none")),
             trunk_cond_mod_hidden=int(model_cfg.get("trunk_cond_mod_hidden", 64)),
             residual_head_enabled=bool(residual_head_cfg.get("enabled", False)),
@@ -579,12 +572,12 @@ def resolve_deeponet_runtime(
         query_indices=np.asarray(ctx.deeponet_poisson_index["query_indices"], dtype=np.int64),
         flatten_order=str(ctx.deeponet_poisson_meta.get("flatten_order", "C")),
         sensor_feature_names=list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]),
-        trunk_input_mode=str(model_cfg.get("trunk_input_mode", "legacy_xy_fourier")),
+        trunk_input_mode=str(model_cfg.get("trunk_input_mode", "geom_feature_pack")),
         sensor_pool_mode=str(model_cfg.get("sensor_pool_mode", "moments")),
         sensor_embed_dim=int(model_cfg.get("sensor_embed_dim", 32)),
         branch_mode=branch_mode,
         trunk_fourier_n_freq=int(model_cfg.get("trunk_fourier_n_freq", 1)),
-        trunk_fourier_mode=str(model_cfg.get("trunk_fourier_mode", "legacy")),
+        trunk_fourier_mode=str(model_cfg.get("trunk_fourier_mode", "symmetric")),
         trunk_cond_modulation=str(model_cfg.get("trunk_cond_modulation", "none")),
         trunk_cond_mod_hidden=int(model_cfg.get("trunk_cond_mod_hidden", 64)),
         residual_head_enabled=bool(residual_head_cfg.get("enabled", False)),
@@ -614,12 +607,12 @@ def resolve_deeponet_runtime(
         query_indices=np.asarray(ctx.deeponet_poisson_index["query_indices"], dtype=np.int64),
         flatten_order=str(ctx.deeponet_poisson_meta.get("flatten_order", "C")),
         sensor_feature_names=list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]),
-        trunk_input_mode=str(poisson_cfg.get("trunk_input_mode", model_cfg.get("trunk_input_mode", "legacy_xy_fourier"))),
+        trunk_input_mode=str(poisson_cfg.get("trunk_input_mode", model_cfg.get("trunk_input_mode", "geom_feature_pack"))),
         sensor_pool_mode=str(poisson_cfg.get("sensor_pool_mode", model_cfg.get("sensor_pool_mode", "moments"))),
         sensor_embed_dim=int(poisson_cfg.get("sensor_embed_dim", model_cfg.get("sensor_embed_dim", 32))),
         branch_mode=str(poisson_cfg.get("branch_mode", model_cfg.get("branch_mode", "moments"))),
         trunk_fourier_n_freq=int(poisson_cfg.get("trunk_fourier_n_freq", model_cfg.get("trunk_fourier_n_freq", 1))),
-        trunk_fourier_mode=str(poisson_cfg.get("trunk_fourier_mode", model_cfg.get("trunk_fourier_mode", "legacy"))),
+        trunk_fourier_mode=str(poisson_cfg.get("trunk_fourier_mode", model_cfg.get("trunk_fourier_mode", "symmetric"))),
         trunk_cond_modulation=str(poisson_cfg.get("trunk_cond_modulation", model_cfg.get("trunk_cond_modulation", "none"))),
         trunk_cond_mod_hidden=int(poisson_cfg.get("trunk_cond_mod_hidden", model_cfg.get("trunk_cond_mod_hidden", 64))),
         residual_head_enabled=bool(poisson_residual_cfg.get("enabled", False)),
@@ -706,9 +699,23 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
     model_adapter = resolve_train_model_adapter(model_name)
     h, w = ctx.h, ctx.w
     history: list[dict[str, float]] = []
+    raw_loss_cfg = ctx.loss_cfg if ctx.loss_cfg is not None else train_cfg.get("loss", {})
+    role_schema = dict(dict(ctx.physics_cfg or {}).get("target_role_schema", {}) or {})
+    loss_cfg = resolve_loss_protocol(copy.deepcopy(raw_loss_cfg or {}), target_role_schema=role_schema)
+    supervised_mask = ctx.supervised_mask
+    supervised_distance = ctx.supervised_distance
+    if (
+        str(dict(loss_cfg.get("supervised", {})).get("mask", "none")).strip().lower() == "plasma_only"
+        and ctx.geom_ctx is not None
+    ):
+        if supervised_mask is None and getattr(ctx.geom_ctx, "mask_plasma", None) is not None:
+            supervised_mask = np.asarray(ctx.geom_ctx.mask_plasma, dtype=np.float32)
+        if supervised_distance is None and getattr(ctx.geom_ctx, "distance_any", None) is not None:
+            supervised_distance = np.asarray(ctx.geom_ctx.distance_any, dtype=np.float32)
     extra_artifacts: dict[str, Any] = {
         "input_mode_effective": str(input_mode_effective),
         "structure_adapter_mode_effective": str(structure_adapter_mode_effective),
+        "loss_protocol_effective": str(loss_cfg.get("protocol_effective", "none")),
     }
     eval_vars = list(ctx.y_vars)
 
@@ -721,7 +728,7 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         grad_clip_norm = float(cfg.get("grad_clip_norm", 0.0))
         grad_clip_cfg = dict(cfg.get("grad_clip", {}))
         output_head_refresh_cfg = dict(cfg.get("output_head_refresh", {}))
-        global_loss_cfg = copy.deepcopy(ctx.loss_cfg or {})
+        global_loss_cfg = copy.deepcopy(loss_cfg or {})
         sup = dict(global_loss_cfg.get("supervised", {}))
         sup.setdefault("global_target_region", "plasma_only")
         if bool(sup.get("label_clip_from_scaler", False)):
@@ -761,8 +768,8 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             physics_cfg=ctx.physics_cfg,
             loss_cfg=global_loss_cfg,
             curriculum_cfg=ctx.curriculum_cfg,
-            supervised_mask=ctx.supervised_mask,
-            supervised_distance=ctx.supervised_distance,
+            supervised_mask=supervised_mask,
+            supervised_distance=supervised_distance,
             batch_size_cases=batch_size_cases,
             shuffle_cases=shuffle_cases,
             seed=ctx.global_seed + ctx.model_idx,
@@ -861,10 +868,10 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
             lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
             physics_cfg={"enabled": False},
-            loss_cfg=copy.deepcopy(ctx.loss_cfg or {}),
+            loss_cfg=copy.deepcopy(loss_cfg or {}),
             curriculum_cfg=ctx.curriculum_cfg,
-            supervised_mask=ctx.supervised_mask,
-            supervised_distance=ctx.supervised_distance,
+            supervised_mask=supervised_mask,
+            supervised_distance=supervised_distance,
             optimizer_contract=optimizer_contract,
             unet_optimizer_cfg=pod_optimizer_cfg,
             batch_size_cases=batch_size_cases,
@@ -914,8 +921,14 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         true_eval = _to_true_eval(ctx.y, ctx.te, pod_target_vars, source_y_vars=ctx.y_vars)
         eval_vars = list(pod_target_vars)
     elif model_adapter.name == TRAIN_ADAPTER_GRID_TORCH:
+        grid_ctx = replace(
+            ctx,
+            loss_cfg=loss_cfg,
+            supervised_mask=supervised_mask,
+            supervised_distance=supervised_distance,
+        )
         grid_result = run_grid_torch_train_predict(
-            ctx=ctx,
+            ctx=grid_ctx,
             trainer=trainer,
             train_cfg=train_cfg,
             optimizer_contract=optimizer_contract,
@@ -937,7 +950,7 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             cfg.get("target_family", "allvars"),
             cfg_key=f"{train_key}.target_family",
         )
-        default_deeponet_vars = resolve_allvars_order(list(ctx.y_vars), prefer_linear=True)
+        default_deeponet_vars = list(ctx.y_vars)
         deeponet_target_vars = (
             list(default_deeponet_vars)
             if cfg.get("target_vars") is None
@@ -950,11 +963,9 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         deeponet_target_indices = [ctx.y_vars.index(v) for v in deeponet_target_vars]
         input_features_cfg = dict(cfg.get("input_features", {}))
         deeponet_input_mode = str(input_features_cfg.get("mode", "geom_feature_pack")).strip().lower()
-        if deeponet_input_mode not in {"legacy_xy", "geom_feature_pack"}:
-            raise ValueError(f"{train_key}.input_features.mode must be one of: legacy_xy, geom_feature_pack")
+        if deeponet_input_mode != "geom_feature_pack":
+            raise ValueError(f"{train_key}.input_features.mode must be geom_feature_pack")
         deeponet_feature_channels = _resolve_coord_feature_channels(input_features_cfg.get("features"))
-        if deeponet_input_mode == "legacy_xy":
-            deeponet_feature_channels = ["x", "y"]
         deeponet_selection_cfg = dict(cfg.get("selection", {}))
         deeponet_optimizer_cfg = dict(cfg.get("optimizer", {}))
         deeponet_batch_size_cases = int(cfg.get("batch_size_cases", 0))
@@ -964,7 +975,7 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             _validate_deeponet_mainline_contract(
                 deeponet_cfg=cfg,
                 selection_cfg=deeponet_selection_cfg,
-                loss_cfg=dict(ctx.loss_cfg or {}),
+                loss_cfg=dict(loss_cfg or {}),
                 y_vars=ctx.y_vars,
                 target_family=deeponet_target_family,
                 target_vars=deeponet_target_vars,
@@ -987,49 +998,40 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             operator_mode=operator_mode,
         )
         model = runtime.model
-        deeponet_feature_source = "legacy_xy"
+        deeponet_feature_source = "geom_feature_pack"
         deeponet_distance_transform_effective: dict[str, Any] = {"mode": "raw"}
-        if deeponet_input_mode == "geom_feature_pack":
-            require_pack = str(input_features_cfg.get("require_pack", "warn")).strip().lower()
-            if require_pack not in {"off", "warn", "error"}:
-                raise ValueError(f"{train_key}.input_features.require_pack must be one of: off, warn, error")
-            rows, source = _build_coord_feature_rows(
-                channels=deeponet_feature_channels,
-                pack=ctx.coord_feature_pack,
-                geom_ctx=ctx.geom_ctx,
-                h=h,
-                w=w,
+        rows, source = _build_coord_feature_rows(
+            channels=deeponet_feature_channels,
+            pack=ctx.coord_feature_pack,
+            geom_ctx=ctx.geom_ctx,
+            h=h,
+            w=w,
+        )
+        deeponet_feature_source = str(source)
+        if source != "preprocess_pack":
+            raise ValueError(
+                "deeponet input-feature contract requires preprocessing coord_feature_pack; "
+                f"effective_source={source}"
             )
-            deeponet_feature_source = str(source)
-            if source != "preprocess_pack":
-                msg = (
-                    "deeponet input-feature contract: preprocess coord_feature_pack was not used; "
-                    f"effective_source={source}"
-                )
-                if strict_mainline or require_pack == "error":
-                    raise ValueError(msg)
-                if require_pack == "warn":
-                    extra_artifacts.setdefault("deeponet_contract_warnings", []).append(msg)
-            distance_transform_cfg = _resolve_distance_transform_cfg(
-                dict(input_features_cfg.get("distance_transform") or {})
-            )
-            distance_transform_cfg_effective, _ = _resolve_distance_transform_effective(
-                distance_transform_cfg,
-                stats=ctx.coord_distance_transform_stats,
-                warnings_out=extra_artifacts.setdefault("deeponet_contract_warnings", []),
-            )
-            rows, deeponet_distance_transform_effective = _apply_distance_transform(
-                rows.astype(np.float32),
-                channels=deeponet_feature_channels,
-                cfg=distance_transform_cfg_effective,
-            )
-            rows, _, _ = _apply_coord_feature_scaling(
-                rows.astype(np.float32),
-                channels=deeponet_feature_channels,
-                coord_feature_scaler_artifact=ctx.coord_feature_scaler,
-            )
-            if hasattr(model, "set_static_spatial_features"):
-                model.set_static_spatial_features(rows.astype(np.float32), channels=list(deeponet_feature_channels))
+        distance_transform_cfg = _resolve_distance_transform_cfg(
+            dict(input_features_cfg.get("distance_transform") or {})
+        )
+        distance_transform_cfg_effective, _ = _resolve_distance_transform_effective(
+            distance_transform_cfg,
+            stats=ctx.coord_distance_transform_stats,
+        )
+        rows, deeponet_distance_transform_effective = _apply_distance_transform(
+            rows.astype(np.float32),
+            channels=deeponet_feature_channels,
+            cfg=distance_transform_cfg_effective,
+        )
+        rows, _, _ = _apply_coord_feature_scaling(
+            rows.astype(np.float32),
+            channels=deeponet_feature_channels,
+            coord_feature_scaler_artifact=ctx.coord_feature_scaler,
+        )
+        if hasattr(model, "set_static_spatial_features"):
+            model.set_static_spatial_features(rows.astype(np.float32), channels=list(deeponet_feature_channels))
         ttrainer = TorchTrainer(ctx.model_dir / "train")
         stages = resolve_deeponet_stages(
             cfg,
@@ -1049,10 +1051,10 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             stages=stages,
             physics_cfg=ctx.physics_cfg,
             supervised_targets=runtime.supervised_targets,
-            loss_cfg=ctx.loss_cfg,
+            loss_cfg=loss_cfg,
             curriculum_cfg=ctx.curriculum_cfg,
-            supervised_mask=ctx.supervised_mask,
-            supervised_distance=ctx.supervised_distance,
+            supervised_mask=supervised_mask,
+            supervised_distance=supervised_distance,
             optimizer_contract={**dict(optimizer_contract), "deeponet_optimizer": dict(deeponet_optimizer_cfg)},
             selection_cfg=deeponet_selection_cfg,
             batch_size_cases=deeponet_batch_size_cases,

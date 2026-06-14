@@ -15,8 +15,6 @@ def test_optimize_csv_backend_smoke(tmp_path: Path):
         "run_dir": str(run_dir),
         "runtime": {
             "input_mode": "table_only",
-            "strict_input_mode": "error",
-            "allow_mode_fallback": False,
             "structure": {
                 "feature_profile": "none",
                 "descriptor_profile": "none",
@@ -79,3 +77,7 @@ def test_optimize_csv_backend_smoke(tmp_path: Path):
     with trials_path.open("r", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert 1 <= len(rows) <= 3
+    assert "objective_value" in rows[0]
+    assert "search_value" in rows[0]
+    assert "feasible" in rows[0]
+    assert "qoi_uniformity" in rows[0]

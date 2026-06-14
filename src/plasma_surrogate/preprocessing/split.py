@@ -215,7 +215,7 @@ def build_interpolation_overlap_split_with_status(
     ratios: tuple[float, float, float] = (0.7, 0.15, 0.15),
 ) -> dict[str, object]:
     """
-    Build interpolation split with strict tuple overlap where possible and return feasibility status.
+    Build interpolation split with strict tuple overlap and return feasibility status.
 
     Returns:
       {
@@ -240,15 +240,7 @@ def build_interpolation_overlap_split_with_status(
         tuple_to_cases.setdefault(key, []).append(str(cid))
     candidate_keys = [k for k, rows in tuple_to_cases.items() if len(rows) >= 2]
     if len(candidate_keys) == 0:
-        fallback = build_interpolation_split(
-            case_ids=case_ids,
-            cond_values=cond_values,
-            keys=keys,
-            seed=seed,
-            ratios=ratios,
-            mode="marginal",
-        )
-        return {"split": fallback, "feasible": False, "reason": "no_duplicate_condition_tuples"}
+        return {"split": split, "feasible": False, "reason": "no_duplicate_condition_tuples"}
 
     def _move(src: list[str], dst: list[str], cid: str) -> None:
         if cid in src:
@@ -299,15 +291,7 @@ def build_interpolation_overlap_split_with_status(
     tr_tuples = {tuple(float(cond_values[c][k]) for k in keys_list) for c in out["train"]}
     te_tuples = {tuple(float(cond_values[c][k]) for k in keys_list) for c in out["test"]}
     if len(tr_tuples & te_tuples) == 0:
-        fallback = build_interpolation_split(
-            case_ids=case_ids,
-            cond_values=cond_values,
-            keys=keys,
-            seed=seed,
-            ratios=ratios,
-            mode="marginal",
-        )
-        return {"split": fallback, "feasible": False, "reason": "tuple_overlap_not_achievable_with_split_constraints"}
+        return {"split": out, "feasible": False, "reason": "tuple_overlap_not_achievable_with_split_constraints"}
     return {"split": out, "feasible": True, "reason": ""}
 
 

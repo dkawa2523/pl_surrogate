@@ -1,7 +1,5 @@
 runtime:
   input_mode: table_only
-  strict_input_mode: error
-  allow_mode_fallback: false
   structure:
     feature_profile: none
     descriptor_profile: none
@@ -13,8 +11,6 @@ benchmark:
   output_dir: runs/benchmark_dual_mode_table_only_global_mlp_smoke
   runtime:
     input_mode: table_only
-    strict_input_mode: error
-    allow_mode_fallback: false
     structure:
       feature_profile: none
       descriptor_profile: none

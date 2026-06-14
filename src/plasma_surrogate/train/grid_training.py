@@ -29,6 +29,7 @@ from plasma_surrogate.models.mlp.coord_mlp_pod_residual import normalize_coord_m
 from plasma_surrogate.models.mlp.coord_mlp_torch import _normalize_coord_mlp_model_cfg
 from plasma_surrogate.train.spatial_features import (
     ICP_PART_SDF_CHANNELS,
+    PART_SDF_SUMMARY_CHANNELS,
     apply_coord_feature_scaling,
     apply_distance_transform,
     build_case_spatial_features,
@@ -82,6 +83,35 @@ def _normalize_profile_name(value: Any, *, default: str = "none") -> str:
     return text if text else default
 
 
+def _target_scaler_affine_by_var(
+    transforms: Any,
+    *,
+    target_vars: list[str],
+    affine_by_var: dict[str, Any],
+) -> dict[str, Any]:
+    out = dict(affine_by_var or {})
+    scalers = dict(getattr(transforms, "y_scalers", {}) or {})
+    for name in target_vars:
+        if str(name) in out:
+            continue
+        scaler_obj = scalers.get(name, None)
+        if scaler_obj is None:
+            continue
+        if isinstance(scaler_obj, dict):
+            scaler_dict = dict(scaler_obj)
+        elif hasattr(scaler_obj, "to_dict"):
+            scaler_dict = dict(scaler_obj.to_dict())
+        else:
+            raise TypeError(f"target scaler for {name!r} must be a dict or expose to_dict()")
+        mean_raw = scaler_dict.get("mean", 0.0)
+        std_raw = scaler_dict.get("std", 1.0)
+        mean_val = float(mean_raw[0]) if isinstance(mean_raw, list) and mean_raw else float(mean_raw)
+        std_val = float(std_raw[0]) if isinstance(std_raw, list) and std_raw else float(std_raw)
+        if np.isfinite(mean_val) and np.isfinite(std_val) and std_val > 0.0:
+            out[str(name)] = {"mean": float(mean_val), "std": float(std_val)}
+    return out
+
+
 def _validate_unet_like_mainline_contract(
     *,
     model_name: str,
@@ -101,28 +131,39 @@ def _validate_unet_like_mainline_contract(
     cfg_prefix = f"train.{model_key}"
     if str(target_family).strip().lower() != "allvars":
         raise ValueError(f"{cfg_prefix}.target_family must be allvars for mainline; got={target_family}")
-    expected = list(y_vars)
-    if list(target_vars) != expected:
-        raise ValueError(f"{cfg_prefix}.target_vars must match allvars order: expected={expected}, got={target_vars}")
+    unknown = [name for name in target_vars if name not in set(y_vars)]
+    if unknown:
+        raise ValueError(f"{cfg_prefix}.target_vars contains unknown vars: {unknown}; available={y_vars}")
     if require_shared_output_head:
         head_mode = str(dict(dict(model_cfg or {}).get("output_heads", {})).get("mode", "shared")).strip().lower()
-        allowed_head_modes = {"shared", "split_density_field"} if model_key == "unet" else {"shared"}
+        allowed_head_modes = {"shared"}
         if head_mode not in allowed_head_modes:
-            raise ValueError(
-                f"{cfg_prefix}.model_cfg.output_heads.mode must be one of {sorted(allowed_head_modes)} for mainline"
-            )
+            raise ValueError(f"{cfg_prefix}.model_cfg.output_heads.mode must be shared for mainline")
+        operator_head_mode_raw = dict(dict(model_cfg or {}).get("unet_operator_v2_cfg", {})).get("head_mode")
+        if operator_head_mode_raw is not None:
+            operator_head_mode = str(operator_head_mode_raw).strip().lower()
+            if operator_head_mode != "shared":
+                raise ValueError(f"{cfg_prefix}.model_cfg.unet_operator_v2_cfg.head_mode must be shared for mainline")
     if model_key in MAINLINE_GEOM_PACK_MODELS:
         mode = str(input_features_mode or "").strip().lower()
         if mode != "geom_feature_pack":
             raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack for mainline")
         required_channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
+        part_lite_channels = required_channels + [
+            "normal_x",
+            "normal_y",
+            "curvature_proxy",
+            "boundary_band",
+            *PART_SDF_SUMMARY_CHANNELS,
+        ]
         icp_struct_channels = required_channels + ["mask_coil", "distance_coil", "coil_proximity"]
         icp_part_sdf_lite_channels = icp_struct_channels + list(ICP_PART_SDF_CHANNELS)
         channels = [str(v) for v in list(input_feature_channels or [])]
-        if channels not in (required_channels, icp_struct_channels, icp_part_sdf_lite_channels):
+        if channels not in (required_channels, part_lite_channels, icp_struct_channels, icp_part_sdf_lite_channels):
             raise ValueError(
                 f"{cfg_prefix}.input_features.features must be {required_channels} "
-                f"(or {icp_struct_channels} for icp_struct_spatial_v1, "
+                f"(or {part_lite_channels} for part_lite_v1, "
+                f"or {icp_struct_channels} for icp_struct_spatial_v1, "
                 f"or {icp_part_sdf_lite_channels} for icp_part_sdf_lite_v1); got={channels}"
             )
     sel_mode = str(selection_cfg.get("mode", "last")).strip().lower()
@@ -137,11 +178,6 @@ def _validate_unet_like_mainline_contract(
         raise ValueError(f"{cfg_prefix}.selection.density_guard is removed from mainline")
     if "boundary_bonus_weight" in selection_cfg and float(selection_cfg.get("boundary_bonus_weight", 0.0)) != 0.0:
         raise ValueError(f"{cfg_prefix}.selection.boundary_bonus_weight must be 0.0 for mainline")
-    sup_cfg = dict(loss_cfg.get("supervised", {}))
-    for forbidden_key in ("density_positivity_penalty",):
-        if forbidden_key in sup_cfg:
-            raise ValueError(f"train.loss.supervised.{forbidden_key} is removed from {model_key} mainline")
-
 
 def _validate_coord_mlp_experimental_contract(
     *,
@@ -160,7 +196,10 @@ def _validate_coord_mlp_experimental_contract(
         raise ValueError(f"{cfg_prefix}.target_family must be allvars for coord-mlp experimental")
     expected = list(y_vars)
     if list(target_vars) != expected:
-        raise ValueError(f"{cfg_prefix}.target_vars must match output_layout.vars order: expected={expected}, got={target_vars}")
+        raise ValueError(
+            f"{cfg_prefix}.target_vars must match target_family=allvars output_layout.vars order: "
+            f"expected={expected}, got={target_vars}"
+        )
     mode = str(dict(input_features_cfg).get("mode", "")).strip().lower()
     if mode != "geom_feature_pack":
         raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack")
@@ -217,17 +256,6 @@ def _resolve_geom_deeponet_siren_descriptor_contract(
         "descriptor_feature_names_effective": list(descriptor_names),
         "adapter_mode_effective": str(adapter),
     }
-
-
-def _grid_contract_warning_key(model_name: str) -> str:
-    model_key = str(model_name).strip().lower()
-    if model_key in COORD_MLP_FAMILY_MODELS:
-        return "coord_mlp_contract_warnings"
-    if model_key in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
-        return "geom_deeponet_siren_contract_warnings"
-    if model_key in SPECTRAL_FAMILY_MODELS:
-        return "grid_contract_warnings"
-    return "unet_contract_warnings"
 
 
 def _build_spectral_contract_effective(
@@ -316,8 +344,6 @@ def _build_unet_contract_effective(
     input_features_cfg = dict(cfg.get("input_features", {}))
     distance_transform_cfg = dict(input_features_cfg.get("distance_transform", {}))
     supervised_cfg = dict((grid_loss_cfg or {}).get("supervised", {}))
-    bt_cfg = dict(supervised_cfg.get("boundary_type_weighting", {}))
-    bp_cfg = dict(supervised_cfg.get("boundary_profile_weighting", {}))
     rb_cfg = dict(supervised_cfg.get("region_balance", {}))
     rb_schedule_cfg = dict(rb_cfg.get("schedule", {}))
     return {
@@ -368,24 +394,6 @@ def _build_unet_contract_effective(
         "unet_spatial_consistency_effective": bool(
             dict((grid_loss_cfg or {}).get("supervised", {}).get("spatial_consistency", {})).get("enabled", False)
         ),
-        "boundary_type_weighting_effective": {
-            "enabled": bool(bt_cfg.get("enabled", False)),
-            "vars": [str(v) for v in bt_cfg.get("vars", ["Te", "phi"])],
-            "band_px": float(bt_cfg.get("band_px", 2.0)),
-            "weights": {
-                "interface": float(dict(bt_cfg.get("weights", {})).get("interface", 1.0)),
-                "bc_dir": float(dict(bt_cfg.get("weights", {})).get("bc_dir", 1.0)),
-                "wafer": float(dict(bt_cfg.get("weights", {})).get("wafer", 1.0)),
-            },
-        },
-        "boundary_profile_weighting_effective": {
-            "enabled": bool(bp_cfg.get("enabled", False)),
-            "vars": [str(v) for v in bp_cfg.get("vars", ["Te", "phi"])],
-            "band_px": float(bp_cfg.get("band_px", 2.0)),
-            "mode": str(bp_cfg.get("mode", "exp_decay")).strip().lower(),
-            "alpha": float(bp_cfg.get("alpha", 0.35)),
-            "tau_px": float(bp_cfg.get("tau_px", 0.8)),
-        },
         "region_balance_bands_effective": {
             "enabled": bool(rb_cfg.get("enabled", False)),
             "boundary_in_px": float(rb_cfg.get("boundary_in_px", 2.0)),
@@ -425,7 +433,6 @@ def _build_coord_mlp_contract_effective(
         "input_features_mode": str(grid_input_features_mode),
         "input_feature_channels": list(grid_feature_channels),
         "feature_source_effective": str(grid_feature_source),
-        "require_pack_effective": str(dict(cfg.get("input_features", {})).get("require_pack", "warn")).strip().lower(),
         "selection_mode_effective": str(grid_selection_cfg.get("mode", "last")).strip().lower(),
         "selection_weights_effective": dict(grid_selection_cfg.get("weights", {})),
         "embedding": dict(coord_model_cfg.get("embedding", {})),
@@ -510,11 +517,9 @@ def run_grid_torch_train_predict(
     grid_target_indices = [ctx.y_vars.index(v) for v in grid_target_vars]
     input_features_cfg = dict(cfg.get("input_features", {}))
     grid_input_features_mode = str(input_features_cfg.get("mode", "geom_feature_pack")).strip().lower()
-    if grid_input_features_mode not in {"legacy_xy", "geom_feature_pack"}:
-        raise ValueError(f"{train_key}.input_features.mode must be one of: legacy_xy, geom_feature_pack")
+    if grid_input_features_mode != "geom_feature_pack":
+        raise ValueError(f"{train_key}.input_features.mode must be geom_feature_pack")
     grid_feature_channels = resolve_coord_feature_channels(input_features_cfg.get("features"))
-    if grid_input_features_mode == "legacy_xy":
-        grid_feature_channels = ["x", "y"]
     grid_selection_cfg = dict(cfg.get("selection", {}))
 
     if model_name in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
@@ -601,30 +606,27 @@ def run_grid_torch_train_predict(
         sup_cfg_mut["spatial_consistency"] = sc_cfg
         grid_loss_cfg["supervised"] = sup_cfg_mut
 
-    density_rel_cfg = dict(dict(grid_loss_cfg.get("supervised", {})).get("density_relative_weighting", {}))
-    if bool(density_rel_cfg.get("enabled", False)):
-        affine_by_var = dict(density_rel_cfg.get("affine_by_var", {}))
-        for name in grid_target_vars:
-            if str(name) in affine_by_var:
-                continue
-            scaler_obj = dict(getattr(ctx.transforms, "y_scalers", {}) or {}).get(name, None)
-            if scaler_obj is None:
-                continue
-            if isinstance(scaler_obj, dict):
-                scaler_dict = dict(scaler_obj)
-            elif hasattr(scaler_obj, "to_dict"):
-                scaler_dict = dict(scaler_obj.to_dict())
-            else:
-                raise TypeError(f"target scaler for {name!r} must be a dict or expose to_dict()")
-            mean_raw = scaler_dict.get("mean", 0.0)
-            std_raw = scaler_dict.get("std", 1.0)
-            mean_val = float(mean_raw[0]) if isinstance(mean_raw, list) and mean_raw else float(mean_raw)
-            std_val = float(std_raw[0]) if isinstance(std_raw, list) and std_raw else float(std_raw)
-            if np.isfinite(mean_val) and np.isfinite(std_val) and std_val > 0.0:
-                affine_by_var[str(name)] = {"mean": float(mean_val), "std": float(std_val)}
-        density_rel_cfg["affine_by_var"] = affine_by_var
+    supervised_loss_cfg = dict(grid_loss_cfg.get("supervised", {}))
+    positive_cfg = dict(supervised_loss_cfg.get("positive_penalty", {}))
+    if bool(positive_cfg.get("enabled", False)):
+        positive_cfg["affine_by_var"] = _target_scaler_affine_by_var(
+            ctx.transforms,
+            target_vars=grid_target_vars,
+            affine_by_var=dict(positive_cfg.get("affine_by_var", {})),
+        )
         sup_cfg_mut = dict(grid_loss_cfg.get("supervised", {}))
-        sup_cfg_mut["density_relative_weighting"] = density_rel_cfg
+        sup_cfg_mut["positive_penalty"] = positive_cfg
+        grid_loss_cfg["supervised"] = sup_cfg_mut
+
+    relative_cfg = dict(dict(grid_loss_cfg.get("supervised", {})).get("relative_weighting", {}))
+    if bool(relative_cfg.get("enabled", False)):
+        relative_cfg["affine_by_var"] = _target_scaler_affine_by_var(
+            ctx.transforms,
+            target_vars=grid_target_vars,
+            affine_by_var=dict(relative_cfg.get("affine_by_var", {})),
+        )
+        sup_cfg_mut = dict(grid_loss_cfg.get("supervised", {}))
+        sup_cfg_mut["relative_weighting"] = relative_cfg
         grid_loss_cfg["supervised"] = sup_cfg_mut
 
     if model_name in GEOM_DEEPONET_SIREN_FAMILY_MODELS:
@@ -673,91 +675,75 @@ def run_grid_torch_train_predict(
         pod_basis_bundle=pod_basis_bundle,
     )
 
-    require_pack = str(dict(cfg.get("input_features", {})).get("require_pack", "warn")).strip().lower()
-    if require_pack not in {"off", "warn", "error"}:
-        raise ValueError(f"train.{model_name}.input_features.require_pack must be one of: off, warn, error")
-    warning_bucket = extra_artifacts.setdefault(_grid_contract_warning_key(model_name), [])
-    grid_feature_source = "legacy_xy"
+    grid_feature_source = "geom_feature_pack"
     case_spatial_source: Any | None = None
     scaling_applied = False
-    if grid_input_features_mode == "geom_feature_pack":
-        distance_transform_cfg = resolve_distance_transform_cfg(
-            dict(dict(cfg.get("input_features", {})).get("distance_transform") or {})
-        )
-        distance_transform_cfg_effective, _ = resolve_distance_transform_effective(
-            distance_transform_cfg,
-            stats=ctx.coord_distance_transform_stats,
-            warnings_out=warning_bucket,
-        )
-        case_spatial_source, source = build_case_spatial_features(
+    distance_transform_cfg = resolve_distance_transform_cfg(
+        dict(dict(cfg.get("input_features", {})).get("distance_transform") or {})
+    )
+    distance_transform_cfg_effective, _ = resolve_distance_transform_effective(
+        distance_transform_cfg,
+        stats=ctx.coord_distance_transform_stats,
+    )
+    case_spatial_source, source = build_case_spatial_features(
+        channels=grid_feature_channels,
+        h=h,
+        w=w,
+        pack=getattr(ctx, "case_spatial_feature_pack", None),
+        static_pack=getattr(ctx, "static_spatial_feature_pack", None),
+        case_pack=getattr(ctx, "case_structure_feature_pack", None),
+        distance_transform_cfg=distance_transform_cfg_effective,
+        coord_feature_scaler_artifact=ctx.coord_feature_scaler,
+    )
+    grid_feature_source = str(source)
+    if case_spatial_source is not None:
+        scaling_applied = bool(getattr(case_spatial_source, "scaling_applied", False))
+        extra_artifacts["case_spatial_pack_used"] = True
+        extra_artifacts["case_spatial_pack_storage"] = str(source)
+        extra_artifacts["case_spatial_feature_channels"] = list(grid_feature_channels)
+        extra_artifacts["case_spatial_feature_shape"] = [int(v) for v in case_spatial_source.shape]
+    else:
+        static_supported = {
+            "x",
+            "y",
+            "distance_signed",
+            "distance_any",
+            "mask_plasma",
+            "normal_x",
+            "normal_y",
+            "curvature_proxy",
+        }
+        unsupported_static = sorted(set(grid_feature_channels) - static_supported)
+        if unsupported_static:
+            raise ValueError(
+                f"{model_name} input-feature contract: case-specific spatial pack was not used; "
+                f"effective_source={source}; missing_static_channels={unsupported_static}"
+            )
+        rows, source = build_coord_feature_rows(
             channels=grid_feature_channels,
+            pack=ctx.coord_feature_pack,
+            geom_ctx=ctx.geom_ctx,
             h=h,
             w=w,
-            pack=getattr(ctx, "case_spatial_feature_pack", None),
-            static_pack=getattr(ctx, "static_spatial_feature_pack", None),
-            case_pack=getattr(ctx, "case_structure_feature_pack", None),
-            distance_transform_cfg=distance_transform_cfg_effective,
-            coord_feature_scaler_artifact=ctx.coord_feature_scaler,
         )
         grid_feature_source = str(source)
-        if case_spatial_source is not None:
-            scaling_applied = bool(getattr(case_spatial_source, "scaling_applied", False))
-            extra_artifacts["case_spatial_pack_used"] = True
-            extra_artifacts["case_spatial_pack_storage"] = str(source)
-            extra_artifacts["case_spatial_feature_channels"] = list(grid_feature_channels)
-            extra_artifacts["case_spatial_feature_shape"] = [int(v) for v in case_spatial_source.shape]
-        else:
-            static_supported = {
-                "x",
-                "y",
-                "distance_signed",
-                "distance_any",
-                "mask_plasma",
-                "normal_x",
-                "normal_y",
-                "curvature_proxy",
-            }
-            unsupported_static = sorted(set(grid_feature_channels) - static_supported)
-            if unsupported_static:
-                msg = (
-                    f"{model_name} input-feature contract: case-specific spatial pack was not used; "
-                    f"effective_source={source}; missing_static_channels={unsupported_static}"
-                )
-                raise ValueError(msg)
-            rows, source = build_coord_feature_rows(
-                channels=grid_feature_channels,
-                pack=ctx.coord_feature_pack,
-                geom_ctx=ctx.geom_ctx,
-                h=h,
-                w=w,
+        if source != "preprocess_pack":
+            raise ValueError(
+                f"{model_name} input-feature contract: preprocessing coord_feature_pack is required; "
+                f"effective_source={source}"
             )
-            grid_feature_source = str(source)
-            if source != "preprocess_pack":
-                msg = (
-                    f"{model_name} input-feature contract: preprocess coord_feature_pack was not used; "
-                    f"effective_source={source}"
-                )
-                if model_name in COORD_MLP_FAMILY_MODELS or require_pack == "error":
-                    raise ValueError(msg)
-                if require_pack == "warn":
-                    warning_bucket.append(msg)
-            rows, _ = apply_distance_transform(
-                rows.astype(np.float32),
-                channels=grid_feature_channels,
-                cfg=distance_transform_cfg_effective,
-            )
-            rows, _, scaling_applied = apply_coord_feature_scaling(
-                rows.astype(np.float32),
-                channels=grid_feature_channels,
-                coord_feature_scaler_artifact=ctx.coord_feature_scaler,
-            )
-        if model_name in COORD_MLP_FAMILY_MODELS and not bool(scaling_applied):
-            raise ValueError(f"train.{model_name} requires preprocessing.coord_features.scaling.enabled=true")
-    else:
-        yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
-        xx = np.linspace(0.0, 1.0, w, dtype=np.float32)
-        yv, xv = np.meshgrid(yy, xx, indexing="ij")
-        rows = np.stack([xv.reshape(-1), yv.reshape(-1)], axis=1).astype(np.float32)
+        rows, _ = apply_distance_transform(
+            rows.astype(np.float32),
+            channels=grid_feature_channels,
+            cfg=distance_transform_cfg_effective,
+        )
+        rows, _, scaling_applied = apply_coord_feature_scaling(
+            rows.astype(np.float32),
+            channels=grid_feature_channels,
+            coord_feature_scaler_artifact=ctx.coord_feature_scaler,
+        )
+    if model_name in COORD_MLP_FAMILY_MODELS and not bool(scaling_applied):
+        raise ValueError(f"train.{model_name} requires preprocessing.coord_features.scaling.enabled=true")
 
     spatial_train = case_spatial_source.subset(ctx.tr) if case_spatial_source is not None else None
     spatial_val = case_spatial_source.subset(ctx.va) if case_spatial_source is not None else None

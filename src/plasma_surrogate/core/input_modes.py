@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
-import warnings
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +26,6 @@ TABLE_PLUS_STRUCTURE = "table_plus_structure"
 INPUT_MODES: tuple[str, str] = (TABLE_ONLY, TABLE_PLUS_STRUCTURE)
 DEFAULT_INPUT_MODE = TABLE_PLUS_STRUCTURE
 
-STRICT_INPUT_MODE_VALUES: tuple[str, ...] = ("error", "warn", "off")
 STRUCTURE_FEATURE_PROFILES: tuple[str, ...] = ("none",) + tuple(list_feature_profiles())
 STRUCTURE_DESCRIPTOR_PROFILES: tuple[str, ...] = ("none",) + tuple(list_descriptor_profiles())
 STRUCTURE_LATENT_PROFILES: tuple[str, ...] = ("none",) + tuple(list_latent_profiles())
@@ -42,10 +41,18 @@ STRUCTURE_PROVIDER_MODES: tuple[str, ...] = ("fixed", "parametric_parts")
 
 INPUT_MODE_EFFECTIVE_KEY = "input_mode_effective"
 STRUCTURE_FEATURE_PROFILE_EFFECTIVE_KEY = "structure_feature_profile_effective"
-STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY = "structure_descriptor_profile_effective"
-STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY = "structure_latent_profile_effective"
 STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY = "structure_adapter_mode_effective"
 GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY = "geometry_provider_mode_effective"
+TARGET_SCHEMA_HASH_KEY = "target_schema_hash"
+FEATURE_SCHEMA_HASH_KEY = "feature_schema_hash"
+DESCRIPTOR_PROFILE_KEY = "descriptor_profile"
+LATENT_PROFILE_KEY = "latent_profile"
+RUNTIME_SCHEMA_HASH_PENDING = "pending"
+
+# Compatibility aliases for model internals that have not yet moved to the
+# plain optional metadata names.
+STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY = DESCRIPTOR_PROFILE_KEY
+STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY = LATENT_PROFILE_KEY
 HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY = "has_structure_inputs_effective"
 DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY = "deeponet_pod_descriptor_dim_effective"
 DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY = "deeponet_pod_descriptor_profile_effective"
@@ -53,14 +60,18 @@ DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY = "deeponet_pod_latent_profile_effecti
 DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY = "deeponet_pod_latent_hook_effective"
 GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY = "geom_deeponet_siren_descriptor_dim_effective"
 GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY = "geom_deeponet_siren_descriptor_profile_effective"
+
 INPUT_MODE_EFFECTIVE_METADATA_KEYS: tuple[str, ...] = (
     INPUT_MODE_EFFECTIVE_KEY,
     STRUCTURE_FEATURE_PROFILE_EFFECTIVE_KEY,
-    STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
-    STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
     STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
     GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
-    HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY,
+    TARGET_SCHEMA_HASH_KEY,
+    FEATURE_SCHEMA_HASH_KEY,
+)
+OPTIONAL_RUNTIME_METADATA_KEYS: tuple[str, ...] = (
+    DESCRIPTOR_PROFILE_KEY,
+    LATENT_PROFILE_KEY,
 )
 DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS: tuple[str, ...] = (
     DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY,
@@ -72,10 +83,9 @@ DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS: tuple[str, ...] = (
 )
 EFFECTIVE_RUNTIME_METADATA_KEYS: tuple[str, ...] = (
     *INPUT_MODE_EFFECTIVE_METADATA_KEYS,
+    *OPTIONAL_RUNTIME_METADATA_KEYS,
     *DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS,
 )
-INPUT_MODE_FALLBACK_APPLIED_KEY = "input_mode_fallback_applied"
-
 
 def _norm_text(value: Any, *, default: str) -> str:
     if value is None:
@@ -99,43 +109,61 @@ def _norm_bool(value: Any, *, default: bool) -> bool:
     return bool(default)
 
 
-def normalize_strict_input_mode(value: Any, *, default: str = "error") -> str:
-    mode = _norm_text(value, default=default)
-    if mode not in set(STRICT_INPUT_MODE_VALUES):
-        raise ValueError(
-            "strict_input_mode must be one of: "
-            f"{list(STRICT_INPUT_MODE_VALUES)}; got={mode!r}"
-        )
-    return mode
+def _stable_hash(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def apply_strict_input_mode_policy(
+def _hash_value(raw: Any) -> str:
+    value = str(raw if raw is not None else "").strip().lower()
+    return value if value else RUNTIME_SCHEMA_HASH_PENDING
+
+
+def build_runtime_schema_hashes(schemas: dict[str, Any] | None) -> dict[str, str]:
+    """Build product runtime schema hashes from loaded preprocessing schemas."""
+
+    raw = dict(schemas or {})
+    target_payload = {
+        "output_layout": dict(raw.get("output_layout", {}) or {}),
+        "target_role_schema": dict(raw.get("target_role_schema", {}) or {}),
+    }
+    feature_payload = {
+        "channel_map": dict(raw.get("channel_map", {}) or {}),
+        "coord_feature_pack_meta": dict(raw.get("coord_feature_pack_meta", {}) or {}),
+        "static_spatial_feature_pack_meta": dict(raw.get("static_spatial_feature_pack_meta", {}) or {}),
+        "case_spatial_feature_pack_meta": dict(raw.get("case_spatial_feature_pack_meta", {}) or {}),
+        "case_structure_feature_pack_meta": dict(raw.get("case_structure_feature_pack_meta", {}) or {}),
+    }
+    return {
+        TARGET_SCHEMA_HASH_KEY: _stable_hash(target_payload),
+        FEATURE_SCHEMA_HASH_KEY: _stable_hash(feature_payload),
+    }
+
+
+def attach_runtime_schema_hashes(
+    meta: dict[str, Any] | None,
     *,
-    strict_input_mode: str,
-    message: str,
-    category: type[Warning] = RuntimeWarning,
-) -> bool:
-    """Apply strict-input-mode policy for a contract violation.
+    schemas: dict[str, Any] | None = None,
+    schema_hashes: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Return metadata with preprocessing-derived runtime schema hashes attached."""
 
-    Returns True when execution may continue, False when the caller should stop.
-    """
-
-    mode = normalize_strict_input_mode(strict_input_mode)
-    if mode == "error":
-        raise ValueError(message)
-    if mode == "warn":
-        warnings.warn(message, category=category, stacklevel=2)
-    return True
+    out = dict(meta or {})
+    hashes = dict(schema_hashes or {})
+    if schemas is not None and not hashes:
+        hashes = build_runtime_schema_hashes(schemas)
+    for key in (TARGET_SCHEMA_HASH_KEY, FEATURE_SCHEMA_HASH_KEY):
+        value = _hash_value(hashes.get(key, out.get(key)))
+        out[key] = value
+    return out
 
 
 def normalize_input_mode_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
-    """Return a normalized copy of config with runtime.input_mode defaults."""
+    """Return a normalized copy of config with product runtime.input_mode defaults."""
 
     out = copy.deepcopy(dict(cfg or {}))
     runtime = dict(out.get("runtime", {}))
     runtime["input_mode"] = _norm_text(runtime.get("input_mode"), default=DEFAULT_INPUT_MODE)
-    runtime["strict_input_mode"] = normalize_strict_input_mode(runtime.get("strict_input_mode"), default="error")
-    runtime["allow_mode_fallback"] = _norm_bool(runtime.get("allow_mode_fallback"), default=False)
 
     structure = dict(runtime.get("structure", {}))
     feature_profile = _norm_text(structure.get("feature_profile"), default="none")
@@ -158,19 +186,16 @@ def normalize_input_mode_cfg(cfg: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def validate_input_mode_cfg(cfg: dict[str, Any] | None) -> None:
-    """Validate runtime.input_mode foundation rules for phase 0."""
+    """Validate product runtime.input_mode foundation rules."""
 
     norm = normalize_input_mode_cfg(cfg)
     runtime = dict(norm.get("runtime", {}))
     mode = str(runtime.get("input_mode", DEFAULT_INPUT_MODE))
-    strict_mode = normalize_strict_input_mode(runtime.get("strict_input_mode", "error"), default="error")
     if mode not in set(INPUT_MODES):
         raise ValueError(
             "runtime.input_mode must be one of: "
             f"{list(INPUT_MODES)}; got={mode!r}"
         )
-    if not isinstance(runtime.get("allow_mode_fallback"), bool):
-        raise ValueError("runtime.allow_mode_fallback must be boolean")
 
     structure = dict(runtime.get("structure", {}))
     feature_profile = str(structure.get("feature_profile", "none"))
@@ -195,155 +220,119 @@ def validate_input_mode_cfg(cfg: dict[str, Any] | None) -> None:
             f"{list(STRUCTURE_PROVIDER_MODES)}; got={provider_mode!r}"
         )
     if mode == TABLE_ONLY:
-        non_none_profiles = [
-            ("feature_profile", feature_profile),
-            ("descriptor_profile", descriptor_profile),
-            ("latent_profile", latent_profile),
+        bad = [
+            name
+            for name, value in (
+                ("feature_profile", feature_profile),
+                ("descriptor_profile", descriptor_profile),
+                ("latent_profile", latent_profile),
+            )
+            if value != "none"
         ]
-        bad = [name for name, value in non_none_profiles if value != "none"]
         if bad:
+            raise ValueError(f"runtime.input_mode=table_only: config=runtime.structure, got={bad}")
+        if adapter_mode not in {"auto", "none"}:
             raise ValueError(
-                "runtime.input_mode=table_only requires structure profiles to be 'none'; "
-                f"got non-none keys={bad}"
+                "runtime.input_mode=table_only: "
+                f"config=runtime.structure.adapter_mode, expected='none', got={adapter_mode!r}"
             )
         if provider_mode != "fixed":
             raise ValueError(
-                "runtime.input_mode=table_only requires runtime.structure.provider_mode='fixed'; "
-                f"got={provider_mode!r}"
+                "runtime.input_mode=table_only: "
+                f"config=runtime.structure.provider_mode, expected='fixed', got={provider_mode!r}"
             )
     if mode == TABLE_PLUS_STRUCTURE and feature_profile == "none":
         raise ValueError(
-            "runtime.input_mode=table_plus_structure requires runtime.structure.feature_profile; "
-            "none/empty is not allowed"
+            "runtime.input_mode=table_plus_structure: "
+            "config=runtime.structure.feature_profile, expected=non-none, got='none'"
         )
 
 
 def build_input_mode_effective_metadata(cfg: dict[str, Any] | None) -> dict[str, Any]:
-    """Build canonical effective metadata payload for runtime input mode."""
+    """Build product runtime metadata from config."""
 
     norm = normalize_input_mode_cfg(cfg)
     validate_input_mode_cfg(norm)
     runtime = dict(norm.get("runtime", {}))
     structure = dict(runtime.get("structure", {}))
     mode = str(runtime.get("input_mode", DEFAULT_INPUT_MODE))
-    return {
+    adapter_mode = str(structure.get("adapter_mode", "auto"))
+    if mode == TABLE_ONLY and adapter_mode == "auto":
+        adapter_mode = "none"
+    meta: dict[str, Any] = {
         INPUT_MODE_EFFECTIVE_KEY: mode,
         STRUCTURE_FEATURE_PROFILE_EFFECTIVE_KEY: str(structure.get("feature_profile", "none")),
-        STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: str(structure.get("descriptor_profile", "none")),
-        STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY: str(structure.get("latent_profile", "none")),
-        STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY: str(structure.get("adapter_mode", "auto")),
+        STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY: adapter_mode,
         GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY: str(structure.get("provider_mode", "fixed")),
-        HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY: bool(mode == TABLE_PLUS_STRUCTURE),
+        TARGET_SCHEMA_HASH_KEY: _hash_value(runtime.get(TARGET_SCHEMA_HASH_KEY)),
+        FEATURE_SCHEMA_HASH_KEY: _hash_value(runtime.get(FEATURE_SCHEMA_HASH_KEY)),
     }
-
-
-def resolve_runtime_controls(cfg: dict[str, Any] | None) -> tuple[str, bool]:
-    """Resolve effective strict/fallback runtime controls from cfg."""
-
-    norm = normalize_input_mode_cfg(cfg)
-    runtime = dict(norm.get("runtime", {}))
-    strict_mode = normalize_strict_input_mode(runtime.get("strict_input_mode", "error"), default="error")
-    allow_fallback = bool(runtime.get("allow_mode_fallback", False))
-    return strict_mode, allow_fallback
-
-
-def resolve_benchmark_runtime_controls(cfg: dict[str, Any] | None) -> tuple[str, bool]:
-    """Resolve runtime controls for benchmark runs under strict-fairness policy."""
-
-    strict_mode, allow_fallback = resolve_runtime_controls(cfg)
-    if strict_mode != "error":
-        raise ValueError(
-            "benchmark runtime requires runtime.strict_input_mode='error'; "
-            f"got={strict_mode!r}"
-        )
-    if allow_fallback:
-        raise ValueError(
-            "benchmark runtime forbids runtime.allow_mode_fallback=true "
-            "(mode fallback is disabled for fair comparison)"
-        )
-    return strict_mode, allow_fallback
-
-
-def resolve_input_mode_metadata_contract(
-    *,
-    request_meta: dict[str, Any] | None,
-    checkpoint_meta: dict[str, Any] | None,
-    strict_input_mode: str,
-    allow_mode_fallback: bool,
-    keys: tuple[str, ...] | None = None,
-    context: str = "input_mode_metadata",
-) -> tuple[dict[str, Any], list[str], bool]:
-    """Resolve request/checkpoint metadata contract under strict/fallback controls."""
-
-    strict_mode = normalize_strict_input_mode(strict_input_mode, default="error")
-    keyset = tuple(keys or input_mode_metadata_keys())
-    req = dict(request_meta or {})
-    ckpt = dict(checkpoint_meta or {})
-    warnings_out: list[str] = []
-    fallback_applied = False
-
-    def _handle_violation(msg: str) -> None:
-        nonlocal warnings_out
-        if strict_mode == "error":
-            raise ValueError(msg)
-        if strict_mode == "warn":
-            warnings.warn(msg, category=RuntimeWarning, stacklevel=3)
-            warnings_out.append(msg)
-
-    if not ckpt:
-        return req, warnings_out, fallback_applied
-
-    for key in keyset:
-        if key not in ckpt:
-            _handle_violation(
-                f"{context}: input-mode metadata mismatch: "
-                f"checkpoint metadata missing required key {key!r}"
-            )
-            continue
-        if key not in req:
-            if allow_mode_fallback:
-                req[key] = ckpt[key]
-                fallback_applied = True
-                msg = f"{context}: request metadata missing key {key!r}; fallback to checkpoint value"
-                warnings_out.append(msg)
-                if strict_mode == "warn":
-                    warnings.warn(msg, category=RuntimeWarning, stacklevel=3)
-                continue
-            _handle_violation(
-                f"{context}: input-mode metadata mismatch: "
-                f"request metadata missing required key {key!r}"
-            )
-            continue
-        if req[key] != ckpt[key]:
-            if allow_mode_fallback:
-                msg = (
-                    f"{context}: request/checkpoint mismatch for {key!r}; "
-                    f"request={req[key]!r}, checkpoint={ckpt[key]!r}; fallback to checkpoint value"
-                )
-                req[key] = ckpt[key]
-                fallback_applied = True
-                warnings_out.append(msg)
-                if strict_mode == "warn":
-                    warnings.warn(msg, category=RuntimeWarning, stacklevel=3)
-                continue
-            _handle_violation(
-                f"{context}: input-mode metadata mismatch: "
-                f"key={key!r}, request={req[key]!r}, checkpoint={ckpt[key]!r}"
-            )
-
-    return req, warnings_out, fallback_applied
+    descriptor_profile = str(structure.get("descriptor_profile", "none"))
+    latent_profile = str(structure.get("latent_profile", "none"))
+    if descriptor_profile != "none":
+        meta[DESCRIPTOR_PROFILE_KEY] = descriptor_profile
+    if latent_profile != "none":
+        meta[LATENT_PROFILE_KEY] = latent_profile
+    return meta
 
 
 def input_mode_metadata_keys() -> tuple[str, ...]:
-    """Return canonical metadata keys for checkpoints/benchmark/infer summaries."""
+    """Return required product runtime metadata keys."""
 
     return INPUT_MODE_EFFECTIVE_METADATA_KEYS
 
 
+def optional_runtime_metadata_keys() -> tuple[str, ...]:
+    """Return optional product runtime metadata keys."""
+
+    return OPTIONAL_RUNTIME_METADATA_KEYS
+
+
+def runtime_metadata_keys() -> tuple[str, ...]:
+    """Return required plus optional product runtime metadata keys."""
+
+    return (*INPUT_MODE_EFFECTIVE_METADATA_KEYS, *OPTIONAL_RUNTIME_METADATA_KEYS)
+
+
 def descriptor_latent_metadata_keys() -> tuple[str, ...]:
-    """Return canonical descriptor/latent lane metadata keys."""
+    """Return model-internal descriptor/latent lane metadata keys."""
 
     return DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS
+
+
+def _missing_marker() -> str:
+    return "<missing>"
+
+
+def validate_runtime_metadata_contract(
+    *,
+    request_meta: dict[str, Any] | None,
+    checkpoint_meta: dict[str, Any] | None,
+    keys: tuple[str, ...] | None = None,
+    context: str = "runtime_metadata",
+) -> dict[str, Any]:
+    """Validate request/checkpoint runtime metadata and return normalized request metadata."""
+
+    req = dict(request_meta or {})
+    ckpt = dict(checkpoint_meta or {})
+    if not ckpt:
+        return req
+    required = tuple(keys or input_mode_metadata_keys())
+    optional = tuple(key for key in OPTIONAL_RUNTIME_METADATA_KEYS if key in req or key in ckpt)
+    for key in (*required, *optional):
+        if key not in ckpt:
+            raise ValueError(
+                f"{context}: key={key!r}, expected={_missing_marker()}, got={req.get(key)!r}"
+            )
+        if key not in req:
+            raise ValueError(
+                f"{context}: key={key!r}, expected={ckpt.get(key)!r}, got={_missing_marker()}"
+            )
+        if req[key] != ckpt[key]:
+            raise ValueError(
+                f"{context}: key={key!r}, expected={ckpt[key]!r}, got={req[key]!r}"
+            )
+    return req
 
 
 def merge_effective_runtime_metadata(
@@ -372,29 +361,29 @@ def merge_effective_runtime_metadata(
         current = merged.get(key)
         if current is not None and current != value:
             raise ValueError(
-                "dispatch/runtime effective metadata mismatch: "
-                f"key={key!r}, runtime={current!r}, dispatch={value!r}"
+                f"runtime metadata mismatch: key={key!r}, expected={current!r}, got={value!r}"
             )
         merged[key] = value
     return merged
 
 
 def extract_input_mode_metadata(payload: dict[str, Any] | None) -> dict[str, Any]:
-    """Extract canonical input-mode metadata subset from an arbitrary payload."""
+    """Extract product runtime metadata subset from an arbitrary payload."""
 
     raw = dict(payload or {})
-    return {key: raw[key] for key in INPUT_MODE_EFFECTIVE_METADATA_KEYS if key in raw}
+    return {key: raw[key] for key in runtime_metadata_keys() if key in raw}
 
 
 def extract_descriptor_latent_metadata(payload: dict[str, Any] | None) -> dict[str, Any]:
-    """Extract descriptor/latent metadata subset from an arbitrary payload."""
+    """Extract optional/model-internal descriptor/latent metadata subset."""
 
     raw = dict(payload or {})
-    return {key: raw[key] for key in DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS if key in raw}
+    keys = (*OPTIONAL_RUNTIME_METADATA_KEYS, *DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS)
+    return {key: raw[key] for key in keys if key in raw}
 
 
 def load_checkpoint_metadata_with_input_mode(meta_path: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Load checkpoint meta.json and extract canonical input-mode metadata keys."""
+    """Load checkpoint meta.json and extract product runtime metadata keys."""
 
     path = Path(meta_path)
     if not path.exists():
@@ -410,16 +399,19 @@ __all__ = [
     "DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY",
     "DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY",
     "DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS",
+    "DESCRIPTOR_PROFILE_KEY",
     "EFFECTIVE_RUNTIME_METADATA_KEYS",
+    "FEATURE_SCHEMA_HASH_KEY",
     "GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY",
     "GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY",
     "GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY",
     "HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY",
     "INPUT_MODE_EFFECTIVE_KEY",
     "INPUT_MODE_EFFECTIVE_METADATA_KEYS",
-    "INPUT_MODE_FALLBACK_APPLIED_KEY",
     "INPUT_MODES",
-    "STRICT_INPUT_MODE_VALUES",
+    "LATENT_PROFILE_KEY",
+    "OPTIONAL_RUNTIME_METADATA_KEYS",
+    "RUNTIME_SCHEMA_HASH_PENDING",
     "STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY",
     "STRUCTURE_ADAPTER_MODES",
     "STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY",
@@ -431,18 +423,19 @@ __all__ = [
     "STRUCTURE_PROVIDER_MODES",
     "TABLE_ONLY",
     "TABLE_PLUS_STRUCTURE",
+    "TARGET_SCHEMA_HASH_KEY",
+    "attach_runtime_schema_hashes",
     "build_input_mode_effective_metadata",
+    "build_runtime_schema_hashes",
     "descriptor_latent_metadata_keys",
     "extract_descriptor_latent_metadata",
     "extract_input_mode_metadata",
     "input_mode_metadata_keys",
     "load_checkpoint_metadata_with_input_mode",
     "merge_effective_runtime_metadata",
-    "apply_strict_input_mode_policy",
-    "normalize_strict_input_mode",
     "normalize_input_mode_cfg",
-    "resolve_input_mode_metadata_contract",
-    "resolve_runtime_controls",
-    "resolve_benchmark_runtime_controls",
+    "optional_runtime_metadata_keys",
+    "runtime_metadata_keys",
     "validate_input_mode_cfg",
+    "validate_runtime_metadata_contract",
 ]

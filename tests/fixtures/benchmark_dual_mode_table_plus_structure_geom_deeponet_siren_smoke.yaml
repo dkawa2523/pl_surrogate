@@ -1,7 +1,5 @@
-runtime:
+﻿runtime:
   input_mode: table_plus_structure
-  strict_input_mode: error
-  allow_mode_fallback: false
   structure:
     feature_profile: geom_v1_mainline
     descriptor_profile: struct_desc_v1
@@ -13,8 +11,6 @@ benchmark:
   output_dir: runs/benchmark_dual_mode_table_plus_structure_geom_deeponet_siren_smoke
   runtime:
     input_mode: table_plus_structure
-    strict_input_mode: error
-    allow_mode_fallback: false
     structure:
       feature_profile: geom_v1_mainline
       descriptor_profile: struct_desc_v1
@@ -61,7 +57,6 @@ benchmark:
       target_vars: [ne, ni, Te, phi]
       input_features:
         mode: geom_feature_pack
-        require_pack: error
         features: [x, y, mask_plasma, distance_signed, distance_any]
         distance_transform:
           mode: raw

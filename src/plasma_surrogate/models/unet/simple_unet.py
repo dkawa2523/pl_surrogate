@@ -6,9 +6,9 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.models._torch_spatial_common import _build_unit_coord_grid
 from plasma_surrogate.models.unet._torch_spatial_base import (
     _TorchSpatialFieldMixin,
-    _build_unit_coord_grid,
 )
 
 class UNetBaseline(_TorchSpatialFieldMixin):

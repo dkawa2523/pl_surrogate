@@ -167,9 +167,9 @@ def boundary_operator_loss_torch(
     If provided, loss is evaluated only on the selected flattened points.
     """
     torch = require_torch()
-    ln = _as_bchw(pred_fields["log_ne"])
-    te = _as_bchw(pred_fields["Te"])
-    phi = _as_bchw(pred_fields["phi"])
+    ln = _as_bchw(pred_fields.get("log_density", pred_fields.get("log_ne")))
+    te = _as_bchw(pred_fields.get("temperature", pred_fields.get("Te")))
+    phi = _as_bchw(pred_fields.get("potential", pred_fields.get("phi")))
     if mask_band is None:
         m = torch.ones_like(phi)
     else:
@@ -218,8 +218,8 @@ def physics_terms_torch(
         z = torch.zeros((), dtype=torch.float32, device=ref_device)
         return z, {"poisson": 0.0, "boundary_operator": 0.0}
 
-    phi = _as_bchw(pred_fields["phi"])
-    lambda_poisson = float(cfg.get("lambda_poisson", 0.0))
+    phi = _as_bchw(pred_fields.get("potential", pred_fields.get("phi")))
+    poisson_weight = float(cfg.get("poisson_weight", 0.0))
     rhs = cfg.get("rhs")
     if rhs is None and bool(cfg.get("use_pred_rho_eff", True)) and ("rho_eff" in pred_fields):
         # Poisson form: lap(phi) + rho_eff = 0  => lap(phi) - (-rho_eff) = 0
@@ -232,20 +232,20 @@ def physics_terms_torch(
         eps = getattr(geom_ctx, "eps")
     scale_rho = cfg.get("scale_rho", cfg.get("scale"))
     poisson = torch.zeros((), dtype=torch.float32, device=phi.device)
-    if lambda_poisson > 0.0:
+    if poisson_weight > 0.0:
         res = poisson_residual_fd_torch(phi, rhs=rhs, eps=eps, mask=mask, scale=scale_rho)
         clamp_val = cfg.get("poisson_clamp")
         if clamp_val is not None:
             cv = float(clamp_val)
             res = torch.clamp(res, min=-cv, max=cv)
-        poisson = float(lambda_poisson) * (res * res).mean()
+        poisson = float(poisson_weight) * (res * res).mean()
 
     bo_term = torch.zeros((), dtype=torch.float32, device=phi.device)
     bo_cfg = cfg.get("boundary_operator", {})
     if (
         boundary_operator_model is not None
         and bool(bo_cfg.get("enabled", False))
-        and float(bo_cfg.get("lambda", 0.0)) > 0.0
+        and float(bo_cfg.get("weight", 0.0)) > 0.0
     ):
         bo = boundary_operator_loss_torch(
             pred_fields=pred_fields,
@@ -258,7 +258,7 @@ def physics_terms_torch(
             supervised_targets=supervised_targets,
             sample_idx=bo_cfg.get("sample_idx"),
         )
-        bo_term = float(bo_cfg.get("lambda", 0.0)) * bo
+        bo_term = float(bo_cfg.get("weight", 0.0)) * bo
 
     total = poisson + bo_term
     return total, {"poisson": float(poisson.detach().cpu().item()), "boundary_operator": float(bo_term.detach().cpu().item())}

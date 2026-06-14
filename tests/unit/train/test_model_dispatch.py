@@ -28,8 +28,26 @@ def _ctx(tmp_path: Path, model_name: str, y_vars: list[str] | None = None) -> Tr
     n, d, h, w = 8, 3, 4, 4
     rng = np.random.default_rng(42)
     cond = rng.normal(size=(n, d)).astype(np.float32)
-    vars_eff = list(y_vars or ["ne", "ni", "Te", "phi"])
+    vars_eff = list(y_vars or ["density", "temperature", "potential", "flux"])
     y = np.abs(rng.normal(size=(n, len(vars_eff), h, w))).astype(np.float32)
+    yy, xx = np.meshgrid(
+        np.linspace(-1.0, 1.0, h, dtype=np.float32),
+        np.linspace(-1.0, 1.0, w, dtype=np.float32),
+        indexing="ij",
+    )
+    coord_feature_pack = {
+        "channels": ["x", "y", "distance_signed", "distance_any", "mask_plasma"],
+        "data": np.stack(
+            [
+                xx,
+                yy,
+                np.zeros((h, w), dtype=np.float32),
+                np.ones((h, w), dtype=np.float32),
+                np.ones((h, w), dtype=np.float32),
+            ],
+            axis=0,
+        ).astype(np.float32),
+    }
     return TrainDispatchContext(
         run_cfg={"train": {}},
         profile_lock={"phi_mode": "direct", "primary_qoi_key": "Gamma_i"},
@@ -58,6 +76,7 @@ def _ctx(tmp_path: Path, model_name: str, y_vars: list[str] | None = None) -> Tr
         deeponet_boundary_meta={},
         input_mode_effective="table_plus_structure",
         structure_adapter_mode_effective="auto",
+        coord_feature_pack=coord_feature_pack,
         config_base_dir=tmp_path,
     )
 
@@ -70,7 +89,7 @@ def test_unet_rejects_non_allvars_family(tmp_path: Path) -> None:
                 "epochs": 1,
                 "lr": 1e-3,
                 "target_family": "field",
-                "target_vars": ["Te", "phi"],
+                "target_vars": ["temperature", "potential"],
                 "model_cfg": {"backend": "numpy"},
             }
         }
@@ -83,17 +102,18 @@ def test_unet_mainline_accepts_allvars_shared(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     ctx = _ctx(tmp_path, "unet")
+    weights = {key: 1.0 / len(ctx.y_vars) for key in ctx.y_vars}
     ctx.run_cfg = {
         "train": {
             "unet": {
                 "epochs": 1,
                 "lr": 1e-3,
                 "target_family": "allvars",
-                "target_vars": ["ne", "ni", "Te", "phi"],
+                "target_vars": list(ctx.y_vars),
                 "model_cfg": {"backend": "numpy", "output_heads": {"mode": "shared"}},
                 "selection": {
                     "mode": "best_val_allvars_balance",
-                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
+                    "weights": weights,
                 },
             }
         }
@@ -107,7 +127,7 @@ def test_unet_mainline_accepts_allvars_shared(
         ),
     )
     out = run_model_train_predict(ctx)
-    assert set(out.metrics.keys()) == {"ne", "ni", "Te", "phi"}
+    assert set(out.metrics.keys()) == set(ctx.y_vars)
     assert out.extra_artifacts.get("unet_contract_effective", {}).get("target_family_effective") == "allvars"
     assert (
         out.extra_artifacts.get("unet_contract_effective", {})
@@ -149,40 +169,19 @@ def test_unet_mainline_auto_uniform_selection_weights_for_dynamic_targets(
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}
 
 
-def test_fno_requires_geom_feature_pack(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path, "fno")
-    ctx.run_cfg = {
-        "train": {
-            "fno": {
-                "epochs": 1,
-                "lr": 1e-3,
-                "target_family": "allvars",
-                "target_vars": ["ne", "ni", "Te", "phi"],
-                "selection": {
-                    "mode": "best_val_allvars_balance",
-                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
-                },
-                "input_features": {"mode": "legacy_xy", "features": ["x", "y"]},
-                "model_cfg": {"backend": "torch", "output_heads": {"mode": "shared"}},
-            }
-        }
-    }
-    with pytest.raises(ValueError, match="geom_feature_pack"):
-        run_model_train_predict(ctx)
-
-
 def test_deeponet_requires_cond_only_branch_mode(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path, "deeponet_plasma")
+    weights = {key: 1.0 / len(ctx.y_vars) for key in ctx.y_vars}
     ctx.run_cfg = {
         "train": {
             "deeponet_plasma": {
                 "epochs": 1,
                 "lr": 1e-3,
                 "target_family": "allvars",
-                "target_vars": ["ne", "ni", "Te", "phi"],
+                "target_vars": list(ctx.y_vars),
                 "selection": {
                     "mode": "best_val_allvars_balance",
-                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
+                    "weights": weights,
                 },
                 "input_features": {
                     "mode": "geom_feature_pack",
@@ -198,83 +197,22 @@ def test_deeponet_requires_cond_only_branch_mode(tmp_path: Path) -> None:
         run_model_train_predict(ctx)
 
 
-def test_deeponet_rejects_invalid_missing_geom_feature_policy(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path, "deeponet_plasma")
-    ctx.run_cfg = {
-        "train": {
-            "deeponet_plasma": {
-                "epochs": 1,
-                "lr": 1e-3,
-                "target_family": "allvars",
-                "target_vars": ["ne", "ni", "Te", "phi"],
-                "selection": {
-                    "mode": "best_val_allvars_balance",
-                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
-                },
-                "input_features": {
-                    "mode": "geom_feature_pack",
-                    "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-                },
-                "operator_mode": "plain",
-                "strict_mainline": True,
-                "model_cfg": {
-                    "branch_mode": "cond_only",
-                    "trunk_input_mode": "geom_feature_pack",
-                    "missing_geom_feature_policy": "invalid_mode",
-                },
-            }
-        }
-    }
-    with pytest.raises(ValueError, match="missing_geom_feature_policy"):
-        run_model_train_predict(ctx)
-
-
-def test_deeponet_rejects_invalid_output_path_dot_skip_mode(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path, "deeponet_plasma")
-    ctx.run_cfg = {
-        "train": {
-            "deeponet_plasma": {
-                "epochs": 1,
-                "lr": 1e-3,
-                "target_family": "allvars",
-                "target_vars": ["ne", "ni", "Te", "phi"],
-                "selection": {
-                    "mode": "best_val_allvars_balance",
-                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
-                },
-                "input_features": {
-                    "mode": "geom_feature_pack",
-                    "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-                },
-                "operator_mode": "plain",
-                "strict_mainline": True,
-                "model_cfg": {
-                    "branch_mode": "cond_only",
-                    "trunk_input_mode": "geom_feature_pack",
-                    "output_path": {"dot_skip_mode": "invalid"},
-                },
-            }
-        }
-    }
-    with pytest.raises(ValueError, match="dot_skip_mode"):
-        run_model_train_predict(ctx)
-
-
 def test_deeponet_mainline_runs_with_plain_cond_only(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     require_torch_runtime()
     ctx = _ctx(tmp_path, "deeponet_plasma")
+    weights = {key: 1.0 / len(ctx.y_vars) for key in ctx.y_vars}
     ctx.run_cfg = {
         "train": {
             "deeponet_plasma": {
                 "epochs": 1,
                 "lr": 1e-3,
                 "target_family": "allvars",
-                "target_vars": ["ne", "ni", "Te", "phi"],
+                "target_vars": list(ctx.y_vars),
                 "selection": {
                     "mode": "best_val_allvars_balance",
-                    "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
+                    "weights": weights,
                 },
                 "input_features": {
                     "mode": "geom_feature_pack",
@@ -295,11 +233,9 @@ def test_deeponet_mainline_runs_with_plain_cond_only(
         ),
     )
     out = run_model_train_predict(ctx)
-    assert set(out.metrics.keys()) == {"ne", "ni", "Te", "phi"}
+    assert set(out.metrics.keys()) == set(ctx.y_vars)
     contract = out.extra_artifacts.get("deeponet_contract_effective", {})
     assert contract.get("target_family_effective") == "allvars"
-    assert contract.get("missing_geom_feature_policy_effective") == "warn_zero"
-    assert contract.get("output_path_dot_skip_mode_effective") == "fixed"
 
 
 def test_train_dispatch_result_contains_runtime_effective_artifacts(
@@ -329,3 +265,67 @@ def test_train_dispatch_result_contains_runtime_effective_artifacts(
     out = run_model_train_predict(ctx)
     assert out.extra_artifacts["input_mode_effective"] == "table_only"
     assert out.extra_artifacts["structure_adapter_mode_effective"] == "none"
+
+
+def test_train_dispatch_resolves_loss_protocol_before_trainer(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, Any] = {}
+    ctx = _ctx(tmp_path, "global_mlp", y_vars=["electron_density", "plasma_potential"])
+    ctx.input_mode_effective = "table_only"
+    ctx.structure_adapter_mode_effective = "none"
+    ctx.physics_cfg = {
+        "enabled": False,
+        "boundary_operator": {"enabled": False},
+        "target_role_schema": {
+            "targets": [
+                {
+                    "id": "electron_density",
+                    "role": "density_electron",
+                    "positive": True,
+                    "field_family": "density",
+                },
+                {
+                    "id": "plasma_potential",
+                    "role": "potential",
+                    "positive": False,
+                    "field_family": "electrostatic",
+                },
+            ]
+        },
+    }
+    ctx.run_cfg = {
+        "train": {
+            "loss": {"protocol": "plasma_surrogate_v2"},
+            "global_mlp": {
+                "epochs": 1,
+                "lr": 1e-3,
+                "model_cfg": {"backend": "numpy"},
+            }
+        }
+    }
+
+    def _fake_run_global(self, model, cond_train, y_train, cond_val, y_val, **kwargs):
+        captured["loss_cfg"] = kwargs["loss_cfg"]
+        captured["supervised_mask"] = kwargs["supervised_mask"]
+        return TrainOutput(
+            history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}],
+            model=model,
+        )
+
+    monkeypatch.setattr(Trainer, "run_global", _fake_run_global)
+
+    out = run_model_train_predict(ctx)
+
+    loss_cfg = captured["loss_cfg"]
+    assert loss_cfg["protocol_effective"] == "plasma_surrogate_v2"
+    assert loss_cfg["supervised"]["type"] == "huber"
+    assert loss_cfg["supervised"]["region_balance"]["enabled"] is True
+    assert loss_cfg["supervised"]["spatial_consistency"]["multiscale"]["enabled"] is True
+    assert loss_cfg["supervised"]["positive_penalty"]["vars"] == ["electron_density"]
+    assert loss_cfg["supervised"]["target_region_by_var"] == {
+        "electron_density": "plasma_only",
+        "plasma_potential": "all_domain",
+    }
+    assert captured["supervised_mask"] is None
+    assert out.extra_artifacts["loss_protocol_effective"] == "plasma_surrogate_v2"

@@ -7,7 +7,7 @@ import yaml
 import json
 
 from plasma_surrogate.cli.main import main
-from tests._config_presets import csv_npz_targets_with_ne_te_phi, runtime_table_only
+from tests._config_presets import csv_npz_targets_three_field_example, runtime_table_only
 
 
 def test_cli_pipeline_smoke(tmp_path: Path):
@@ -62,7 +62,7 @@ def test_cli_pipeline_smoke(tmp_path: Path):
 
     assert (run_dir / "preprocessing" / "split" / "split_random_v1.json").exists()
     assert (run_dir / "preprocessing" / "split" / "split_interp_v1.json").exists()
-    assert (run_dir / "preprocessing" / "split" / "split_interp_status_v1.json").exists()
+    assert (run_dir / "preprocessing" / "split" / "split_interp_overlap_v1.json").exists()
     assert (run_dir / "preprocessing" / "split" / "split_extrap_v1.json").exists()
     assert (run_dir / "data_cleaning" / "report.json").exists()
     assert (run_dir / "preprocessing" / "split" / "split_pressure_extrap_v1.json").exists()
@@ -157,7 +157,7 @@ def test_cli_pipeline_csv_npz_smoke(tmp_path: Path):
             "root": str(dataset_root),
             "index_csv": "index.csv",
             "cond_columns": ["c0", "c1", "c2"],
-            "targets": csv_npz_targets_with_ne_te_phi(),
+            "targets": csv_npz_targets_three_field_example(),
             "axis_column": "axis",
             "fields_npz_column": "fields_npz",
             "case_id_column": "case_id",
@@ -243,7 +243,7 @@ def test_cli_preprocess_csv_npz_group_split_no_leak(tmp_path: Path):
             "root": str(dataset_root),
             "index_csv": "index.csv",
             "cond_columns": ["c0", "c1", "c2"],
-            "targets": csv_npz_targets_with_ne_te_phi(),
+            "targets": csv_npz_targets_three_field_example(),
             "axis_column": "axis",
             "fields_npz_column": "fields_npz",
             "case_id_column": "case_id",

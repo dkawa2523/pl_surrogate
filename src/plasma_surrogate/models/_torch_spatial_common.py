@@ -43,8 +43,6 @@ def _resolve_batched_spatial_features(
     grid_shape: tuple[int, int],
     spatial_feature_dim: int,
     label: str,
-    coord_grid: np.ndarray | None = None,
-    allow_coord_fallback: bool = False,
     explicit_requirement_message: str | None = None,
 ) -> np.ndarray:
     x = np.asarray(cond, dtype=np.float32)
@@ -54,8 +52,6 @@ def _resolve_batched_spatial_features(
     h, w = tuple(grid_shape)
     src = spatial_features if spatial_features is not None else static_spatial_features
     if src is None:
-        if allow_coord_fallback and coord_grid is not None:
-            return np.repeat(np.asarray(coord_grid, dtype=np.float32)[None, ...], bsz, axis=0).astype(np.float32)
         if explicit_requirement_message:
             raise ValueError(str(explicit_requirement_message))
         raise ValueError(f"{label} input_features requires explicit spatial features")

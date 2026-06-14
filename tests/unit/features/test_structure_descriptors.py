@@ -5,8 +5,10 @@ import pytest
 
 from plasma_surrogate.data.geometry_context import GeometryContext, build_coord_grid, build_signed_distance_fields
 from plasma_surrogate.features.structure_descriptors import (
+    STRUCT_DESC_LITE_V1,
     STRUCT_DESC_V1,
     STRUCT_DESC_V2,
+    build_struct_desc_lite_v1,
     build_struct_desc_v1,
     build_struct_desc_v2,
     build_structure_descriptor,
@@ -62,6 +64,24 @@ def test_struct_desc_v2_keeps_order_but_normalizes_pixel_scale_features() -> Non
     assert normalized.feature_names == raw.feature_names
     assert np.allclose(normalized.vector, via_registry.vector)
     assert np.max(np.abs(normalized.vector)) < np.max(np.abs(raw.vector))
+
+
+def test_struct_desc_lite_v1_uses_global_features_only() -> None:
+    geom = _geom_ctx_with_parts()
+    lite = build_struct_desc_lite_v1(geom)
+    via_registry = build_structure_descriptor(STRUCT_DESC_LITE_V1, geom)
+    assert lite.profile == STRUCT_DESC_LITE_V1
+    assert int(lite.vector.shape[0]) == 6
+    assert lite.feature_names == (
+        "n_parts",
+        "solid_area_frac",
+        "plasma_area_frac",
+        "min_part_gap",
+        "mean_part_gap",
+        "mean_distance_to_plasma_boundary",
+    )
+    assert not any(name.startswith("part_") for name in lite.feature_names)
+    assert np.allclose(lite.vector, via_registry.vector)
 
 
 def test_struct_desc_v1_requires_part_mask_stack() -> None:

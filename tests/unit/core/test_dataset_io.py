@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from plasma_surrogate.core.dataset_io import load_csv_npz_dataset, load_dataset
-from tests._config_presets import csv_npz_targets_with_ne_ni_te_phi
+from tests._config_presets import csv_npz_targets_four_field_example
 
 
 def _write_geometry(root: Path, h: int = 6, w: int = 6) -> None:
@@ -38,7 +38,7 @@ def _csv_npz_cfg(root: Path) -> dict[str, object]:
         "fields_npz_column": "fields_npz",
         "case_id_column": "case_id",
         "geometry_root": "geometry",
-        "targets": csv_npz_targets_with_ne_ni_te_phi(),
+        "targets": csv_npz_targets_four_field_example(),
     }
 
 

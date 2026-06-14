@@ -19,8 +19,6 @@ def _cno_dual_mode_cfg(*, run_dir: Path) -> dict:
         "run_dir": str(run_dir),
         "runtime": {
             "input_mode": "table_plus_structure",
-            "strict_input_mode": "error",
-            "allow_mode_fallback": False,
             "structure": {
                 "feature_profile": "geom_v1_mainline",
                 "descriptor_profile": "none",
@@ -61,7 +59,6 @@ def _cno_dual_mode_cfg(*, run_dir: Path) -> dict:
                 "target_family": "allvars",
                 "input_features": {
                     "mode": "geom_feature_pack",
-                    "require_pack": "error",
                     "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
                     "distance_transform": {"mode": "raw"},
                 },

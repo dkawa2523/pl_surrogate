@@ -50,10 +50,7 @@ def resolve_allvars_target_vars_for_family(
     default = list(available)
     if raw_target_vars is None:
         return default
-    target = resolve_target_vars(raw_target_vars, available=available, cfg_key=cfg_key)
-    if target != default:
-        raise ValueError(f"{cfg_key} must match target_family=allvars: expected={default}, got={target}")
-    return target
+    return resolve_target_vars(raw_target_vars, available=available, cfg_key=cfg_key)
 
 
 def resolve_mainline_selection_weights(

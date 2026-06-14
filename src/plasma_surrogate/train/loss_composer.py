@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 from typing import Any
-import warnings
 
 import numpy as np
 
-from plasma_surrogate.core.density_contract import resolve_density_key
 from plasma_surrogate.core.spatial_regions import (
     build_boundary_type_masks,
     build_region_masks,
     normalize_target_region_by_var,
     target_region_for_var,
 )
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.core.torch_backend import require_torch
 from plasma_surrogate.train.losses import (
     build_signed_distance,
@@ -40,21 +39,14 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
     cfg = _dict_or_empty(loss_cfg)
     sup = _dict_or_empty(cfg.get("supervised"))
     mt = _dict_or_empty(cfg.get("multitask"))
-    region_weighting_cfg = _dict_or_empty(sup.get("region_weighting"))
+    for removed_key in ("region_weighting", "density_positivity_penalty", "density_relative_weighting"):
+        if removed_key in sup:
+            raise ValueError(f"supervised.{removed_key} is removed; use canonical loss keys")
     region_balance_cfg = _dict_or_empty(sup.get("region_balance"))
     boundary_profile_weighting_cfg = _dict_or_empty(sup.get("boundary_profile_weighting"))
     boundary_weight_cfg = _dict_or_empty(sup.get("boundary_weight"))
-    if region_weighting_cfg and region_balance_cfg:
-        raise ValueError(
-            "supervised.region_balance and supervised.region_weighting cannot be specified together; "
-            "use supervised.region_balance (region_weighting is deprecated alias)"
-        )
-    if region_weighting_cfg:
-        warnings.warn(
-            "supervised.region_weighting is deprecated; use supervised.region_balance",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+    positive_penalty_cfg = _dict_or_empty(sup.get("positive_penalty"))
+    relative_weighting_cfg = _dict_or_empty(sup.get("relative_weighting"))
     if "coord_objective" in sup:
         raise ValueError("supervised.coord_objective is removed")
     if "sample_mean_group_scale" in sup:
@@ -77,7 +69,6 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         "fixed_weights_by_var": fixed_weights_by_var,
         "sigma_init": _dict_or_empty(mt.get("sigma_init")),
         "sigma_clamp": tuple(mt.get("sigma_clamp", [-3.0, 3.0])),
-        "region_weighting": region_weighting_cfg,
         "robust_weighting": _dict_or_empty(sup.get("robust_weighting")),
         "nan_region_policy": str(sup.get("nan_region_policy", "mask_only")).strip().lower(),
         "sdf_weighting": _dict_or_empty(sup.get("sdf_weighting")),
@@ -92,8 +83,8 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         "boundary_type_weighting": _dict_or_empty(sup.get("boundary_type_weighting")),
         "boundary_profile_weighting": boundary_profile_weighting_cfg,
         "boundary_weight": boundary_weight_cfg,
-        "density_positivity_penalty": _dict_or_empty(sup.get("density_positivity_penalty")),
-        "density_relative_weighting": _dict_or_empty(sup.get("density_relative_weighting")),
+        "positive_penalty": positive_penalty_cfg,
+        "relative_weighting": relative_weighting_cfg,
         "spatial_consistency": _dict_or_empty(sup.get("spatial_consistency")),
     }
 
@@ -107,7 +98,7 @@ def _resolve_sigma_for_var(name: str, base_loss: float, cfg: dict[str, Any]) -> 
     return float(np.clip(float(raw), float(lo), float(hi)))
 
 
-def _resolve_density_affine_payload(raw: Any, *, key_name: str, y_order: list[str]) -> dict[str, tuple[float, float]]:
+def _resolve_affine_payload(raw: Any, *, key_name: str, y_order: list[str]) -> dict[str, tuple[float, float]]:
     payload = dict(raw or {})
     unknown = sorted(set(str(k) for k in payload.keys()) - set(y_order))
     if unknown:
@@ -449,8 +440,8 @@ def compose_supervised_numpy(
     if nan_region_policy not in {"mask_only", "sdf_continuous"}:
         raise ValueError(f"Unsupported supervised.nan_region_policy: {nan_region_policy}")
     sdf_distance_contract = str(cfg.get("sdf_distance_contract", "off")).strip().lower()
-    if sdf_distance_contract not in {"off", "warn", "error"}:
-        raise ValueError("supervised.sdf_distance_contract must be one of: off, warn, error")
+    if sdf_distance_contract not in {"off", "error"}:
+        raise ValueError("supervised.sdf_distance_contract must be one of: off, error")
     global_target_region = str(cfg.get("global_target_region", "")).strip().lower()
     if global_target_region and global_target_region not in {"plasma_only", "sdf_continuous"}:
         raise ValueError(f"Unsupported supervised.global_target_region: {global_target_region}")
@@ -471,8 +462,8 @@ def compose_supervised_numpy(
     region_balance_cfg = dict(cfg.get("region_balance", {}))
     boundary_type_cfg = dict(cfg.get("boundary_type_weighting", {}))
     boundary_profile_cfg = dict(cfg.get("boundary_profile_weighting", {}))
-    density_pos_cfg = dict(cfg.get("density_positivity_penalty", {}))
-    density_rel_cfg = dict(cfg.get("density_relative_weighting", {}))
+    positive_cfg = dict(cfg.get("positive_penalty", {}))
+    relative_cfg = dict(cfg.get("relative_weighting", {}))
     spatial_consistency_cfg = dict(cfg.get("spatial_consistency", {}))
     boundary_type_enabled = bool(boundary_type_cfg.get("enabled", False))
     boundary_type_vars = {str(v) for v in boundary_type_cfg.get("vars", ["Te", "phi"])}
@@ -547,56 +538,56 @@ def compose_supervised_numpy(
         or boundary_profile_weight_wafer < 0.0
     ):
         raise ValueError("supervised.boundary_profile_weighting.type_multiplier values must be >= 0")
-    density_pos_enabled = bool(density_pos_cfg.get("enabled", False))
-    density_pos_vars = {str(v) for v in density_pos_cfg.get("vars", ["ne", "ni"])}
-    density_pos_floor = float(density_pos_cfg.get("floor", 0.0))
-    density_pos_lambda = float(density_pos_cfg.get("lambda", 0.0))
-    density_pos_affine_by_var = _resolve_density_affine_payload(
-        density_pos_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_positivity_penalty.affine_by_var",
+    positive_enabled = bool(positive_cfg.get("enabled", False))
+    positive_vars = {str(v) for v in positive_cfg.get("vars", [])}
+    positive_floor = float(positive_cfg.get("floor", 0.0))
+    positive_lambda = float(positive_cfg.get("lambda", 0.0))
+    positive_affine_by_var = _resolve_affine_payload(
+        positive_cfg.get("affine_by_var", {}),
+        key_name="supervised.positive_penalty.affine_by_var",
         y_order=y_order,
     )
-    if density_pos_lambda < 0.0:
-        raise ValueError("supervised.density_positivity_penalty.lambda must be >= 0")
-    if density_pos_enabled:
-        unknown_density_pos_vars = sorted(density_pos_vars - set(y_order))
-        if unknown_density_pos_vars:
+    if positive_lambda < 0.0:
+        raise ValueError("supervised.positive_penalty.lambda must be >= 0")
+    if positive_enabled:
+        unknown_positive_vars = sorted(positive_vars - set(y_order))
+        if unknown_positive_vars:
             raise ValueError(
-                "supervised.density_positivity_penalty.vars contains unknown vars: "
-                f"{unknown_density_pos_vars}"
+                "supervised.positive_penalty.vars contains unknown vars: "
+                f"{unknown_positive_vars}"
             )
-    density_rel_enabled = bool(density_rel_cfg.get("enabled", False))
-    density_rel_vars = {str(v) for v in density_rel_cfg.get("vars", ["ne", "ni"])}
-    density_rel_lambda = float(density_rel_cfg.get("lambda", 0.0))
-    density_rel_affine_by_var = _resolve_density_affine_payload(
-        density_rel_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_relative_weighting.affine_by_var",
+    relative_enabled = bool(relative_cfg.get("enabled", False))
+    relative_vars = {str(v) for v in relative_cfg.get("vars", [])}
+    relative_lambda = float(relative_cfg.get("lambda", 0.0))
+    relative_affine_by_var = _resolve_affine_payload(
+        relative_cfg.get("affine_by_var", {}),
+        key_name="supervised.relative_weighting.affine_by_var",
         y_order=y_order,
     )
-    if density_rel_lambda < 0.0:
-        raise ValueError("supervised.density_relative_weighting.lambda must be >= 0")
-    density_rel_eps_default = float(density_rel_cfg.get("eps", 1.0e-6))
-    density_rel_eps_min = float(density_rel_cfg.get("eps_min", 1.0e-8))
-    if density_rel_eps_default <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps must be > 0")
-    if density_rel_eps_min <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps_min must be > 0")
-    density_rel_eps_by_var = {str(k): float(v) for k, v in dict(density_rel_cfg.get("eps_by_var", {})).items()}
-    unknown_density_rel_eps_vars = sorted(set(density_rel_eps_by_var.keys()) - set(y_order))
-    if unknown_density_rel_eps_vars:
+    if relative_lambda < 0.0:
+        raise ValueError("supervised.relative_weighting.lambda must be >= 0")
+    relative_eps_default = float(relative_cfg.get("eps", 1.0e-6))
+    relative_eps_min = float(relative_cfg.get("eps_min", 1.0e-8))
+    if relative_eps_default <= 0.0:
+        raise ValueError("supervised.relative_weighting.eps must be > 0")
+    if relative_eps_min <= 0.0:
+        raise ValueError("supervised.relative_weighting.eps_min must be > 0")
+    relative_eps_by_var = {str(k): float(v) for k, v in dict(relative_cfg.get("eps_by_var", {})).items()}
+    unknown_relative_eps_vars = sorted(set(relative_eps_by_var.keys()) - set(y_order))
+    if unknown_relative_eps_vars:
         raise ValueError(
-            "supervised.density_relative_weighting.eps_by_var contains unknown vars: "
-            f"{unknown_density_rel_eps_vars}"
+            "supervised.relative_weighting.eps_by_var contains unknown vars: "
+            f"{unknown_relative_eps_vars}"
         )
-    for key, value in density_rel_eps_by_var.items():
+    for key, value in relative_eps_by_var.items():
         if float(value) <= 0.0:
-            raise ValueError(f"supervised.density_relative_weighting.eps_by_var[{key}] must be > 0")
-    if density_rel_enabled:
-        unknown_density_rel_vars = sorted(density_rel_vars - set(y_order))
-        if unknown_density_rel_vars:
+            raise ValueError(f"supervised.relative_weighting.eps_by_var[{key}] must be > 0")
+    if relative_enabled:
+        unknown_relative_vars = sorted(relative_vars - set(y_order))
+        if unknown_relative_vars:
             raise ValueError(
-                "supervised.density_relative_weighting.vars contains unknown vars: "
-                f"{unknown_density_rel_vars}"
+                "supervised.relative_weighting.vars contains unknown vars: "
+                f"{unknown_relative_vars}"
             )
     spatial_consistency_enabled = bool(spatial_consistency_cfg.get("enabled", False))
     spatial_consistency_mode = str(spatial_consistency_cfg.get("mode", "grad_huber")).strip().lower()
@@ -645,7 +636,7 @@ def compose_supervised_numpy(
     region_balance_boundary_px = float(region_balance_cfg.get("boundary_in_px", 2.0))
     region_balance_mid_px = float(region_balance_cfg.get("mid_plasma_px", region_balance_cfg.get("deep_plasma_px", 10.0)))
     region_balance_deep_px = float(region_balance_cfg.get("deep_plasma_px", 10.0))
-    region_balance_vars = {str(v) for v in region_balance_cfg.get("vars", ["log_ne", "log_ni"])}
+    region_balance_vars = {str(v) for v in region_balance_cfg.get("vars", list(y_order))}
     region_balance_w_boundary = float(region_balance_cfg.get("weight_boundary_in", 0.6))
     region_balance_w_mid = float(region_balance_cfg.get("weight_plasma_mid", 0.0))
     region_balance_w_deep = float(region_balance_cfg.get("weight_deep_plasma", 0.4))
@@ -666,18 +657,13 @@ def compose_supervised_numpy(
     chamber_aux_band_px = float(chamber_aux_cfg.get("band_px", 2.0))
     chamber_aux_weight_by_var = dict(chamber_aux_cfg.get("weight_by_var", {}))
     chamber_aux_grad_clip_abs = float(chamber_aux_cfg.get("grad_clip_abs", 3.0))
-    region_cfg = dict(cfg.get("region_weighting", {}))
-    use_region = bool(region_cfg.get("enabled", False))
-    boundary_delta = float(region_cfg.get("boundary_delta", 2.0))
-    w_bulk = float(region_cfg.get("w_bulk", 1.0))
-    w_boundary = float(region_cfg.get("w_boundary", 3.0))
     robust_clip_stats = dict(cfg.get("robust_clip_stats", {}))
     grads: dict[str, np.ndarray] = {}
     per_var_loss: dict[str, float] = {}
     total = 0.0
     chamber_aux_total = 0.0
-    density_pos_total = 0.0
-    density_rel_total = 0.0
+    positive_total = 0.0
+    relative_total = 0.0
     spatial_consistency_total = 0.0
     region_boundary_total = 0.0
     region_mid_total = 0.0
@@ -757,24 +743,9 @@ def compose_supervised_numpy(
                     )
                     if sdf_distance_contract == "error":
                         raise ValueError(msg)
-                    if sdf_distance_contract == "warn":
-                        warnings.warn(msg, RuntimeWarning, stacklevel=2)
                 sw = sdf_continuous_weight_map(m, d_signed, sdf_cfg)
-                if use_region:
-                    boundary = (d_map <= boundary_delta).astype(np.float32) * m
-                    bulk = np.clip(m - boundary, 0.0, 1.0)
-                    region_mult = boundary * max(w_boundary / max(w_bulk, eps), 1.0) + bulk
-                    outside = (1.0 - m).astype(np.float32)
-                    sw = sw * (region_mult + outside)
             else:
-                if use_region:
-                    if d_map is None:
-                        raise ValueError("region_weighting.enabled requires distance_any")
-                    boundary = (d_map <= boundary_delta).astype(np.float32) * m
-                    bulk = np.clip(m - boundary, 0.0, 1.0)
-                    sw = boundary * w_boundary + bulk * w_bulk
-                else:
-                    sw = m
+                sw = m
             if boundary_type_enabled and name in boundary_type_vars and d_map is not None:
                 type_masks = build_boundary_type_masks(
                     mask_plasma=m,
@@ -1036,11 +1007,11 @@ def compose_supervised_numpy(
             grad = (grad + float(spatial_consistency_lambda) * sc_grad).astype(np.float32)
             spatial_consistency_total += float(spatial_consistency_lambda * sc_loss)
 
-        if density_pos_enabled and name in density_pos_vars and density_pos_lambda > 0.0:
-            mean_aff, std_aff = density_pos_affine_by_var.get(name, (0.0, 1.0))
+        if positive_enabled and name in positive_vars and positive_lambda > 0.0:
+            mean_aff, std_aff = positive_affine_by_var.get(name, (0.0, 1.0))
             std_safe = float(max(abs(float(std_aff)), 1.0e-12))
             pred_phys = (pred * float(std_aff) + float(mean_aff)).astype(np.float32)
-            violation_norm = ((float(density_pos_floor) - pred_phys) / std_safe).astype(np.float32)
+            violation_norm = ((float(positive_floor) - pred_phys) / std_safe).astype(np.float32)
             violation_pos = np.maximum(violation_norm, 0.0).astype(np.float32)
             pos_loss_map = (0.5 * np.square(violation_pos)).astype(np.float32)
             # d/d(pred_scaled) [0.5 * max(v_norm,0)^2], where v_norm=(floor-pred_phys)/std_safe.
@@ -1055,14 +1026,14 @@ def compose_supervised_numpy(
                 group_ids=group_ids,
                 group_mode=sample_mean_group_mode,
             )
-            base_loss += float(density_pos_lambda * pos_loss)
-            grad = (grad + float(density_pos_lambda) * pos_grad).astype(np.float32)
-            density_pos_total += float(density_pos_lambda * pos_loss)
+            base_loss += float(positive_lambda * pos_loss)
+            grad = (grad + float(positive_lambda) * pos_grad).astype(np.float32)
+            positive_total += float(positive_lambda * pos_loss)
 
-        if density_rel_enabled and name in density_rel_vars and density_rel_lambda > 0.0:
-            mean_aff, std_aff = density_rel_affine_by_var.get(name, (0.0, 1.0))
-            eps_var = float(density_rel_eps_by_var.get(name, density_rel_eps_default))
-            eps_var = max(eps_var, density_rel_eps_min)
+        if relative_enabled and name in relative_vars and relative_lambda > 0.0:
+            mean_aff, std_aff = relative_affine_by_var.get(name, (0.0, 1.0))
+            eps_var = float(relative_eps_by_var.get(name, relative_eps_default))
+            eps_var = max(eps_var, relative_eps_min)
             pred_phys = (pred * float(std_aff) + float(mean_aff)).astype(np.float32)
             tgt_phys = (tgt * float(std_aff) + float(mean_aff)).astype(np.float32)
             err_phys = (pred_phys - tgt_phys).astype(np.float32)
@@ -1079,9 +1050,9 @@ def compose_supervised_numpy(
                 group_ids=group_ids,
                 group_mode=sample_mean_group_mode,
             )
-            base_loss += float(density_rel_lambda * rel_loss)
-            grad = (grad + float(density_rel_lambda) * rel_grad).astype(np.float32)
-            density_rel_total += float(density_rel_lambda * rel_loss)
+            base_loss += float(relative_lambda * rel_loss)
+            grad = (grad + float(relative_lambda) * rel_grad).astype(np.float32)
+            relative_total += float(relative_lambda * rel_loss)
 
         sigma = _resolve_sigma_for_var(name, base_loss, cfg)
         if cfg["weighting"] == "uncertainty":
@@ -1098,10 +1069,10 @@ def compose_supervised_numpy(
 
     if chamber_aux_enabled:
         per_var_loss["__chamber_aux__"] = float(chamber_aux_total)
-    if density_pos_enabled and density_pos_lambda > 0.0:
-        per_var_loss["__density_positivity_penalty__"] = float(density_pos_total)
-    if density_rel_enabled and density_rel_lambda > 0.0:
-        per_var_loss["__density_relative_weighting__"] = float(density_rel_total)
+    if positive_enabled and positive_lambda > 0.0:
+        per_var_loss["__positive_penalty__"] = float(positive_total)
+    if relative_enabled and relative_lambda > 0.0:
+        per_var_loss["__relative_weighting__"] = float(relative_total)
     if spatial_consistency_enabled and spatial_consistency_lambda > 0.0:
         per_var_loss["__spatial_consistency__"] = float(spatial_consistency_total)
     if region_balance_enabled:
@@ -1230,36 +1201,16 @@ def _resolve_torch_region_contract(
     *,
     cfg: dict[str, Any],
     y_order: list[str],
-) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    """Resolve canonical region contract for torch supervised loss.
-
-    Returns (region_balance_cfg, legacy_region_weighting_cfg, alias_used).
-    """
+) -> dict[str, Any]:
+    """Resolve canonical region-balance contract for torch supervised loss."""
 
     region_balance_cfg = dict(cfg.get("region_balance", {}))
-    legacy_region_cfg = dict(cfg.get("region_weighting", {}))
-    if region_balance_cfg and legacy_region_cfg:
-        raise ValueError(
-            "supervised.region_balance and supervised.region_weighting cannot be specified together; "
-            "use supervised.region_balance (region_weighting is deprecated alias)"
-        )
-    alias_used = False
-    if (not region_balance_cfg) and legacy_region_cfg:
-        alias_used = True
-        warnings.warn(
-            "supervised.region_weighting is deprecated for torch path; "
-            "use supervised.region_balance instead",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        # Keep legacy semantics when only alias is provided.
-        return {}, legacy_region_cfg, alias_used
     if not region_balance_cfg:
-        return {}, {}, alias_used
+        return {}
     region_balance_cfg = dict(region_balance_cfg)
     if "vars" not in region_balance_cfg:
         region_balance_cfg["vars"] = list(y_order)
-    return region_balance_cfg, {}, alias_used
+    return region_balance_cfg
 
 
 def compose_supervised_torch(
@@ -1300,7 +1251,7 @@ def compose_supervised_torch(
     robust_vars = {str(v) for v in robust_cfg.get("vars", ["phi", "Te"])}
     robust_mad_scale = float(robust_cfg.get("mad_scale", 3.0))
     robust_min_weight = float(robust_cfg.get("min_weight", 0.2))
-    region_balance_cfg, legacy_region_cfg, _ = _resolve_torch_region_contract(cfg=cfg, y_order=y_order)
+    region_balance_cfg = _resolve_torch_region_contract(cfg=cfg, y_order=y_order)
     region_balance_enabled = bool(region_balance_cfg.get("enabled", False))
     region_balance_mode = str(region_balance_cfg.get("mode", "replace")).strip().lower()
     if region_balance_mode not in {"replace", "additive"}:
@@ -1318,10 +1269,6 @@ def compose_supervised_torch(
     region_balance_reduce = str(region_balance_cfg.get("reduce", "mean_count")).strip().lower()
     if region_balance_reduce not in {"mean_count"}:
         raise ValueError("supervised.region_balance.reduce must be: mean_count")
-    legacy_region_enabled = bool(legacy_region_cfg.get("enabled", False))
-    boundary_delta = float(legacy_region_cfg.get("boundary_delta", 2.0))
-    w_bulk = float(legacy_region_cfg.get("w_bulk", 1.0))
-    w_boundary = float(legacy_region_cfg.get("w_boundary", 3.0))
     normalization = str(cfg.get("normalization", "pixel_mean")).strip().lower()
     sample_mean_weight_denominator = str(cfg.get("sample_mean_weight_denominator", "weighted")).strip().lower()
     delta_by_var = dict(cfg.get("delta_by_var", {}))
@@ -1352,62 +1299,62 @@ def compose_supervised_torch(
     if nan_region_policy not in {"mask_only", "sdf_continuous"}:
         raise ValueError(f"Unsupported supervised.nan_region_policy: {nan_region_policy}")
     sdf_distance_contract = str(cfg.get("sdf_distance_contract", "off")).strip().lower()
-    if sdf_distance_contract not in {"off", "warn", "error"}:
-        raise ValueError("supervised.sdf_distance_contract must be one of: off, warn, error")
+    if sdf_distance_contract not in {"off", "error"}:
+        raise ValueError("supervised.sdf_distance_contract must be one of: off, error")
     sdf_cfg = dict(cfg.get("sdf_weighting", {}))
     chamber_weight_by_var = dict(cfg.get("chamber_weight_by_var", {}))
-    density_pos_cfg = dict(cfg.get("density_positivity_penalty", {}))
-    density_rel_cfg = dict(cfg.get("density_relative_weighting", {}))
-    density_pos_enabled = bool(density_pos_cfg.get("enabled", False))
-    density_pos_vars = {str(v) for v in density_pos_cfg.get("vars", ["ne", "ni"])}
-    density_pos_floor = float(density_pos_cfg.get("floor", 0.0))
-    density_pos_lambda = float(density_pos_cfg.get("lambda", 0.0))
-    density_pos_affine_by_var = _resolve_density_affine_payload(
-        density_pos_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_positivity_penalty.affine_by_var",
+    positive_cfg = dict(cfg.get("positive_penalty", {}))
+    relative_cfg = dict(cfg.get("relative_weighting", {}))
+    positive_enabled = bool(positive_cfg.get("enabled", False))
+    positive_vars = {str(v) for v in positive_cfg.get("vars", [])}
+    positive_floor = float(positive_cfg.get("floor", 0.0))
+    positive_lambda = float(positive_cfg.get("lambda", 0.0))
+    positive_affine_by_var = _resolve_affine_payload(
+        positive_cfg.get("affine_by_var", {}),
+        key_name="supervised.positive_penalty.affine_by_var",
         y_order=y_order,
     )
-    if density_pos_lambda < 0.0:
-        raise ValueError("supervised.density_positivity_penalty.lambda must be >= 0")
-    if density_pos_enabled:
-        unknown_density_pos_vars = sorted(density_pos_vars - set(y_order))
-        if unknown_density_pos_vars:
+    if positive_lambda < 0.0:
+        raise ValueError("supervised.positive_penalty.lambda must be >= 0")
+    if positive_enabled:
+        unknown_positive_vars = sorted(positive_vars - set(y_order))
+        if unknown_positive_vars:
             raise ValueError(
-                "supervised.density_positivity_penalty.vars contains unknown vars: "
-                f"{unknown_density_pos_vars}"
+                "supervised.positive_penalty.vars contains unknown vars: "
+                f"{unknown_positive_vars}"
             )
-    density_rel_enabled = bool(density_rel_cfg.get("enabled", False))
-    density_rel_vars = {str(v) for v in density_rel_cfg.get("vars", ["ne", "ni"])}
-    density_rel_lambda = float(density_rel_cfg.get("lambda", 0.0))
-    density_rel_affine_by_var = _resolve_density_affine_payload(
-        density_rel_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_relative_weighting.affine_by_var",
+    relative_enabled = bool(relative_cfg.get("enabled", False))
+    relative_vars = {str(v) for v in relative_cfg.get("vars", [])}
+    relative_lambda = float(relative_cfg.get("lambda", 0.0))
+    relative_affine_by_var = _resolve_affine_payload(
+        relative_cfg.get("affine_by_var", {}),
+        key_name="supervised.relative_weighting.affine_by_var",
         y_order=y_order,
     )
-    if density_rel_lambda < 0.0:
-        raise ValueError("supervised.density_relative_weighting.lambda must be >= 0")
-    density_rel_eps_default = float(density_rel_cfg.get("eps", 1.0e-6))
-    density_rel_eps_min = float(density_rel_cfg.get("eps_min", 1.0e-8))
-    if density_rel_eps_default <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps must be > 0")
-    if density_rel_eps_min <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps_min must be > 0")
-    density_rel_eps_by_var = {str(k): float(v) for k, v in dict(density_rel_cfg.get("eps_by_var", {})).items()}
-    unknown_density_rel_eps_vars = sorted(set(density_rel_eps_by_var.keys()) - set(y_order))
-    if unknown_density_rel_eps_vars:
+    if relative_lambda < 0.0:
+        raise ValueError("supervised.relative_weighting.lambda must be >= 0")
+    relative_eps_default = float(relative_cfg.get("eps", 1.0e-6))
+    relative_eps_min = float(relative_cfg.get("eps_min", 1.0e-8))
+    if relative_eps_default <= 0.0:
+        raise ValueError("supervised.relative_weighting.eps must be > 0")
+    if relative_eps_min <= 0.0:
+        raise ValueError("supervised.relative_weighting.eps_min must be > 0")
+    relative_eps_by_var = {str(k): float(v) for k, v in dict(relative_cfg.get("eps_by_var", {})).items()}
+    unknown_relative_eps_vars = sorted(set(relative_eps_by_var.keys()) - set(y_order))
+    if unknown_relative_eps_vars:
         raise ValueError(
-            "supervised.density_relative_weighting.eps_by_var contains unknown vars: "
-            f"{unknown_density_rel_eps_vars}"
+            "supervised.relative_weighting.eps_by_var contains unknown vars: "
+            f"{unknown_relative_eps_vars}"
         )
-    for key, value in density_rel_eps_by_var.items():
+    for key, value in relative_eps_by_var.items():
         if float(value) <= 0.0:
-            raise ValueError(f"supervised.density_relative_weighting.eps_by_var[{key}] must be > 0")
-    if density_rel_enabled:
-        unknown_density_rel_vars = sorted(density_rel_vars - set(y_order))
-        if unknown_density_rel_vars:
+            raise ValueError(f"supervised.relative_weighting.eps_by_var[{key}] must be > 0")
+    if relative_enabled:
+        unknown_relative_vars = sorted(relative_vars - set(y_order))
+        if unknown_relative_vars:
             raise ValueError(
-                "supervised.density_relative_weighting.vars contains unknown vars: "
-                f"{unknown_density_rel_vars}"
+                "supervised.relative_weighting.vars contains unknown vars: "
+                f"{unknown_relative_vars}"
             )
     spatial_consistency_cfg = dict(cfg.get("spatial_consistency", {}))
     spatial_consistency_enabled = bool(spatial_consistency_cfg.get("enabled", False))
@@ -1493,7 +1440,7 @@ def compose_supervised_torch(
                 if d_any is None:
                     raise ValueError("nan_region_policy=sdf_continuous requires distance_any")
                 d_signed = torch.where(m > 0.5, d_any, -d_any)
-                if sdf_distance_contract != "off":
+                if sdf_distance_contract == "error":
                     m_np = np.asarray(m.detach().cpu().numpy(), dtype=np.float32)
                     d_np = np.asarray(d_signed.detach().cpu().numpy(), dtype=np.float32)
                     if not is_effective_signed_distance(m_np[:, 0], d_np[:, 0]):
@@ -1501,25 +1448,10 @@ def compose_supervised_torch(
                             "sdf_continuous contract violation: signed distance has no negative chamber-side values; "
                             "distance_any may be invalid for chamber supervision"
                         )
-                        if sdf_distance_contract == "error":
-                            raise ValueError(msg)
-                        warnings.warn(msg, RuntimeWarning, stacklevel=2)
+                        raise ValueError(msg)
                 sw = sdf_continuous_weight_map_torch(m, d_signed, sdf_cfg).to(dtype=base_map.dtype)
-                if legacy_region_enabled:
-                    boundary = (d_any <= boundary_delta).to(dtype=base_map.dtype) * m
-                    bulk = (m - boundary).clamp(min=0.0)
-                    region_mult = boundary * max(w_boundary / max(w_bulk, 1e-8), 1.0) + bulk
-                    outside = (1.0 - m).clamp(min=0.0)
-                    sw = sw * (region_mult + outside)
             else:
-                if legacy_region_enabled:
-                    if d_any is None:
-                        raise ValueError("region_weighting.enabled requires distance_any")
-                    boundary = (d_any <= boundary_delta).to(dtype=base_map.dtype) * m
-                    bulk = (m - boundary).clamp(min=0.0)
-                    sw = boundary * w_boundary + bulk * w_bulk
-                else:
-                    sw = m
+                sw = m
             if target_region != "plasma_only":
                 sw = _apply_chamber_override_torch(
                     sw,
@@ -1631,11 +1563,11 @@ def compose_supervised_torch(
             base = base + float(spatial_consistency_lambda) * sc_loss
             spatial_consistency_total = spatial_consistency_total + float(spatial_consistency_lambda) * sc_loss
 
-        if density_pos_enabled and name in density_pos_vars and density_pos_lambda > 0.0:
-            mean_aff, std_aff = density_pos_affine_by_var.get(name, (0.0, 1.0))
+        if positive_enabled and name in positive_vars and positive_lambda > 0.0:
+            mean_aff, std_aff = positive_affine_by_var.get(name, (0.0, 1.0))
             std_safe = float(max(abs(float(std_aff)), 1.0e-12))
             pred_phys = pred * float(std_aff) + float(mean_aff)
-            violation_norm = (float(density_pos_floor) - pred_phys) / float(std_safe)
+            violation_norm = (float(positive_floor) - pred_phys) / float(std_safe)
             violation = torch.clamp(violation_norm, min=0.0)
             pos_map = 0.5 * violation * violation
             pos_loss = _weighted_reduce_torch(
@@ -1644,12 +1576,12 @@ def compose_supervised_torch(
                 normalization=normalization,
                 weight_denominator=sample_mean_weight_denominator,
             )
-            base = base + float(density_pos_lambda) * pos_loss
+            base = base + float(positive_lambda) * pos_loss
 
-        if density_rel_enabled and name in density_rel_vars and density_rel_lambda > 0.0:
-            mean_aff, std_aff = density_rel_affine_by_var.get(name, (0.0, 1.0))
-            eps_var = float(density_rel_eps_by_var.get(name, density_rel_eps_default))
-            eps_var = max(eps_var, density_rel_eps_min)
+        if relative_enabled and name in relative_vars and relative_lambda > 0.0:
+            mean_aff, std_aff = relative_affine_by_var.get(name, (0.0, 1.0))
+            eps_var = float(relative_eps_by_var.get(name, relative_eps_default))
+            eps_var = max(eps_var, relative_eps_min)
             pred_phys = pred * float(std_aff) + float(mean_aff)
             tgt_phys = tgt[:, i : i + 1] * float(std_aff) + float(mean_aff)
             rel_denom = torch.abs(tgt_phys) + float(eps_var)
@@ -1660,7 +1592,7 @@ def compose_supervised_torch(
                 normalization=normalization,
                 weight_denominator=sample_mean_weight_denominator,
             )
-            base = base + float(density_rel_lambda) * rel_loss
+            base = base + float(relative_lambda) * rel_loss
 
         base_loss = float(base.detach().cpu().item())
         sigma = _resolve_sigma_for_var(name, base_loss, cfg)
@@ -1690,39 +1622,17 @@ def _as_bhw(arr: Any, *, key: str) -> np.ndarray:
 
 def _resolve_physics_symbol_keys(pred_fields: dict[str, Any], physics_cfg: dict[str, Any] | None) -> tuple[str, str, str]:
     keys = [str(k) for k in pred_fields.keys()]
-    symbols = dict(dict(physics_cfg or {}).get("symbols", {}))
-
-    def _resolve(symbol_name: str, *, fallback: str | None = None) -> str | None:
-        raw = symbols.get(symbol_name, None)
-        if raw is not None:
-            key = str(raw)
-            if key not in set(keys):
-                raise ValueError(
-                    f"physics.symbols.{symbol_name}={key} not found in prediction fields; available={keys}"
-                )
-            return key
-        if fallback is not None and fallback in set(keys):
-            return fallback
-        return None
-
-    density_key = _resolve("density")
-    if density_key is None:
-        density_key = resolve_density_key(keys, canonical="ne", prefer_linear=True)
-    temperature_key = _resolve("temperature", fallback="Te")
-    potential_key = _resolve("potential", fallback="phi")
-    if density_key is None:
-        raise ValueError(
-            "physics enabled requires a density field. Provide physics.symbols.density or include ne/log_ne in targets."
-        )
-    if temperature_key is None:
-        raise ValueError(
-            "physics enabled requires a temperature field. Provide physics.symbols.temperature or include Te in targets."
-        )
-    if potential_key is None:
-        raise ValueError(
-            "physics enabled requires a potential field. Provide physics.symbols.potential or include phi in targets."
-        )
-    return str(density_key), str(temperature_key), str(potential_key)
+    cfg = dict(physics_cfg or {})
+    role_schema = cfg.get("target_role_schema")
+    if role_schema is None:
+        role_schema = cfg.get("target_roles")
+    resolved = resolve_physics_symbol_keys(
+        keys,
+        symbols=dict(cfg.get("symbols", {}) or {}),
+        target_role_schema=dict(role_schema or {}),
+        context="training physics",
+    )
+    return resolved["density"], resolved["temperature"], resolved["potential"]
 
 
 def _resolve_numpy_physics_fields(
@@ -1731,7 +1641,7 @@ def _resolve_numpy_physics_fields(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     density_key, temperature_key, potential_key = _resolve_physics_symbol_keys(pred_fields, physics_cfg)
     density = _as_bhw(pred_fields[density_key], key=density_key)
-    log_density = density if density_key == "log_ne" else np.log10(np.maximum(density, np.float32(1.0e-30))).astype(np.float32)
+    log_density = np.log10(np.maximum(density, np.float32(1.0e-30))).astype(np.float32)
     temperature = _as_bhw(pred_fields[temperature_key], key=temperature_key)
     potential = _as_bhw(pred_fields[potential_key], key=potential_key)
     return log_density, temperature, potential
@@ -1753,25 +1663,25 @@ def compose_numpy(
             raise ValueError("compose_numpy requires at least one prediction field")
         phi = np.zeros_like(ref, dtype=np.float32)
         return 0.0, np.zeros_like(phi, dtype=np.float32), _empty_components()
-    log_ne, te, phi = _resolve_numpy_physics_fields(pred_fields, physics_cfg)
+    log_density, te, phi = _resolve_numpy_physics_fields(pred_fields, physics_cfg)
     eff_cfg = dict(physics_cfg)
     if resolved_terms is not None:
         eff_cfg["resolved_terms"] = resolved_terms
     term_map = {s.name: s for s in resolve_numpy_terms(eff_cfg)}
-    eff_cfg["lambda_poisson"] = (
+    eff_cfg["poisson_weight"] = (
         float(term_map["poisson"].weight) if bool(term_map["poisson"].enabled) else 0.0
     )
-    eff_cfg["lambda_bc"] = (
+    eff_cfg["boundary_weight"] = (
         float(term_map["boundary"].weight) if bool(term_map["boundary"].enabled) else 0.0
     )
     bo_cfg = dict(eff_cfg.get("boundary_operator", {}))
-    bo_cfg["lambda"] = (
+    bo_cfg["weight"] = (
         float(term_map["boundary_operator"].weight) if bool(term_map["boundary_operator"].enabled) else 0.0
     )
     bo_cfg["enabled"] = bool(bo_cfg.get("enabled", False)) and bool(term_map["boundary_operator"].enabled)
     eff_cfg["boundary_operator"] = bo_cfg
 
-    phys_loss, grad_phi, terms = physics_loss_and_grad(phi=phi, cfg=eff_cfg, log_ne=log_ne, te=te)
+    phys_loss, grad_phi, terms = physics_loss_and_grad(phi=phi, cfg=eff_cfg, log_ne=log_density, te=te)
 
     comps = _empty_components()
     comps["physics"] = float(phys_loss)
@@ -1809,24 +1719,22 @@ def compose_torch(
     if resolved_terms is not None:
         eff_cfg["resolved_terms"] = resolved_terms
     term_map = {s.name: s for s in resolve_torch_terms(eff_cfg)}
-    eff_cfg["lambda_poisson"] = (
+    eff_cfg["poisson_weight"] = (
         float(term_map["poisson"].weight) if bool(term_map["poisson"].enabled) else 0.0
     )
     bo_cfg = dict(eff_cfg.get("boundary_operator", {}))
-    bo_cfg["lambda"] = (
+    bo_cfg["weight"] = (
         float(term_map["boundary_operator"].weight) if bool(term_map["boundary_operator"].enabled) else 0.0
     )
     bo_cfg["enabled"] = bool(bo_cfg.get("enabled", False)) and bool(term_map["boundary_operator"].enabled)
     eff_cfg["boundary_operator"] = bo_cfg
 
     density_t = torch.as_tensor(pred_fields[density_key], dtype=torch.float32, device=ref.device)
-    log_density_t = (
-        density_t if density_key == "log_ne" else torch.log10(torch.clamp(density_t, min=1.0e-30))
-    )
+    log_density_t = torch.log10(torch.clamp(density_t, min=1.0e-30))
     physics_pred_fields = dict(pred_fields)
-    physics_pred_fields["log_ne"] = log_density_t
-    physics_pred_fields["Te"] = torch.as_tensor(pred_fields[temperature_key], dtype=torch.float32, device=ref.device)
-    physics_pred_fields["phi"] = ref
+    physics_pred_fields["log_density"] = log_density_t
+    physics_pred_fields["temperature"] = torch.as_tensor(pred_fields[temperature_key], dtype=torch.float32, device=ref.device)
+    physics_pred_fields["potential"] = ref
     total, terms = physics_terms_torch(
         pred_fields=physics_pred_fields,
         cond_vec=cond_vec,

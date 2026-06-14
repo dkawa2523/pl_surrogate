@@ -134,7 +134,7 @@ def allvars_plasma_balance_score(
     target_region_by_var: dict[str, str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     parts: dict[str, float] = {}
-    score_total = 0.0
+    score_sum = 0.0
     score_weight = 0.0
     region_by_var = normalize_target_region_by_var(target_region_by_var, target_vars=y_vars)
     mask_base = np.asarray(plasma_mask, dtype=bool)
@@ -148,8 +148,8 @@ def allvars_plasma_balance_score(
             parts[f"r2_{name}_plasma"] = float(masked_r2_score(target[:, idx], pred[:, idx], mask_base))
         w = float(weights.get(name, 0.0))
         if w > 0.0 and np.isfinite(r2_val):
-            score_total += w * float(r2_val)
+            score_sum += w * float(r2_val)
             score_weight += w
     if score_weight <= 0.0:
         return float("nan"), parts
-    return float(score_total / score_weight), parts
+    return float(score_sum / score_weight), parts

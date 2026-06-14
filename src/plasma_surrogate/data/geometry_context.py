@@ -82,6 +82,8 @@ def build_signed_distance_fields(mask_plasma: np.ndarray) -> np.ndarray:
     outside_boundary = _outside_boundary_mask(m)
     inside = _distance_from_seeds(m, inside_boundary)
     outside = _distance_from_seeds((1 - m).astype(np.uint8), outside_boundary)
+    if np.any(m == 0):
+        outside = np.where(m > 0, outside, outside + np.float32(1.0)).astype(np.float32)
     signed = np.where(m > 0, inside, -outside).astype(np.float32)
     return signed
 

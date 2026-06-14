@@ -169,31 +169,6 @@ def test_fno_checkpoint_roundtrip_still_works_after_shared_spectral_cfg(tmp_path
     np.testing.assert_allclose(pred_before, pred_after, atol=1e-6, rtol=1e-6)
 
 
-@pytest.mark.parametrize("local_skip_enabled", [False, True])
-def test_ffno_load_legacy_weights_without_axis_mix_scalars(local_skip_enabled: bool) -> None:
-    require_torch_runtime()
-    model = FFNOBaseline(
-        input_dim=3,
-        grid_shape=(8, 8),
-        out_channels=2,
-        output_keys=["density", "temperature"],
-        input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-        n_modes=3,
-        spectral_cfg=_spectral_cfg_with_local_skip(enabled=local_skip_enabled),
-    )
-    legacy_like_state = {k: v for k, v in model.state_dict_numpy().items() if not k.endswith(".beta_h") and not k.endswith(".beta_w")}
-    target = FFNOBaseline(
-        input_dim=3,
-        grid_shape=(8, 8),
-        out_channels=2,
-        output_keys=["density", "temperature"],
-        input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-        n_modes=3,
-        spectral_cfg=_spectral_cfg_with_local_skip(enabled=local_skip_enabled),
-    )
-    target.load_state_dict_numpy(legacy_like_state)
-
-
 @pytest.mark.parametrize(
     ("factorized_cfg", "message"),
     [

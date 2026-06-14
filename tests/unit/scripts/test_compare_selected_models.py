@@ -29,23 +29,22 @@ def test_compare_selected_models_supports_auto_primary_and_dynamic_headers(tmp_p
         "primary_metric",
         "primary_metric_value",
         "target_family_effective",
-        "test_rmse_ne",
-        "test_rmse_Te",
-        "score_total_dual",
-        "test_r2_plasma_mean_dual",
+        "test_rmse_electron_density",
+        "test_rmse_electron_temperature",
+        "surrogate_quality_score",
     ]
     _write_csv(
         global_csv,
         header,
         [
-            ["global_mlp", "table_plus_structure", "score_total_dual", 0.42, "allvars", 0.11, 0.22, 0.42, 0.0],
+            ["global_mlp", "table_plus_structure", "surrogate_quality_score", 0.42, "allvars", 0.11, 0.22, 0.42],
         ],
     )
     _write_csv(
         ffno_csv,
         header,
         [
-            ["ffno", "table_plus_structure", "test_r2_plasma_mean_dual", 0.71, "allvars", 0.09, 0.18, 0.0, 0.71],
+            ["ffno", "table_plus_structure", "surrogate_quality_score", 0.31, "allvars", 0.09, 0.18, 0.31],
         ],
     )
     cfg = {
@@ -53,7 +52,7 @@ def test_compare_selected_models_supports_auto_primary_and_dynamic_headers(tmp_p
             "output_dir": str(tmp_path / "compare"),
             "global_reference_mode": "frozen",
             "objective_metric": "auto_primary",
-            "objective_mode": "max",
+            "objective_mode": "min",
             "rows": [
                 {"name": "global", "model_id": "global_mlp", "leaderboard_csv": str(global_csv)},
                 {"name": "ffno", "model_id": "ffno", "leaderboard_csv": str(ffno_csv)},
@@ -73,9 +72,9 @@ def test_compare_selected_models_supports_auto_primary_and_dynamic_headers(tmp_p
     with out_csv.open("r", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
     assert [row["model_id"] for row in rows] == ["ffno", "global_mlp"]
-    assert "test_rmse_ne" in rows[0]
-    assert "test_rmse_Te" in rows[0]
-    assert rows[0]["primary_metric"] == "test_r2_plasma_mean_dual"
+    assert "test_rmse_electron_density" in rows[0]
+    assert "test_rmse_electron_temperature" in rows[0]
+    assert rows[0]["primary_metric"] == "surrogate_quality_score"
     assert rows[1]["reference_type"] == "frozen"
 
 
@@ -84,7 +83,7 @@ def test_compare_selected_models_frozen_requires_global_row(tmp_path: Path) -> N
     _write_csv(
         ffno_csv,
         ["model_id", "input_mode_effective", "primary_metric", "primary_metric_value"],
-        [["ffno", "table_only", "score_total_dual", 0.5]],
+        [["ffno", "table_only", "surrogate_quality_score", 0.5]],
     )
     cfg = {
         "compare": {

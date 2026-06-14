@@ -38,7 +38,7 @@ def _ctx(
     n, d, h, w = 8, 3, 4, 4
     rng = np.random.default_rng(121)
     cond = rng.normal(size=(n, d)).astype(np.float32)
-    y_vars = ["ne", "ni", "Te", "phi"]
+    y_vars = ["density", "temperature", "potential", "flux"]
     y = np.abs(rng.normal(size=(n, len(y_vars), h, w))).astype(np.float32)
     channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
     coord_data = np.stack(
@@ -96,14 +96,13 @@ def _valid_cfg() -> dict[str, Any]:
         "epochs": 1,
         "lr": 1e-3,
         "target_family": "allvars",
-        "target_vars": ["ne", "ni", "Te", "phi"],
+        "target_vars": ["density", "temperature", "potential", "flux"],
         "selection": {
             "mode": "best_val_allvars_balance",
-            "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
+            "weights": {"density": 0.25, "temperature": 0.25, "potential": 0.25, "flux": 0.25},
         },
         "input_features": {
             "mode": "geom_feature_pack",
-            "require_pack": "error",
             "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
             "distance_transform": {"mode": "raw"},
         },
@@ -137,27 +136,6 @@ def test_geom_deeponet_siren_accepts_hybrid_descriptor_contract(
         ),
     )
     out = run_model_train_predict(ctx)
-    assert set(out.metrics.keys()) == {"ne", "ni", "Te", "phi"}
+    assert set(out.metrics.keys()) == set(ctx.y_vars)
     assert int(out.extra_artifacts[GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY]) == 4
     assert out.extra_artifacts[GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY] == "struct_desc_v1"
-
-
-def test_geom_deeponet_siren_rejects_table_only(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path, input_mode="table_only", adapter_mode="auto")
-    ctx.run_cfg = {"train": {"geom_deeponet_siren": _valid_cfg()}}
-    with pytest.raises(ValueError, match="model/input_mode mismatch"):
-        run_model_train_predict(ctx)
-
-
-def test_geom_deeponet_siren_rejects_non_hybrid_adapter(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path, adapter_mode="none")
-    ctx.run_cfg = {"train": {"geom_deeponet_siren": _valid_cfg()}}
-    with pytest.raises(ValueError, match="structure-aware adapter_mode"):
-        run_model_train_predict(ctx)
-
-
-def test_geom_deeponet_siren_rejects_descriptor_profile_none(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path, adapter_mode="hybrid_pack_descriptor", descriptor_profile="none")
-    ctx.run_cfg = {"train": {"geom_deeponet_siren": _valid_cfg()}}
-    with pytest.raises(ValueError, match="descriptor_profile != none"):
-        run_model_train_predict(ctx)

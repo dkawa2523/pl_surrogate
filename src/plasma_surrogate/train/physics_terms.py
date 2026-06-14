@@ -18,16 +18,22 @@ class PhysicsTermSpec:
 
 
 _TERM_ORDER = ("poisson", "boundary", "boundary_operator", "rho")
-_TERM_ALIASES = {
-    "pinn_residual": "poisson",
-    "pino_operator": "boundary_operator",
-}
-_REGISTERED_TERM_NAMES = tuple(sorted(set(_TERM_ORDER) | set(_TERM_ALIASES.keys())))
+_REGISTERED_TERM_NAMES = tuple(_TERM_ORDER)
+_REMOVED_PHYSICS_KEYS = ("lambda_poisson", "lambda_bc", "lambda_rho")
+
+
+def _reject_removed_keys(cfg: dict[str, Any]) -> None:
+    removed = [key for key in _REMOVED_PHYSICS_KEYS if key in cfg]
+    bo_cfg = dict(cfg.get("boundary_operator", {}) or {})
+    if "lambda" in bo_cfg:
+        removed.append("boundary_operator.lambda")
+    if removed and "resolved_terms" not in cfg:
+        raise ValueError(f"removed physics keys: {removed}; use physics.terms[].weight")
 
 
 def _canonical_term_name(name: str) -> str:
     key = str(name).strip().lower()
-    return _TERM_ALIASES.get(key, key)
+    return key
 
 
 def _canonical_terms(terms_cfg: Any) -> dict[str, dict[str, Any]]:
@@ -71,36 +77,25 @@ def _from_resolved_terms(raw: Any) -> dict[str, PhysicsTermSpec]:
     return out
 
 
-def _fallback_specs(normalized_cfg: dict[str, Any]) -> dict[str, PhysicsTermSpec]:
+def _terms_specs(normalized_cfg: dict[str, Any]) -> dict[str, PhysicsTermSpec]:
     cfg = dict(normalized_cfg or {})
     terms_cfg = _canonical_terms(cfg.get("terms", {}))
-    bo_cfg = dict(cfg.get("boundary_operator", {}))
-    legacy = {
-        "poisson": ("lambda_poisson", float(cfg.get("lambda_poisson", 0.0))),
-        "boundary": ("lambda_bc", float(cfg.get("lambda_bc", 0.0))),
-        "boundary_operator": ("boundary_operator.lambda", float(bo_cfg.get("lambda", 0.0))),
-        "rho": ("lambda_rho", float(cfg.get("lambda_rho", 0.0))),
-    }
     out: dict[str, PhysicsTermSpec] = {}
     for name in _TERM_ORDER:
         term_cfg = dict(terms_cfg.get(name, {}))
-        weight_raw = term_cfg.get("weight")
-        if weight_raw is None:
-            source_key, legacy_weight = legacy[name]
-            weight = float(legacy_weight)
-        else:
-            source_key = "terms"
-            weight = float(weight_raw)
+        weight = float(term_cfg.get("weight", 0.0))
         enabled_raw = term_cfg.get("enabled")
         enabled = bool(weight > 0.0) if enabled_raw is None else bool(enabled_raw)
-        out[name] = PhysicsTermSpec(name=name, weight=float(weight), enabled=enabled, source_key=source_key)
+        out[name] = PhysicsTermSpec(name=name, weight=float(weight), enabled=enabled, source_key="terms")
     return out
 
 
 def _resolve_terms(normalized_cfg: dict[str, Any]) -> list[PhysicsTermSpec]:
-    resolved = _from_resolved_terms(dict(normalized_cfg or {}).get("resolved_terms"))
-    fallback = _fallback_specs(normalized_cfg)
-    merged = {**fallback, **resolved}
+    cfg = dict(normalized_cfg or {})
+    _reject_removed_keys(cfg)
+    resolved = _from_resolved_terms(cfg.get("resolved_terms"))
+    terms = _terms_specs(normalized_cfg)
+    merged = {**terms, **resolved}
     return [merged[name] for name in _TERM_ORDER]
 
 

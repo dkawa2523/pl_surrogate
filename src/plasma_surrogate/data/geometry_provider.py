@@ -67,7 +67,7 @@ def _normalize_geom_ref(geom_ref: dict[str, object] | None) -> dict[str, Any]:
 
 
 class FixedGeometryProvider:
-    """v1 fixed geometry provider with SDF-less fallback distance generation."""
+    """v1 fixed geometry provider."""
 
     provider_mode: str = PROVIDER_MODE_FIXED
     supports_geom_param: bool = False
@@ -76,9 +76,9 @@ class FixedGeometryProvider:
         self.dataset_root = Path(dataset_root)
         self.geometry_root = self.dataset_root / "geometry"
         self.coord_grid_source = str(coord_grid_source).strip().lower()
-        if self.coord_grid_source not in {"coord_grid", "rz_linear", "normalized_fallback"}:
+        if self.coord_grid_source not in {"coord_grid", "rz_linear", "normalized"}:
             raise ValueError(
-                "coord_grid_source must be one of: coord_grid, rz_linear, normalized_fallback"
+                "coord_grid_source must be one of: coord_grid, rz_linear, normalized"
             )
         self._ctx: GeometryContext | None = None
 
@@ -140,7 +140,7 @@ class FixedGeometryProvider:
                     f"geometry/dist0.npy shape mismatch: expected {tuple(mask.shape)}, got {tuple(dist0.shape)}"
                 )
 
-        coord_source = "normalized_fallback"
+        coord_source = "normalized"
         coord = None
         if self.coord_grid_source == "coord_grid":
             coord = self._load_array("coord_grid.npy")
@@ -158,7 +158,7 @@ class FixedGeometryProvider:
                     coord_source = "rz_linear"
         if coord is None:
             coord = build_coord_grid(mask.shape)
-            coord_source = "normalized_fallback"
+            coord_source = "normalized"
 
         regions = {}
         wafer = self._load_array("wafer_mask.npy")
@@ -303,8 +303,10 @@ class ParametricPartsGeometryProvider:
             raise ValueError(f"coord_grid must be [2,H,W] for layout params, got {coord.shape}")
         w = float(width)
         h = float(height)
-        if w <= 0.0 or h <= 0.0:
-            raise ValueError("layout width/height must be > 0")
+        if w < 0.0 or h < 0.0:
+            raise ValueError("layout width/height must be >= 0")
+        if w == 0.0 or h == 0.0:
+            return np.zeros(coord.shape[1:], dtype=np.float32)
         rr = coord[0]
         zz = coord[1]
         return ((np.abs(rr - float(r_center)) <= 0.5 * w) & (np.abs(zz - float(z_center)) <= 0.5 * h)).astype(np.float32)
@@ -471,6 +473,7 @@ class ParametricPartsGeometryProvider:
         global_tx = float(params.get("offset.x", params.get("offset.tx", 0.0)))
         global_ty = float(params.get("offset.y", params.get("offset.ty", 0.0)))
         per_part_masks: list[np.ndarray] = []
+        manifest = dict(self._manifest or {})
         for idx, part_id in enumerate(self._part_ids):
             layout_prefix = f"layout.{part_id}."
             has_layout = any((layout_prefix + key) in params for key in ("r_center", "z_center", "width", "height"))
@@ -510,7 +513,6 @@ class ParametricPartsGeometryProvider:
         if gap_delta != 0.0:
             union_solid = self._morph_binary(union_solid, delta=gap_delta, scale_ref=max(h, w))
         mask_base = (np.asarray(base_ctx.mask_plasma, dtype=np.float32) > 0.5).astype(np.float32)
-        manifest = dict(self._manifest or {})
         plasma_mode = str(manifest.get("plasma_mode", "subtract_solid")).strip().lower()
         if plasma_mode == "preserve":
             mask_plasma = mask_base.astype(np.float32)
@@ -533,8 +535,14 @@ class ParametricPartsGeometryProvider:
         regions = dict(base_ctx.regions or {})
         regions["solid_union_mask"] = union_solid.astype(np.float32)
         regions["part_mask_stack"] = np.stack(per_part_masks, axis=0).astype(np.float32) if per_part_masks else np.zeros((0, h, w), dtype=np.float32)
+        effective_params = dict(params)
         regions["geom_param_values"] = np.array([params[k] for k in sorted(params.keys())], dtype=np.float32)
         regions["geom_param_keys"] = np.array(sorted(params.keys()), dtype=object)
+        regions["geom_param_effective_values"] = np.array(
+            [effective_params[k] for k in sorted(effective_params.keys())],
+            dtype=np.float32,
+        )
+        regions["geom_param_effective_keys"] = np.array(sorted(effective_params.keys()), dtype=object)
         return GeometryContext(
             mask_plasma=mask_plasma.astype(np.float32),
             distance_any=np.asarray(distance_any, dtype=np.float32),

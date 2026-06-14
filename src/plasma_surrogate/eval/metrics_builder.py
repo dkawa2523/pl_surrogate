@@ -8,7 +8,6 @@ from typing import Any
 
 import numpy as np
 
-from plasma_surrogate.core.density_contract import resolve_density_key
 from plasma_surrogate.core.spatial_regions import (
     build_boundary_type_masks,
     build_region_masks,
@@ -101,6 +100,101 @@ def _finite_mean(values: list[float], *, default: float = float("nan")) -> float
     return float(np.mean(arr))
 
 
+_QUALITY_SCORE_DEFAULT_WEIGHTS: dict[str, float] = {
+    "nrmse": 0.45,
+    "boundary": 0.20,
+    "continuity": 0.15,
+    "physics": 0.15,
+    "sign": 0.05,
+}
+
+
+def _quality_score_weights(cfg: dict[str, Any] | None) -> dict[str, float]:
+    raw_weights = dict(dict(cfg or {}).get("weights", {}) or {})
+    weights = dict(_QUALITY_SCORE_DEFAULT_WEIGHTS)
+    for key in weights:
+        if key in raw_weights:
+            weights[key] = float(raw_weights[key])
+    return weights
+
+
+def _zero_if_nonfinite(value: float | None) -> float:
+    if value is None:
+        return 0.0
+    value_f = float(value)
+    if not np.isfinite(value_f):
+        return 0.0
+    return value_f
+
+
+def _abs_log_ratio(value: float | None) -> float:
+    value_f = _zero_if_nonfinite(value)
+    if value_f <= 0.0:
+        return 0.0
+    return float(abs(np.log(max(value_f, 1.0e-12))))
+
+
+def _positive_targets_from_schema(target_role_schema: dict[str, Any] | None) -> set[str]:
+    schema = dict(target_role_schema or {})
+    positive = schema.get("positive_targets", [])
+    if isinstance(positive, list):
+        return {str(v) for v in positive}
+    targets = schema.get("targets", [])
+    if not isinstance(targets, list):
+        return set()
+    out: set[str] = set()
+    for entry in targets:
+        if not isinstance(entry, dict):
+            continue
+        target_id = str(entry.get("id", "")).strip()
+        if target_id and entry.get("positive") is True:
+            out.add(target_id)
+    return out
+
+
+def _build_surrogate_quality_components(
+    *,
+    mean_nrmse_plasma_by_target: float,
+    boundary_to_deep_rmse_ratio_mean: float,
+    continuity_grad_ratio: float,
+    continuity_lap_ratio: float,
+    poisson_residual_penalty: float,
+    boundary_residual_penalty: float,
+    positive_target_negative_ratio_penalty: float,
+    quality_score_cfg: dict[str, Any] | None,
+) -> dict[str, float]:
+    weights = _quality_score_weights(quality_score_cfg)
+    nrmse_component = _zero_if_nonfinite(mean_nrmse_plasma_by_target)
+    boundary_ratio = _zero_if_nonfinite(boundary_to_deep_rmse_ratio_mean)
+    boundary_component = float(max(0.0, boundary_ratio - 1.0)) if boundary_ratio > 0.0 else 0.0
+    continuity_component = float(
+        0.5 * (_abs_log_ratio(continuity_grad_ratio) + _abs_log_ratio(continuity_lap_ratio))
+    )
+    physics_component = float(
+        0.5
+        * (
+            np.log1p(abs(_zero_if_nonfinite(poisson_residual_penalty)))
+            + np.log1p(abs(_zero_if_nonfinite(boundary_residual_penalty)))
+        )
+    )
+    sign_component = _zero_if_nonfinite(positive_target_negative_ratio_penalty)
+    total = float(
+        weights["nrmse"] * nrmse_component
+        + weights["boundary"] * boundary_component
+        + weights["continuity"] * continuity_component
+        + weights["physics"] * physics_component
+        + weights["sign"] * sign_component
+    )
+    return {
+        "surrogate_quality_score": total,
+        "score_nrmse_component": nrmse_component,
+        "score_boundary_component": boundary_component,
+        "score_continuity_component": continuity_component,
+        "score_physics_component": physics_component,
+        "score_sign_component": sign_component,
+    }
+
+
 def _target_std_for_score(values: np.ndarray, mask: np.ndarray | None) -> float:
     arr = np.asarray(values, dtype=np.float64)
     active = np.isfinite(arr)
@@ -158,11 +252,10 @@ def build_region_metrics(
     mask_plasma: np.ndarray,
     mask_bulk: np.ndarray,
     mask_boundary: np.ndarray,
-    log_ne: np.ndarray | None = None,
     density: np.ndarray | None = None,
-    density_key: str = "ne",
+    density_key: str = "density",
 ) -> dict[str, float | str]:
-    density_arr = np.asarray(density if density is not None else log_ne, dtype=np.float32)
+    density_arr = np.asarray(density, dtype=np.float32)
     return {
         "case_key": case_key,
         "density_key": str(density_key),
@@ -179,25 +272,20 @@ def build_benchmark_eval_row(
     pred_eval: dict[str, np.ndarray],
     single_qoi: dict[str, Any],
     single_diagnostics: dict[str, Any],
-    opt_best_uniformity: float,
     true_eval: dict[str, np.ndarray] | None = None,
     mask_plasma: np.ndarray | None = None,
     distance_any: np.ndarray | None = None,
     distance_signed: np.ndarray | None = None,
     bc_dir_mask: np.ndarray | None = None,
     wafer_mask: np.ndarray | None = None,
-    aggregate_cfg: dict[str, Any] | None = None,
     target_vars_for_score: list[str] | None = None,
     region_band_cfg: dict[str, Any] | None = None,
+    quality_score_cfg: dict[str, Any] | None = None,
+    target_role_schema: dict[str, Any] | None = None,
 ) -> dict[str, float | str]:
     r2_scores = dict(r2_scores or {})
-    metric_keys = list({*metrics.keys(), *r2_scores.keys()})
     paired_eval_keys = list(set(pred_eval.keys()) & set((true_eval or {}).keys()))
     target_vars_effective = [str(v) for v in list(target_vars_for_score or [])]
-    density_ne_metric_key = resolve_density_key(metric_keys, canonical="ne", prefer_linear=True)
-    density_ni_metric_key = resolve_density_key(metric_keys, canonical="ni", prefer_linear=True)
-    density_ne_eval_key = resolve_density_key(paired_eval_keys, canonical="ne", prefer_linear=True)
-    density_ni_eval_key = resolve_density_key(paired_eval_keys, canonical="ni", prefer_linear=True)
     core_eval_keys = list(paired_eval_keys)
 
     def _metric_val(src: dict[str, float], name: str | None, *, default: float = float("nan")) -> float:
@@ -281,47 +369,19 @@ def build_benchmark_eval_row(
                 if name in true_eval and name in pred_eval:
                     chamber_near_rmse[name] = float(rmse_masked(true_eval[name], pred_eval[name], chamber_near_mask))
 
-    agg = dict(aggregate_cfg or {})
-    use_score = bool(agg.get("enabled", False))
-    use_plasma = bool(agg.get("use_plasma_metrics", True))
-    rmse_weight = float(agg.get("rmse_weight", 0.5))
-    r2_weight = float(agg.get("r2_weight", 0.4))
-    boundary_penalty_weight = float(agg.get("boundary_penalty_weight", 0.1))
-    score_rmse = 0.0
-    score_nrmse = float("nan")
-    score_r2 = 0.0
-    score_boundary_penalty = 0.0
-    score_total = 0.0
-    if use_score:
-        metric_src = metrics_plasma if (use_plasma and metrics_plasma) else metrics
-        r2_src = r2_plasma if (use_plasma and r2_plasma) else r2_scores
-        score_keys = [k for k in target_vars_effective if k in core_eval_keys] or core_eval_keys
-        vars_present = [k for k in score_keys if k in metric_src and k in r2_src]
-        if vars_present:
-            score_rmse_values = [float(metric_src[k]) for k in vars_present]
-            score_r2_values = [float(r2_src[k]) for k in vars_present]
-            score_nrmse_values: list[float] = []
-            for key in vars_present:
-                if true_eval is None or key not in true_eval:
-                    continue
-                rmse_val = float(metric_src[key])
-                scale = _target_std_for_score(
-                    true_eval[key],
-                    mask_plasma if (use_plasma and mask_plasma is not None) else None,
-                )
-                if np.isfinite(rmse_val) and np.isfinite(scale):
-                    score_nrmse_values.append(float(rmse_val / scale))
-            score_rmse = _finite_mean(score_rmse_values, default=0.0)
-            score_nrmse = _finite_mean(score_nrmse_values)
-            score_r2 = _finite_mean(score_r2_values, default=0.0)
-        score_boundary_penalty = float(
-            np.log1p(abs(float(single_diagnostics.get("boundary_operator_proxy_loss", 0.0))))
-            + np.log1p(abs(float(single_qoi.get("boundary_gamma_uniformity", 0.0))))
+    quality_nrmse_values: list[float] = []
+    metric_src_for_quality = metrics_plasma if metrics_plasma else metrics
+    score_keys_for_quality = [k for k in target_vars_effective if k in core_eval_keys] or core_eval_keys
+    for key in score_keys_for_quality:
+        if true_eval is None or key not in true_eval or key not in metric_src_for_quality:
+            continue
+        rmse_val = float(metric_src_for_quality[key])
+        scale = _target_std_for_score(
+            true_eval[key],
+            mask_plasma if (metrics_plasma and mask_plasma is not None) else None,
         )
-        score_rmse_for_total = score_nrmse if np.isfinite(score_nrmse) else score_rmse
-        score_total = (rmse_weight * score_rmse_for_total) - (r2_weight * score_r2) + (
-            boundary_penalty_weight * score_boundary_penalty
-        )
+        if np.isfinite(rmse_val) and np.isfinite(scale):
+            quality_nrmse_values.append(float(rmse_val / scale))
 
     if mask_plasma is not None:
         plasma_mask_bool = np.asarray(mask_plasma, dtype=np.float32) > 0.5
@@ -371,26 +431,52 @@ def build_benchmark_eval_row(
     for name in core_eval_keys:
         boundary_deep_rmse_ratio[name] = _safe_ratio(boundary_rmse.get(name), deep_rmse.get(name))
         boundary_deep_r2_gap[name] = _safe_diff(boundary_r2.get(name), deep_r2.get(name))
+    boundary_to_deep_rmse_ratio_mean = _finite_mean(list(boundary_deep_rmse_ratio.values()))
+    mean_nrmse_plasma_by_target = _finite_mean(quality_nrmse_values)
+    abs_log_continuity_grad_ratio = _abs_log_ratio(continuity_grad_ratio_all)
+    abs_log_continuity_lap_ratio = _abs_log_ratio(continuity_lap_ratio_all)
+    poisson_residual_penalty = _zero_if_nonfinite(
+        single_diagnostics.get(
+            "poisson_residual_map_l2",
+            single_diagnostics.get("poisson_residual_norm", 0.0),
+        )
+    )
+    boundary_residual_penalty = _zero_if_nonfinite(
+        single_diagnostics.get(
+            "boundary_operator_residual_map_l2",
+            single_diagnostics.get("boundary_operator_proxy_loss", 0.0),
+        )
+    )
+    positive_targets = _positive_targets_from_schema(target_role_schema)
+    positive_target_negative_ratio_penalty = _finite_mean(
+        [float(neg_ratio_plasma[name]) for name in sorted(positive_targets) if name in neg_ratio_plasma],
+        default=0.0,
+    )
+    quality_components = _build_surrogate_quality_components(
+        mean_nrmse_plasma_by_target=mean_nrmse_plasma_by_target,
+        boundary_to_deep_rmse_ratio_mean=boundary_to_deep_rmse_ratio_mean,
+        continuity_grad_ratio=continuity_grad_ratio_all,
+        continuity_lap_ratio=continuity_lap_ratio_all,
+        poisson_residual_penalty=poisson_residual_penalty,
+        boundary_residual_penalty=boundary_residual_penalty,
+        positive_target_negative_ratio_penalty=positive_target_negative_ratio_penalty,
+        quality_score_cfg=quality_score_cfg,
+    )
 
     row: dict[str, float | str] = {
         "model_id": model_id,
         "continuity_grad_ratio_all_plasma": float(continuity_grad_ratio_all),
         "continuity_lap_ratio_all_plasma": float(continuity_lap_ratio_all),
-        "sdf_boundary_to_deep_rmse_ratio_mean": _finite_mean(list(boundary_deep_rmse_ratio.values())),
+        "sdf_boundary_to_deep_rmse_ratio_mean": boundary_to_deep_rmse_ratio_mean,
+        "mean_nrmse_plasma_by_target": mean_nrmse_plasma_by_target,
+        "boundary_to_deep_rmse_ratio_mean": boundary_to_deep_rmse_ratio_mean,
+        "abs_log_continuity_grad_ratio": abs_log_continuity_grad_ratio,
+        "abs_log_continuity_lap_ratio": abs_log_continuity_lap_ratio,
+        "poisson_residual_penalty": poisson_residual_penalty,
+        "boundary_residual_penalty": boundary_residual_penalty,
+        "positive_target_negative_ratio_penalty": positive_target_negative_ratio_penalty,
         "sdf_boundary_minus_deep_r2_mean": _finite_mean(list(boundary_deep_r2_gap.values())),
-        "test_poisson_phi": float(poisson_residual_loss(pred_eval["phi"][:, 0])) if "phi" in pred_eval else 0.0,
-        "qoi_uniformity": float(single_qoi["uniformity"]),
-        "qoi_boundary_gamma_uniformity": float(single_qoi.get("boundary_gamma_uniformity", 0.0)),
-        "single_poisson_residual": float(single_diagnostics["poisson_residual_norm"]),
-        "single_poisson_residual_map_l2": float(single_diagnostics.get("poisson_residual_map_l2", 0.0)),
-        "single_boundary_operator_proxy_loss": float(single_diagnostics.get("boundary_operator_proxy_loss", 0.0)),
-        "single_boundary_residual_map_l2": float(single_diagnostics.get("boundary_operator_residual_map_l2", 0.0)),
-        "opt_best_uniformity": float(opt_best_uniformity),
-        "score_rmse_plasma_mean": float(score_rmse),
-        "score_nrmse_plasma_mean": float(score_nrmse),
-        "score_r2_plasma_mean": float(score_r2),
-        "score_boundary_penalty": float(score_boundary_penalty),
-        "score_total": float(score_total),
+        **quality_components,
     }
     for name in core_eval_keys:
         row[f"test_rmse_{name}"] = _metric_val(metrics, name)
@@ -419,16 +505,6 @@ def build_benchmark_eval_row(
                 boundary_r2_by_type.get(boundary_type, {}),
                 name,
             )
-    if density_ne_metric_key is not None:
-        row["test_rmse_ne"] = _metric_val(metrics, density_ne_metric_key)
-        row["test_r2_ne"] = _metric_val(r2_scores, density_ne_metric_key)
-        row["test_rmse_ne_plasma"] = _metric_val(metrics_plasma, density_ne_eval_key)
-        row["test_r2_ne_plasma"] = _metric_val(r2_plasma, density_ne_eval_key)
-    if density_ni_metric_key is not None:
-        row["test_rmse_ni"] = _metric_val(metrics, density_ni_metric_key)
-        row["test_r2_ni"] = _metric_val(r2_scores, density_ni_metric_key)
-        row["test_rmse_ni_plasma"] = _metric_val(metrics_plasma, density_ni_eval_key)
-        row["test_r2_ni_plasma"] = _metric_val(r2_plasma, density_ni_eval_key)
     return row
 
 
@@ -950,8 +1026,9 @@ def build_eval_metrics_payload(
         for k in keys:
             rmse_plasma[k] = float(rmse_masked(true_eval[k], pred_eval[k], mask_plasma))
             r2_plasma[k] = float(r2_masked(true_eval[k], pred_eval[k], mask_plasma))
-    rmse["phi_poisson_residual"] = float(poisson_residual_loss(pred_eval["phi"][:, 0]))
-    rmse["phi_poisson_residual_norm"] = float(poisson_residual_norm(pred_eval["phi"][:, 0], eps=eps))
+    if "phi" in pred_eval:
+        rmse["phi_poisson_residual"] = float(poisson_residual_loss(pred_eval["phi"][:, 0]))
+        rmse["phi_poisson_residual_norm"] = float(poisson_residual_norm(pred_eval["phi"][:, 0], eps=eps))
     return {"rmse": rmse, "r2": r2, "rmse_plasma": rmse_plasma, "r2_plasma": r2_plasma}
 
 

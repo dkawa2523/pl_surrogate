@@ -25,9 +25,7 @@ class GlobalMLP:
         self.grid_shape = tuple(grid_shape)
         self.out_channels = int(out_channels)
         if output_keys is None:
-            base = ["log_ne", "Te", "phi"]
-            extra = [f"out_{i}" for i in range(max(0, self.out_channels - len(base)))]
-            self.output_keys = (base + extra)[: self.out_channels]
+            self.output_keys = [f"target_{i}" for i in range(self.out_channels)]
         else:
             self.output_keys = list(output_keys)[: self.out_channels]
         self.output_dim = self.out_channels * self.grid_shape[0] * self.grid_shape[1]

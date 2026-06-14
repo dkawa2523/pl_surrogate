@@ -38,6 +38,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src", "."]
+testpaths = ["tests"]
 addopts = "-m 'not config_catalog and not benchmark_slow and not torch_runtime'"
 markers = [
     "config_catalog: checks generated or curated experiment config inventory; excluded from default test runs",

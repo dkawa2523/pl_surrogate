@@ -20,7 +20,6 @@ from plasma_surrogate.core.input_modes import (
     GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
     GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
     HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY,
-    INPUT_MODE_FALLBACK_APPLIED_KEY,
     INPUT_MODE_EFFECTIVE_KEY,
     INPUT_MODES,
     STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
@@ -28,9 +27,8 @@ from plasma_surrogate.core.input_modes import (
     STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
     TABLE_ONLY,
     TABLE_PLUS_STRUCTURE,
-    normalize_strict_input_mode,
-    resolve_input_mode_metadata_contract,
-    input_mode_metadata_keys,
+    runtime_metadata_keys,
+    validate_runtime_metadata_contract,
 )
 from plasma_surrogate.core.model_input_policy import (
     ADAPTER_DESCRIPTOR_BRANCH,
@@ -40,6 +38,7 @@ from plasma_surrogate.core.model_input_policy import (
 )
 from plasma_surrogate.core.model_families import POD_DEEPONET_FAMILY_MODELS
 from plasma_surrogate.core.vector_pack import load_vector_from_pack
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.data.geometry_context import GeometryContext
 from plasma_surrogate.data.geometry_provider import GeometryProviderLike
 from plasma_surrogate.eval.metrics import bc_mae, boundary_band_mask, boundary_gamma_proxy, poisson_residual_norm, uniformity
@@ -61,7 +60,39 @@ from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
 from plasma_surrogate.preprocessing.scalers import ScalerFactory, TransformBundle
 from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 from plasma_surrogate.train.losses import boundary_operator_loss, boundary_operator_target, poisson_residual
-from plasma_surrogate.train.spatial_features import distance_to_mask, part_sdf_maps_from_stack
+from plasma_surrogate.train.spatial_features import (
+    apply_distance_transform,
+    derive_geom_feature_maps,
+    distance_to_mask,
+    part_sdf_maps_from_stack,
+    resolve_distance_transform_cfg,
+    resolve_distance_transform_effective,
+)
+
+
+def _dict_or_empty(raw: Any) -> dict[str, Any]:
+    return dict(raw or {})
+
+
+def _config_string_list(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        text = raw.strip()
+        return [text] if text else []
+    try:
+        values = list(raw)
+    except TypeError:
+        values = [raw]
+    out: list[str] = []
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            out.append(text)
+    return out
+
 
 @dataclass
 class InferenceResult:
@@ -70,7 +101,6 @@ class InferenceResult:
     derived: dict[str, np.ndarray]
     qoi: dict[str, float]
     diagnostics: dict[str, Any]
-    warnings: list[str]
     case_key: str = ""
 
 
@@ -94,7 +124,7 @@ class InferenceEngine:
     @classmethod
     def _normalize_effective_meta_dict(cls, raw: dict[str, Any] | None) -> dict[str, Any]:
         out: dict[str, Any] = {}
-        for key in input_mode_metadata_keys():
+        for key in runtime_metadata_keys():
             if raw is None or key not in raw:
                 continue
             out[key] = cls._normalize_effective_meta_value(key=key, value=raw[key])
@@ -124,10 +154,33 @@ class InferenceEngine:
         wafer_mask: np.ndarray | None,
         region: str,
         mid_height_band_px: int = 0,
+        row_index: int | None = None,
+        col_start: int | None = None,
+        col_end: int | None = None,
     ) -> tuple[np.ndarray, dict[str, float | str]]:
         target = np.asarray(qoi_target, dtype=np.float32)
         plasma = np.asarray(mask_plasma, dtype=np.float32) > 0.5
         region_norm = str(region or "auto").strip().lower()
+        if region_norm in {"fixed_row", "row_range", "z_row", "z_line"}:
+            h, w = target.shape
+            if row_index is None:
+                raise ValueError("qoi.uniformity.row_index is required for fixed_row uniformity")
+            row = int(row_index)
+            if row < 0 or row >= h:
+                raise ValueError(f"qoi.uniformity.row_index must be within [0, {h - 1}]")
+            c0 = 0 if col_start is None else int(col_start)
+            c1 = (w - 1) if col_end is None else int(col_end)
+            if c0 < 0 or c1 < c0 or c0 >= w:
+                raise ValueError(f"qoi.uniformity column range must overlap [0, {w - 1}]")
+            c1 = min(c1, w - 1)
+            vals = target[row, c0 : c1 + 1]
+            return vals, {
+                "uniformity_region": "fixed_row",
+                "uniformity_row_index": float(row),
+                "uniformity_col_start": float(c0),
+                "uniformity_col_end": float(c1),
+                "uniformity_sample_count": float(vals.size),
+            }
         if region_norm in {
             "plasma_mid_height",
             "mid_height",
@@ -168,9 +221,32 @@ class InferenceEngine:
         if wafer_mask is not None and region_norm in {"auto", "wafer"}:
             wafer = np.asarray(wafer_mask, dtype=np.float32) > 0.5
             vals = target[wafer]
-            return vals, {"uniformity_region": "wafer", "uniformity_sample_count": float(vals.size)}
+            if vals.size > 0 or region_norm == "wafer":
+                return vals, {"uniformity_region": "wafer", "uniformity_sample_count": float(vals.size)}
         vals = target[plasma]
         return vals, {"uniformity_region": "plasma", "uniformity_sample_count": float(vals.size)}
+
+    @staticmethod
+    def _postprocess_positive_fields(
+        fields: dict[str, np.ndarray],
+        *,
+        positive_vars: list[str] | None,
+        floor: float,
+    ) -> dict[str, np.ndarray]:
+        names = {str(v) for v in (positive_vars or [])}
+        if not names:
+            return fields
+        out: dict[str, np.ndarray] = {}
+        floor_value = float(floor)
+        if not np.isfinite(floor_value):
+            raise ValueError("postprocess.positive_floor must be finite")
+        for key, value in fields.items():
+            arr = np.asarray(value, dtype=np.float32)
+            if key in names:
+                arr = np.where(np.isfinite(arr), arr, floor_value).astype(np.float32)
+                arr = np.maximum(arr, floor_value).astype(np.float32)
+            out[key] = arr
+        return out
 
     @staticmethod
     def _resolve_symbol_key(
@@ -193,55 +269,65 @@ class InferenceEngine:
                 return name
         return None
 
-    def _resolve_boundary_operator_inputs(self, fields_phys: dict[str, np.ndarray]) -> dict[str, np.ndarray] | None:
-        bo_cfg = dict(self.ood_cfg.get("boundary_operator", {}))
-        physics_cfg = dict(self.ood_cfg.get("physics", {}))
+    def _combined_physics_symbols(self) -> dict[str, Any]:
+        bo_cfg = _dict_or_empty(self.ood_cfg.get("boundary_operator"))
+        physics_cfg = _dict_or_empty(self.ood_cfg.get("physics"))
         symbols: dict[str, Any] = {}
         for raw in [physics_cfg.get("symbols"), bo_cfg.get("symbols")]:
             if isinstance(raw, dict):
                 symbols.update({str(k): v for k, v in raw.items()})
-        density_key = self._resolve_symbol_key(
-            fields_phys,
-            configured=symbols.get("density"),
-            aliases=("ne", "log_ne"),
+        return symbols
+
+    def _resolve_physics_keys(
+        self,
+        fields_phys: dict[str, np.ndarray],
+        *,
+        required: tuple[str, ...],
+        context: str,
+    ) -> dict[str, str]:
+        return resolve_physics_symbol_keys(
+            [str(k) for k in fields_phys.keys()],
+            symbols=self._combined_physics_symbols(),
+            target_role_schema=self.target_role_schema,
+            required=required,
+            context=context,
         )
-        temperature_key = self._resolve_symbol_key(
-            fields_phys,
-            configured=symbols.get("temperature"),
-            aliases=("Te",),
-        )
-        potential_key = self._resolve_symbol_key(
-            fields_phys,
-            configured=symbols.get("potential"),
-            aliases=("phi",),
-        )
-        missing: list[str] = []
-        if density_key is None:
-            missing.append("density")
-        if temperature_key is None:
-            missing.append("temperature")
-        if potential_key is None:
-            missing.append("potential")
+
+    def _resolve_boundary_operator_inputs(self, fields_phys: dict[str, np.ndarray]) -> dict[str, np.ndarray] | None:
+        bo_cfg = _dict_or_empty(self.ood_cfg.get("boundary_operator"))
+        physics_cfg = _dict_or_empty(self.ood_cfg.get("physics"))
         physics_enabled = bool(physics_cfg.get("enabled", False))
         boundary_enabled = bool(bo_cfg.get("enabled", False))
-        if missing and (physics_enabled or boundary_enabled):
-            raise ValueError(
-                "inference physics symbols unresolved. "
-                f"missing={missing}; available={sorted(fields_phys.keys())}. "
-                "Set inference.ood.physics.symbols or inference.ood.boundary_operator.symbols."
-            )
-        if missing:
+        if not (physics_enabled or boundary_enabled):
             return None
+        resolved = self._resolve_physics_keys(
+            fields_phys,
+            required=("density", "temperature", "potential"),
+            context="inference physics",
+        )
+        density_key = resolved["density"]
+        temperature_key = resolved["temperature"]
+        potential_key = resolved["potential"]
         density_arr = np.asarray(fields_phys[density_key], dtype=np.float32)
-        if density_key.startswith("log_"):
-            log_density = density_arr
-        else:
-            log_density = np.log10(np.maximum(density_arr, np.float32(1.0e-30))).astype(np.float32)
+        log_density = np.log10(np.maximum(density_arr, np.float32(1.0e-30))).astype(np.float32)
         return {
             "log_density": log_density,
             "temperature": np.asarray(fields_phys[temperature_key], dtype=np.float32),
             "potential": np.asarray(fields_phys[potential_key], dtype=np.float32),
         }
+
+    def _resolve_potential_field(self, fields_phys: dict[str, np.ndarray]) -> np.ndarray:
+        try:
+            resolved = self._resolve_physics_keys(
+                fields_phys,
+                required=("potential",),
+                context="inference diagnostics",
+            )
+            return np.asarray(fields_phys[resolved["potential"]], dtype=np.float32)
+        except ValueError:
+            if "phi" in fields_phys:
+                return np.asarray(fields_phys["phi"], dtype=np.float32)
+            raise
 
     def __init__(
         self,
@@ -267,11 +353,10 @@ class InferenceEngine:
         grid_input_features_cfg: dict[str, Any] | None = None,
         unet_input_features_cfg: dict[str, Any] | None = None,
         input_mode: str = TABLE_PLUS_STRUCTURE,
-        strict_input_mode: str = "error",
-        allow_mode_fallback: bool = False,
         input_mode_meta: dict[str, Any] | None = None,
         checkpoint_input_mode_meta: dict[str, Any] | None = None,
         checkpoint_meta: dict[str, Any] | None = None,
+        target_role_schema: dict[str, Any] | None = None,
         structure_descriptor_pack: dict[str, Any] | None = None,
         latent_feature_pack: dict[str, Any] | None = None,
     ):
@@ -296,10 +381,6 @@ class InferenceEngine:
         self.coord_input_features_cfg = dict(coord_input_features_cfg or {})
         self.grid_input_features_cfg = dict(grid_input_features_cfg or unet_input_features_cfg or {})
         self.unet_input_features_cfg = dict(self.grid_input_features_cfg)
-        self.strict_input_mode = normalize_strict_input_mode(strict_input_mode, default="error")
-        self.allow_mode_fallback = bool(allow_mode_fallback)
-        self.input_mode_contract_warnings: list[str] = []
-        self.input_mode_fallback_applied = False
         self.input_mode = str(input_mode or TABLE_PLUS_STRUCTURE).strip().lower()
         if self.input_mode not in set(INPUT_MODES):
             raise ValueError(f"inference input_mode must be one of {list(INPUT_MODES)}; got={self.input_mode!r}")
@@ -307,6 +388,7 @@ class InferenceEngine:
         self._checkpoint_input_mode_meta_provided = checkpoint_input_mode_meta is not None
         self.checkpoint_input_mode_meta = self._normalize_effective_meta_dict(checkpoint_input_mode_meta)
         self.checkpoint_meta = dict(checkpoint_meta or {})
+        self.target_role_schema = dict(target_role_schema or {})
         self.structure_descriptor_pack = dict(structure_descriptor_pack or {})
         self.latent_feature_pack = dict(latent_feature_pack or {})
         self._pod_descriptor_cache: dict[str, np.ndarray] = {}
@@ -319,25 +401,14 @@ class InferenceEngine:
         self._validate_input_mode_metadata_contract()
         resolved_mode = str(self.input_mode_meta.get(INPUT_MODE_EFFECTIVE_KEY, self.input_mode)).strip().lower()
         if resolved_mode and resolved_mode in set(INPUT_MODES) and resolved_mode != self.input_mode:
-            if self.allow_mode_fallback:
-                msg = (
-                    "inference input_mode arg differs from resolved metadata; "
-                    f"arg={self.input_mode!r}, resolved={resolved_mode!r}; fallback adopts resolved metadata mode"
-                )
-                self.input_mode_contract_warnings.append(msg)
-                self.input_mode_fallback_applied = True
-                self.input_mode = resolved_mode
-            else:
-                raise ValueError(
-                    "inference request input_mode metadata mismatch: "
-                    f"{INPUT_MODE_EFFECTIVE_KEY}={self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY]!r} "
-                    f"but input_mode arg={self.input_mode!r}"
-                )
+            raise ValueError(
+                f"inference input_mode: key={INPUT_MODE_EFFECTIVE_KEY!r}, "
+                f"expected={self.input_mode!r}, got={resolved_mode!r}"
+            )
         if str(self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY]).strip().lower() != self.input_mode:
             raise ValueError(
-                "inference request input_mode metadata mismatch: "
-                f"{INPUT_MODE_EFFECTIVE_KEY}={self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY]!r} "
-                f"but input_mode arg={self.input_mode!r}"
+                f"inference input_mode: key={INPUT_MODE_EFFECTIVE_KEY!r}, "
+                f"expected={self.input_mode!r}, got={self.input_mode_meta[INPUT_MODE_EFFECTIVE_KEY]!r}"
             )
         self.provider_mode_effective = str(
             self.input_mode_meta.get(
@@ -348,8 +419,9 @@ class InferenceEngine:
         provider_mode_runtime = str(getattr(self.geometry_provider, "provider_mode", "fixed")).strip().lower() or "fixed"
         if provider_mode_runtime != self.provider_mode_effective:
             raise ValueError(
-                "inference provider mode mismatch between runtime metadata and provider instance: "
-                f"meta={self.provider_mode_effective!r}, provider={provider_mode_runtime!r}"
+                "inference provider mode: "
+                f"key={GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY!r}, "
+                f"expected={self.provider_mode_effective!r}, got={provider_mode_runtime!r}"
             )
         self.structure_adapter_mode_effective = str(
             self.input_mode_meta.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "auto")
@@ -369,18 +441,12 @@ class InferenceEngine:
     def _validate_input_mode_metadata_contract(self) -> None:
         if not self._checkpoint_input_mode_meta_provided:
             return
-        resolved_meta, contract_warnings, fallback_applied = resolve_input_mode_metadata_contract(
+        resolved_meta = validate_runtime_metadata_contract(
             request_meta=self.input_mode_meta,
             checkpoint_meta=self.checkpoint_input_mode_meta,
-            strict_input_mode=self.strict_input_mode,
-            allow_mode_fallback=self.allow_mode_fallback,
-            keys=input_mode_metadata_keys(),
-            context="inference input-mode metadata",
+            context="inference runtime_metadata",
         )
         self.input_mode_meta = self._normalize_effective_meta_dict(resolved_meta)
-        self.input_mode_contract_warnings.extend(contract_warnings)
-        if fallback_applied:
-            self.input_mode_fallback_applied = True
 
     @staticmethod
     def _resolve_model_type_name(model: Any) -> str:
@@ -625,62 +691,6 @@ class InferenceEngine:
         desc_vec = self._resolve_geom_deeponet_siren_descriptor_vector(geom_ref=geom_ref, geom_ctx=geom_ctx)
         return np.concatenate([np.asarray(cond_vec, dtype=np.float32), desc_vec], axis=0).astype(np.float32)
 
-    @staticmethod
-    def _resolve_distance_transform_cfg(raw: dict[str, Any] | None) -> dict[str, Any]:
-        cfg = dict(raw or {})
-        mode = str(cfg.get("mode", "raw")).strip().lower()
-        if mode not in {"raw", "bounded", "bounded_auto"}:
-            raise ValueError(
-                "train.input_features.distance_transform.mode must be one of: raw, bounded, bounded_auto"
-            )
-        signed_tanh_tau = float(cfg.get("signed_tanh_tau", 8.0))
-        proximity_tau = float(cfg.get("proximity_tau", 6.0))
-        if signed_tanh_tau <= 0.0:
-            raise ValueError("distance_transform.signed_tanh_tau must be > 0")
-        if proximity_tau <= 0.0:
-            raise ValueError("distance_transform.proximity_tau must be > 0")
-        return {
-            "mode": mode,
-            "signed_tanh_tau": signed_tanh_tau,
-            "proximity_tau": proximity_tau,
-            "replace_distance_any": bool(cfg.get("replace_distance_any", True)),
-        }
-
-    @staticmethod
-    def _resolve_distance_transform_effective(
-        cfg: dict[str, Any],
-        stats: dict[str, Any] | None,
-    ) -> dict[str, Any]:
-        mode = str(cfg.get("mode", "raw")).strip().lower()
-        out = dict(cfg)
-        if mode != "bounded_auto":
-            return out
-        raw_stats = dict(stats or {})
-        s_tau = float(raw_stats.get("signed_tanh_tau_auto", 0.0))
-        p_tau = float(raw_stats.get("proximity_tau_auto", 0.0))
-        if s_tau > 0.0 and p_tau > 0.0:
-            out["signed_tanh_tau"] = s_tau
-            out["proximity_tau"] = p_tau
-            out["signed_quantile"] = float(raw_stats.get("signed_quantile", 0.75))
-            out["proximity_quantile"] = float(raw_stats.get("proximity_quantile", 0.50))
-        return out
-
-    @staticmethod
-    def _apply_distance_transform(rows: np.ndarray, channels: list[str], cfg: dict[str, Any]) -> np.ndarray:
-        out = np.asarray(rows, dtype=np.float32).copy()
-        mode = str(cfg.get("mode", "raw")).strip().lower()
-        if mode == "raw":
-            return out
-        signed_tau = max(float(cfg.get("signed_tanh_tau", 8.0)), 1e-6)
-        prox_tau = max(float(cfg.get("proximity_tau", 6.0)), 1e-6)
-        if "distance_signed" in channels:
-            idx = channels.index("distance_signed")
-            out[:, idx] = np.tanh(out[:, idx] / signed_tau).astype(np.float32)
-        if "distance_any" in channels and bool(cfg.get("replace_distance_any", True)):
-            idx = channels.index("distance_any")
-            out[:, idx] = np.exp(-np.maximum(out[:, idx], 0.0) / prox_tau).astype(np.float32)
-        return out.astype(np.float32)
-
     def _transform_coord(self, coord: np.ndarray) -> np.ndarray:
         mode = str(self.coord_input_scaling_cfg.get("mode", "none")).strip().lower()
         if mode not in {"none", "zscore", "minmax"}:
@@ -739,15 +749,12 @@ class InferenceEngine:
     def _build_coord_feature_rows(self, geom: GeometryContext, channels: list[str]) -> np.ndarray:
         h, w = geom.mask_plasma.shape
         pack = dict(self.coord_feature_pack or {})
-        require_pack = str(self.coord_input_features_cfg.get("require_pack", "off")).strip().lower()
-        if require_pack not in {"off", "warn", "error"}:
-            raise ValueError("train.input_features.require_pack must be one of: off, warn, error")
-        distance_transform_cfg = self._resolve_distance_transform_cfg(
+        distance_transform_cfg = resolve_distance_transform_cfg(
             dict(self.coord_input_features_cfg).get("distance_transform")
         )
-        distance_transform_cfg = self._resolve_distance_transform_effective(
+        distance_transform_cfg, _ = resolve_distance_transform_effective(
             distance_transform_cfg,
-            self.coord_distance_transform_stats,
+            stats=self.coord_distance_transform_stats,
         )
         scaler_cfg = dict(self.coord_feature_scaler or {})
         has_coord_feature_scaler = bool(dict(scaler_cfg.get("channels", {})))
@@ -764,12 +771,12 @@ class InferenceEngine:
                         idx_x = channels.index("x")
                         idx_y = channels.index("y")
                         rows[:, [idx_x, idx_y]] = self._transform_coord(rows[:, [idx_x, idx_y]])
-                    rows = self._apply_distance_transform(rows, channels, distance_transform_cfg)
+                    rows, _ = apply_distance_transform(rows, channels=channels, cfg=distance_transform_cfg)
                     rows = self._transform_coord_features(rows, channels)
                     return rows
 
-        if require_pack == "error" and not bool(getattr(self.geometry_provider, "supports_geom_param", False)):
-            raise ValueError("input-feature contract requires preprocess feature_pack, but pack is missing")
+        if not bool(getattr(self.geometry_provider, "supports_geom_param", False)):
+            raise ValueError("input-feature contract requires preprocessing coord_feature_pack")
         coord_xy = self._coord_xy_from_geom(geom)
         distance_any = np.asarray(geom.distance_any, dtype=np.float32).reshape(-1)
         raw_signed = getattr(geom, "distance_signed", None)
@@ -779,26 +786,17 @@ class InferenceEngine:
         else:
             distance_signed = np.asarray(raw_signed, dtype=np.float32).reshape(-1)
         mask_plasma = np.asarray(geom.mask_plasma, dtype=np.float32).reshape(-1)
-        signed_2d = distance_signed.reshape(h, w)
-        gy, gx = np.gradient(signed_2d, edge_order=1)
-        gnorm = np.sqrt(gx**2 + gy**2).astype(np.float32)
-        gnorm = np.where(gnorm < 1e-6, 1e-6, gnorm).astype(np.float32)
-        normal_x = (gx / gnorm).reshape(-1).astype(np.float32)
-        normal_y = (gy / gnorm).reshape(-1).astype(np.float32)
-        dnx_dy, dnx_dx = np.gradient(gx / gnorm, edge_order=1)
-        dny_dy, dny_dx = np.gradient(gy / gnorm, edge_order=1)
-        curvature_proxy = (dnx_dx + dny_dy).reshape(-1).astype(np.float32)
-        mapping = {
-            "x": coord_xy[:, 0],
-            "y": coord_xy[:, 1],
-            "distance_signed": distance_signed,
-            "distance_any": distance_any,
-            "mask_plasma": mask_plasma,
-            "normal_x": normal_x,
-            "normal_y": normal_y,
-            "curvature_proxy": curvature_proxy,
-        }
         regions = dict(getattr(geom, "regions", {}) or {})
+        part_stack = regions.get("part_mask_stack")
+        mapping = derive_geom_feature_maps(
+            coord_xy=coord_xy,
+            distance_signed=distance_signed,
+            distance_any=distance_any,
+            mask_plasma=mask_plasma,
+            h=h,
+            w=w,
+            part_mask_stack=np.asarray(part_stack, dtype=np.float32) if part_stack is not None else None,
+        )
         solid_union = regions.get("solid_union_mask")
         if solid_union is not None:
             mask_coil = (np.asarray(solid_union, dtype=np.float32) > 0.5).astype(np.float32)
@@ -813,7 +811,6 @@ class InferenceEngine:
             mapping["mask_coil"] = mask_coil.reshape(-1).astype(np.float32)
             mapping["distance_coil"] = distance_coil.reshape(-1).astype(np.float32)
             mapping["coil_proximity"] = np.exp(-np.maximum(distance_coil, 0.0) / coil_tau).reshape(-1).astype(np.float32)
-        part_stack = regions.get("part_mask_stack")
         if part_stack is not None:
             for name, arr in part_sdf_maps_from_stack(np.asarray(part_stack, dtype=np.float32)).items():
                 mapping[name] = np.asarray(arr, dtype=np.float32).reshape(-1)
@@ -822,7 +819,7 @@ class InferenceEngine:
             idx_x = channels.index("x")
             idx_y = channels.index("y")
             rows[:, [idx_x, idx_y]] = self._transform_coord(rows[:, [idx_x, idx_y]])
-        rows = self._apply_distance_transform(rows, channels, distance_transform_cfg)
+        rows, _ = apply_distance_transform(rows, channels=channels, cfg=distance_transform_cfg)
         rows = self._transform_coord_features(rows, channels)
         return rows
 
@@ -857,20 +854,12 @@ class InferenceEngine:
         pack = dict(self.coord_feature_pack or {})
         cfg = dict(self.grid_input_features_cfg or {})
         mode = str(cfg.get("mode", "geom_feature_pack")).strip().lower()
-        if mode not in {"legacy_xy", "geom_feature_pack"}:
-            raise ValueError("train.<grid_model>.input_features.mode must be one of: legacy_xy, geom_feature_pack")
-        if mode == "legacy_xy" and list(channels) == ["x", "y"]:
-            yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
-            xx = np.linspace(0.0, 1.0, w, dtype=np.float32)
-            yv, xv = np.meshgrid(yy, xx, indexing="ij")
-            return np.stack([xv.reshape(-1), yv.reshape(-1)], axis=1).astype(np.float32)
-        require_pack = str(cfg.get("require_pack", "off")).strip().lower()
-        if require_pack not in {"off", "warn", "error"}:
-            raise ValueError("train.<grid_model>.input_features.require_pack must be one of: off, warn, error")
-        distance_transform_cfg = self._resolve_distance_transform_cfg(dict(cfg.get("distance_transform") or {}))
-        distance_transform_cfg = self._resolve_distance_transform_effective(
+        if mode != "geom_feature_pack":
+            raise ValueError("train.<grid_model>.input_features.mode must be geom_feature_pack")
+        distance_transform_cfg = resolve_distance_transform_cfg(dict(cfg.get("distance_transform") or {}))
+        distance_transform_cfg, _ = resolve_distance_transform_effective(
             distance_transform_cfg,
-            self.coord_distance_transform_stats,
+            stats=self.coord_distance_transform_stats,
         )
         scaler_cfg = dict(self.coord_feature_scaler or {})
         has_coord_feature_scaler = bool(dict(scaler_cfg.get("channels", {})))
@@ -887,11 +876,9 @@ class InferenceEngine:
                         idx_x = channels.index("x")
                         idx_y = channels.index("y")
                         rows[:, [idx_x, idx_y]] = self._transform_coord(rows[:, [idx_x, idx_y]])
-                    rows = self._apply_distance_transform(rows, channels, distance_transform_cfg)
+                    rows, _ = apply_distance_transform(rows, channels=channels, cfg=distance_transform_cfg)
                     rows = self._transform_coord_features(rows, channels)
                     return rows
-        if require_pack == "error" and not bool(getattr(self.geometry_provider, "supports_geom_param", False)):
-            raise ValueError("unet input-feature contract requires preprocess coord_feature_pack, but pack is missing")
         return self._build_coord_feature_rows(geom, channels)
 
     def _predict_grid_spatial_fields(self, cond_vec: np.ndarray, geom: GeometryContext) -> dict[str, np.ndarray]:
@@ -1004,25 +991,6 @@ class InferenceEngine:
             )
         return self.geometry_provider.get(geom_ref)
 
-    def _ood_warnings(self, cond: dict[str, Any], diagnostics: dict[str, Any]) -> list[str]:
-        warnings: list[str] = []
-        for key, stats in self.cond_stats.items():
-            if key not in cond:
-                continue
-            lo = float(stats.get("min", -np.inf))
-            hi = float(stats.get("max", np.inf))
-            val = float(cond[key])
-            if val < lo or val > hi:
-                warnings.append(f"ood:cond:{key}:{val:.6g} outside [{lo:.6g},{hi:.6g}]")
-        limit = float(self.ood_cfg.get("poisson_residual_limit", np.inf))
-        if float(diagnostics.get("poisson_residual_norm", 0.0)) > limit:
-            warnings.append("ood:poisson_residual")
-        bo_cfg = self.ood_cfg.get("boundary_operator", {})
-        bo_limit = bo_cfg.get("loss_limit")
-        if bo_limit is not None and float(diagnostics.get("boundary_operator_proxy_loss", 0.0)) > float(bo_limit):
-            warnings.append("ood:boundary_operator")
-        return warnings
-
     def _resolve_axis_samples(self, axis_cfg: dict[str, Any]) -> list[dict[str, Any]]:
         mode = str(axis_cfg.get("mode", self.axis_schema.mode))
         if mode != self.axis_schema.mode:
@@ -1068,7 +1036,6 @@ class InferenceEngine:
                     for k, v in best.qoi.items()
                 },
                 diagnostics={k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in best.diagnostics.items()},
-                warnings=sorted(set(best.warnings)),
                 case_key=str(best.case_key),
             )
 
@@ -1097,26 +1064,39 @@ class InferenceEngine:
             for k in results[0].diagnostics.keys()
             if isinstance(results[0].diagnostics[k], (int, float, np.floating))
         }
-        warnings = sorted(set(w for r in results for w in r.warnings))
         return InferenceResult(
             fields_model=mean_fields_model,
             fields_phys=mean_fields_phys,
             derived=mean_derived,
             qoi=mean_qoi,
             diagnostics=mean_diag,
-            warnings=warnings,
             case_key="",
         )
 
-    def single_run_aggregated(self, cond: dict[str, Any], geom: dict[str, Any], axis: dict[str, Any]) -> InferenceResult:
+    def single_run_aggregated(
+        self,
+        cond: dict[str, Any],
+        geom: dict[str, Any],
+        axis: dict[str, Any],
+        save_outputs: bool = True,
+    ) -> InferenceResult:
         aggregation = str(axis.get("aggregation", "single"))
         axis_samples = self._resolve_axis_samples(axis)
         if aggregation == "single":
-            return self.single_run(cond=cond, geom=geom, axis=axis_samples[0])
-        runs = [self.single_run(cond=cond, geom=geom, axis=sample) for sample in axis_samples]
+            return self.single_run(cond=cond, geom=geom, axis=axis_samples[0], save_outputs=save_outputs)
+        runs = [
+            self.single_run(cond=cond, geom=geom, axis=sample, save_outputs=save_outputs)
+            for sample in axis_samples
+        ]
         return self._aggregate_results(runs, aggregation)
 
-    def single_run(self, cond: dict[str, Any], geom: dict[str, Any], axis: dict[str, Any]) -> InferenceResult:
+    def single_run(
+        self,
+        cond: dict[str, Any],
+        geom: dict[str, Any],
+        axis: dict[str, Any],
+        save_outputs: bool = True,
+    ) -> InferenceResult:
         geom_ref = self._validate_geom_ref(geom)
         geom_ctx = self._get_geom_ctx(geom_ref, axis=axis)
         cond_vec = self._build_cond_vector(cond, axis)
@@ -1157,26 +1137,79 @@ class InferenceEngine:
                 if arr.ndim == 4 and arr.shape[0] == 1:
                     arr = arr[0]
                 fields_phys[key] = arr
-        derived = self._compute_derived(fields_phys["phi"])
+        post_cfg = _dict_or_empty(self.ood_cfg.get("postprocess"))
+        floor_raw = post_cfg.get("positive_floor")
+        if floor_raw is None:
+            floor_raw = post_cfg.get("floor")
+        if floor_raw is None:
+            floor_raw = 1.0e-30
+        fields_phys = self._postprocess_positive_fields(
+            fields_phys,
+            positive_vars=_config_string_list(post_cfg.get("positive_vars")),
+            floor=float(floor_raw),
+        )
+        potential_field = self._resolve_potential_field(fields_phys)
+        derived = self._compute_derived(potential_field)
 
         wafer = geom_ctx.regions.get("wafer_mask")
+        qoi_cfg = _dict_or_empty(self.ood_cfg.get("qoi"))
+        uniformity_cfg = _dict_or_empty(qoi_cfg.get("uniformity"))
+        preferred_uniformity_keys: list[str] = []
+        preferred_uniformity_keys.extend(_config_string_list(uniformity_cfg.get("target")))
+        preferred_uniformity_keys.extend(_config_string_list(uniformity_cfg.get("preferred_targets")))
         preferred_uniformity = self.ood_cfg.get("uniformity_target")
-        preferred_uniformity_keys = [str(preferred_uniformity)] if isinstance(preferred_uniformity, str) else None
+        preferred_uniformity_keys.extend(_config_string_list(preferred_uniformity))
         qoi_target_key, qoi_target = self._pick_uniformity_target(fields_phys, preferred_keys=preferred_uniformity_keys)
         if qoi_target is None:
             qoi = {"uniformity": 0.0}
         else:
+            region_raw = uniformity_cfg.get("region")
+            if region_raw is None:
+                region_raw = self.ood_cfg.get("uniformity_region")
+            if region_raw is None:
+                region_raw = "auto"
+            band_px_raw = uniformity_cfg.get("mid_height_band_px")
+            if band_px_raw is None:
+                band_px_raw = self.ood_cfg.get("mid_height_band_px")
+            if band_px_raw is None:
+                band_px_raw = 0
+            row_index_raw = uniformity_cfg.get("row_index")
+            if row_index_raw is None:
+                row_index_raw = uniformity_cfg.get("z_index")
+            col_start_raw = uniformity_cfg.get("col_start")
+            if col_start_raw is None:
+                col_start_raw = uniformity_cfg.get("r_start")
+            col_end_raw = uniformity_cfg.get("col_end")
+            if col_end_raw is None:
+                col_end_raw = uniformity_cfg.get("r_end")
             vals, uniformity_meta = self._uniformity_values_for_region(
                 qoi_target,
                 mask_plasma=geom_ctx.mask_plasma,
                 wafer_mask=wafer,
-                region=str(self.ood_cfg.get("uniformity_region", "auto")),
-                mid_height_band_px=int(self.ood_cfg.get("mid_height_band_px", 0)),
+                region=str(region_raw),
+                mid_height_band_px=int(band_px_raw),
+                row_index=None if row_index_raw is None else int(row_index_raw),
+                col_start=None if col_start_raw is None else int(col_start_raw),
+                col_end=None if col_end_raw is None else int(col_end_raw),
             )
             relative_uniformity = uniformity(vals)
             vals64 = np.asarray(vals, dtype=np.float64).reshape(-1)
-            mean_density = float(np.mean(vals64)) if vals64.size > 0 and np.all(np.isfinite(vals64)) else float("nan")
-            score_mode = str(self.ood_cfg.get("uniformity_score_mode", "relative")).strip().lower()
+            if vals64.size > 0 and np.all(np.isfinite(vals64)):
+                mean_density = float(np.mean(vals64))
+                min_density = float(np.min(vals64))
+                max_density = float(np.max(vals64))
+                p95_density = float(np.percentile(vals64, 95.0))
+            else:
+                mean_density = float("nan")
+                min_density = float("nan")
+                max_density = float("nan")
+                p95_density = float("nan")
+            score_mode_raw = uniformity_cfg.get("score_mode")
+            if score_mode_raw is None:
+                score_mode_raw = self.ood_cfg.get("uniformity_score_mode")
+            if score_mode_raw is None:
+                score_mode_raw = "relative"
+            score_mode = str(score_mode_raw).strip().lower()
             if score_mode in {"relative", "cv"}:
                 score = float(relative_uniformity)
             else:
@@ -1184,10 +1217,13 @@ class InferenceEngine:
             qoi = {"uniformity": score}
             qoi["uniformity_relative"] = float(relative_uniformity)
             qoi["uniformity_mean_density"] = mean_density
+            qoi["uniformity_min_density"] = min_density
+            qoi["uniformity_max_density"] = max_density
+            qoi["uniformity_p95_density"] = p95_density
             qoi["uniformity_score_mode"] = score_mode
             qoi["uniformity_target"] = str(qoi_target_key)
             qoi.update(uniformity_meta)
-        bo_cfg = self.ood_cfg.get("boundary_operator", {})
+        bo_cfg = _dict_or_empty(self.ood_cfg.get("boundary_operator"))
         delta_edge = float(bo_cfg.get("delta_edge", 1.5))
         wafer_only = bool(bo_cfg.get("wafer_only", False))
         band_mask = boundary_band_mask(
@@ -1216,10 +1252,10 @@ class InferenceEngine:
             qoi["boundary_gamma_uniformity"] = 0.0
 
         diagnostics = {
-            "poisson_residual_norm": float(poisson_residual_norm(fields_phys["phi"][0], eps=geom_ctx.eps)),
+            "poisson_residual_norm": float(poisson_residual_norm(potential_field[0], eps=geom_ctx.eps)),
             "bc_phi_mae": float(
                 bc_mae(
-                    fields_phys["phi"][0],
+                    potential_field[0],
                     bc_mask=np.zeros_like(geom_ctx.mask_plasma) if geom_ctx.bc_dir_mask is None else geom_ctx.bc_dir_mask,
                     bc_value=np.zeros_like(geom_ctx.mask_plasma) if geom_ctx.bc_dir_value is None else geom_ctx.bc_dir_value,
                 )
@@ -1248,7 +1284,7 @@ class InferenceEngine:
         if "rho_eff" in fields_phys:
             rhs_map = -np.asarray(fields_phys["rho_eff"], dtype=np.float32)
         poisson_map = poisson_residual(fields_phys["phi"], rhs=rhs_map)[0].astype(np.float32)
-        phi_for_bo = op_inputs["potential"] if op_inputs is not None else fields_phys["phi"]
+        phi_for_bo = op_inputs["potential"] if op_inputs is not None else potential_field
         bo_target = np.zeros_like(phi_for_bo[0], dtype=np.float32)
         if op_inputs is not None:
             bo_target = boundary_operator_target(
@@ -1262,48 +1298,24 @@ class InferenceEngine:
                 external_operator_handle=bo_cfg.get("external_operator_handle"),
                 target_clamp=tuple(bo_cfg["target_clamp"]) if bo_cfg.get("target_clamp") is not None else None,
             )[0].astype(np.float32)
-        bo_residual = ((fields_phys["phi"][0] - bo_target) * band_mask).astype(np.float32)
+        bo_residual = ((potential_field[0] - bo_target) * band_mask).astype(np.float32)
         diagnostics["poisson_residual_map_l2"] = float(np.sqrt(np.mean(poisson_map**2)))
         diagnostics["boundary_operator_residual_map_l2"] = float(np.sqrt(np.mean(bo_residual**2)))
 
-        warnings = sorted(set([*self.input_mode_contract_warnings, *self._ood_warnings(cond=cond, diagnostics=diagnostics)]))
-        cond_warnings = [w for w in warnings if w.startswith("ood:cond:")]
-        physics_warnings = [w for w in warnings if not w.startswith("ood:cond:")]
-        ood_report = {
-            "warnings": warnings,
-            "cond_warnings": cond_warnings,
-            "physics_warnings": physics_warnings,
-            INPUT_MODE_FALLBACK_APPLIED_KEY: bool(self.input_mode_fallback_applied),
-            "axis_context": {
-                "mode": str(axis.get("mode", self.axis_schema.mode)),
-                "value": float(axis.get("value", 0.0)),
-                "aggregation": str(axis.get("aggregation", "single")),
-                "window": axis.get("window"),
-                "n_points": axis.get("n_points"),
-            },
-            "limits": {
-                "cond_stats": self.cond_stats,
-                "poisson_residual_limit": self.ood_cfg.get("poisson_residual_limit"),
-                "boundary_operator": self.ood_cfg.get("boundary_operator", {}),
-            },
-        }
-
         case_key = self._case_key(cond=cond, axis=axis, geom=geom_ref)
-        self.store.save_npz(f"single/{case_key}/fields_model.npz", **fields_model)
-        self.store.save_npz(f"single/{case_key}/fields_phys.npz", **fields_phys)
-        self.store.save_npz(f"single/{case_key}/derived.npz", **derived)
-        self.store.save_json(f"single/{case_key}/qoi.json", qoi)
-        self.store.save_json(f"single/{case_key}/diagnostics.json", diagnostics)
-        self.store.save_json(f"single/{case_key}/ood_report.json", ood_report)
-        self.store.save_npz(
-            f"single/{case_key}/diagnostics_maps.npz",
-            poisson_residual_map=poisson_map,
-            boundary_band_mask=band_mask.astype(np.float32),
-            boundary_operator_target=bo_target,
-            boundary_operator_residual_map=bo_residual,
-        )
-        if warnings:
-            self.store.save_json(f"single/{case_key}/warnings.json", {"warnings": warnings})
+        if save_outputs:
+            self.store.save_npz(f"single/{case_key}/fields_model.npz", **fields_model)
+            self.store.save_npz(f"single/{case_key}/fields_phys.npz", **fields_phys)
+            self.store.save_npz(f"single/{case_key}/derived.npz", **derived)
+            self.store.save_json(f"single/{case_key}/qoi.json", qoi)
+            self.store.save_json(f"single/{case_key}/diagnostics.json", diagnostics)
+            self.store.save_npz(
+                f"single/{case_key}/diagnostics_maps.npz",
+                poisson_residual_map=poisson_map,
+                boundary_band_mask=band_mask.astype(np.float32),
+                boundary_operator_target=bo_target,
+                boundary_operator_residual_map=bo_residual,
+            )
 
         return InferenceResult(
             fields_model=fields_model,
@@ -1311,7 +1323,6 @@ class InferenceEngine:
             derived=derived,
             qoi=qoi,
             diagnostics=diagnostics,
-            warnings=warnings,
             case_key=case_key,
         )
 
@@ -1338,6 +1349,9 @@ class InferenceEngine:
         seed: int = 0,
         backend: str = "random",
         backend_cfg: dict[str, Any] | None = None,
+        objective_cfg: dict[str, Any] | None = None,
+        constraints_cfg: Any = None,
+        output_cfg: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         provider_mode = str(getattr(self.geometry_provider, "provider_mode", "fixed")).strip().lower()
         geom_space_norm = validate_optimize_geom_contract(
@@ -1357,15 +1371,67 @@ class InferenceEngine:
             seed=seed,
             backend=backend,
             backend_cfg=backend_cfg,
+            objective_cfg=objective_cfg,
+            constraints_cfg=constraints_cfg,
+            output_cfg=output_cfg,
         )
+        output_effective = dict(result.output_cfg or {"save_fields": "all", "top_k": 3})
+        if output_effective.get("save_fields") == "top_k":
+            top_k = int(output_effective.get("top_k", 3))
+
+            def _record_value(record: dict[str, Any]) -> float:
+                try:
+                    value = float(record.get("objective_value"))
+                except (TypeError, ValueError):
+                    return float("inf")
+                if np.isfinite(value):
+                    return value
+                return float("inf")
+
+            ranked = sorted(
+                result.trials,
+                key=lambda r: (0 if bool(r.get("feasible", False)) else 1, _record_value(r)),
+            )
+            seen: set[str] = set()
+            for trial in ranked:
+                cond_payload = dict(trial.get("cond", {}) or {})
+                geom_param_payload = dict(trial.get("geom_param", {}) or {})
+                signature = json.dumps(
+                    {"cond": cond_payload, "geom_param": geom_param_payload},
+                    sort_keys=True,
+                    default=str,
+                )
+                if signature in seen:
+                    continue
+                seen.add(signature)
+                geom_payload = dict(geom or {"geom_id": "default"})
+                if geom_param_payload:
+                    geom_payload.pop("geom_param", None)
+                    geom_payload["geom_param"] = {
+                        str(k): float(v) for k, v in sorted(geom_param_payload.items())
+                    }
+                self.single_run_aggregated(
+                    cond=cond_payload,
+                    geom=geom_payload,
+                    axis=axis,
+                    save_outputs=True,
+                )
+                if len(seen) >= top_k:
+                    break
         self.store.save_json(
             "optimize/best.json",
             {
                 "best_cond": result.best_cond,
                 "best_geom_param": result.best_geom_param,
-                "best_value": result.best_value,
+                "best_objective_value": result.best_objective_value,
+                "best_search_value": result.best_search_value,
+                "best_feasible": bool(result.best_feasible),
+                "best_violated_constraints": list(result.best_violated_constraints),
+                "objective_mode": result.objective_mode,
+                "objective_key": result.objective_key,
             },
         )
+        feasible_trial_count = sum(1 for trial in result.trials if bool(trial.get("feasible", False)))
         self.store.save_json(
             "optimize/summary.json",
             {
@@ -1374,10 +1440,16 @@ class InferenceEngine:
                 "seed": int(seed),
                 "n_trials": int(n_trials),
                 "objective_key": result.objective_key,
-                "best_value": float(result.best_value),
+                "objective_mode": result.objective_mode,
+                "best_objective_value": float(result.best_objective_value),
+                "best_search_value": float(result.best_search_value),
+                "best_feasible": bool(result.best_feasible),
+                "best_violated_constraints": list(result.best_violated_constraints),
                 "geom_space_enabled_effective": bool(len(geom_space_norm) > 0),
                 "geom_param_keys_effective": sorted(list(result.best_geom_param.keys())),
                 "invalid_trial_count": int(result.invalid_trial_count),
+                "feasible_trial_count": int(feasible_trial_count),
+                "output": output_effective,
             },
         )
         rows = []
@@ -1390,10 +1462,23 @@ class InferenceEngine:
             }
             rows.append(row)
         header = sorted({k for row in rows for k in row.keys()})
-        self.store.save_csv("optimize/trials.csv", header, [["" if r.get(k) is None else r.get(k, "") for k in header] for r in rows])
+
+        def _csv_value(value: Any) -> Any:
+            if value is None:
+                return ""
+            if isinstance(value, list):
+                return ";".join(str(v) for v in value)
+            return value
+
+        self.store.save_csv("optimize/trials.csv", header, [[_csv_value(r.get(k)) for k in header] for r in rows])
         return {
             "best_cond": result.best_cond,
             "best_geom_param": result.best_geom_param,
-            "best_value": result.best_value,
+            "best_objective_value": result.best_objective_value,
+            "best_search_value": result.best_search_value,
+            "best_feasible": bool(result.best_feasible),
+            "best_violated_constraints": list(result.best_violated_constraints),
+            "objective_mode": result.objective_mode,
+            "objective_key": result.objective_key,
             "invalid_trial_count": int(result.invalid_trial_count),
         }

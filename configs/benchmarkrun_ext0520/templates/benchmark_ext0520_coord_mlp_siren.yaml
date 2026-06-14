@@ -1,23 +1,23 @@
 benchmark:
   output_dir: runs/benchmarkrun_ext0520/n54/coord_mlp_siren
-  profile: m7_coord_mlp_siren_experimental
+  profile: m7_coord_mlp_siren_isolated
   seed: 411
   phi_mode: direct
   eval:
     mask_metrics: plasma_only
     interp_mode: overlap
-    protocol_variant: coord_mlp_siren_benchmarkrun_ext0520_n54
+    protocol_variant: coord_mlp_siren_isolated_benchmarkrun_ext0520_n54
     target_family_for_score: allvars
     target_vars_for_score:
     - ne
     - ni
     - Te
     - phi
-    primary_metric: test_r2_plasma_mean_dual
-    primary_mode: max
+    primary_metric: surrogate_quality_score
+    objective_mode: min
   eval_protocol:
     mode: dual_axis
-    scope: common
+    scope: coord_mlp_siren_isolated
     primary_split: interp
     interp_weight: 0.5
     extrap_weight: 0.5
@@ -177,8 +177,6 @@ benchmark:
       value: 0.0
   runtime:
     input_mode: table_plus_structure
-    strict_input_mode: error
-    allow_mode_fallback: false
     structure:
       feature_profile: geom_v1_mainline
       descriptor_profile: none
@@ -187,8 +185,6 @@ benchmark:
       provider_mode: fixed
 runtime:
   input_mode: table_plus_structure
-  strict_input_mode: error
-  allow_mode_fallback: false
   structure:
     feature_profile: geom_v1_mainline
     descriptor_profile: none

@@ -393,8 +393,8 @@ def physics_loss_and_grad(
         z = np.zeros_like(phi, dtype=np.float32)
         return 0.0, z, {"poisson": 0.0, "boundary": 0.0, "boundary_operator": 0.0}
 
-    lambda_poisson = float(cfg.get("lambda_poisson", 0.0))
-    lambda_bc = float(cfg.get("lambda_bc", 0.0))
+    poisson_weight = float(cfg.get("poisson_weight", 0.0))
+    boundary_weight = float(cfg.get("boundary_weight", 0.0))
     rhs = cfg.get("rhs")
     bc_mask = cfg.get("bc_mask")
     bc_value = cfg.get("bc_value", 0.0)
@@ -404,22 +404,22 @@ def physics_loss_and_grad(
     boundary_term = 0.0
     boundary_operator_term = 0.0
 
-    if lambda_poisson > 0.0:
+    if poisson_weight > 0.0:
         p_loss = poisson_residual_loss(phi, rhs=rhs)
         p_grad = poisson_residual_grad(phi, rhs=rhs)
-        poisson_term = lambda_poisson * p_loss
-        grad += lambda_poisson * p_grad
+        poisson_term = poisson_weight * p_loss
+        grad += poisson_weight * p_grad
 
-    if lambda_bc > 0.0 and bc_mask is not None:
+    if boundary_weight > 0.0 and bc_mask is not None:
         b_loss = boundary_loss(phi, bc_mask=bc_mask, bc_value=bc_value)
         b_grad = boundary_grad(phi, bc_mask=bc_mask, bc_value=bc_value)
-        boundary_term = lambda_bc * b_loss
-        grad += lambda_bc * b_grad
+        boundary_term = boundary_weight * b_loss
+        grad += boundary_weight * b_grad
 
     bo_cfg = cfg.get("boundary_operator", {})
     bo_enabled = bool(bo_cfg.get("enabled", False))
-    lambda_bo = float(bo_cfg.get("lambda", cfg.get("lambda_boundary_operator", 0.0)))
-    if bo_enabled and lambda_bo > 0.0:
+    boundary_operator_weight = float(bo_cfg.get("weight", 0.0))
+    if bo_enabled and boundary_operator_weight > 0.0:
         if log_ne is None or te is None:
             raise ValueError("boundary_operator requires log_ne and te tensors")
         mask_band = bo_cfg.get("mask_band")
@@ -449,8 +449,8 @@ def physics_loss_and_grad(
             external_operator_handle=bo_cfg.get("external_operator_handle"),
             target_clamp=tuple(bo_cfg["target_clamp"]) if bo_cfg.get("target_clamp") is not None else None,
         )
-        boundary_operator_term = lambda_bo * bo_loss
-        grad += lambda_bo * bo_grad
+        boundary_operator_term = boundary_operator_weight * bo_loss
+        grad += boundary_operator_weight * bo_grad
 
     total = poisson_term + boundary_term + boundary_operator_term
     return float(total), grad.astype(np.float32), {

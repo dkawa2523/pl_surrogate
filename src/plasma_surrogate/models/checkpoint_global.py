@@ -21,12 +21,15 @@ __all__ = [
 def make_global_mlp_checkpoint_meta(model: Any) -> dict[str, Any] | None:
     if not isinstance(model, GlobalMLP):
         return None
+    output_keys = [str(v) for v in list(getattr(model, "output_keys", []))]
+    if not output_keys:
+        raise ValueError("checkpoint requires model.output_keys")
     return {
         "model_type": "global_mlp",
         "input_dim": model.input_dim,
         "grid_shape": list(model.grid_shape),
         "out_channels": model.out_channels,
-        "output_keys": list(getattr(model, "output_keys", ["log_ne", "Te", "phi"])),
+        "output_keys": output_keys,
         "hidden": list(getattr(model, "hidden", [])),
         "dropout": float(getattr(model, "dropout", 0.0)),
         "weight_decay": float(getattr(model, "weight_decay", 0.0)),
@@ -38,11 +41,14 @@ def load_global_mlp_checkpoint_model(meta: dict[str, Any]) -> GlobalMLP | None:
     model_type = str(meta.get("model_type", "")).strip().lower()
     if model_type not in GLOBAL_MLP_CHECKPOINT_MODEL_TYPES:
         return None
+    output_keys = [str(v) for v in list(meta.get("output_keys", []))]
+    if not output_keys:
+        raise ValueError("checkpoint meta requires output_keys")
     return GlobalMLP(
         input_dim=int(meta["input_dim"]),
         grid_shape=tuple(meta["grid_shape"]),
         out_channels=int(meta.get("out_channels", 3)),
-        output_keys=list(meta.get("output_keys", ["log_ne", "Te", "phi"])),
+        output_keys=output_keys,
         hidden=list(meta.get("hidden", [128, 128])),
         dropout=float(meta.get("dropout", 0.1)),
         weight_decay=float(meta.get("weight_decay", 0.0)),

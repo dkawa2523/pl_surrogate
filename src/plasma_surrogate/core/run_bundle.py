@@ -86,41 +86,11 @@ class RunBundleLoader:
         data = np.load(path, allow_pickle=True)
         return {k: np.asarray(data[k]) for k in data.files}
 
-    @staticmethod
-    def _default_task_spec(schemas: dict[str, Any], transforms: dict[str, Any]) -> TaskSpecV1:
-        layout = schemas.get("output_layout", {})
-        vars_ = [str(v) for v in layout.get("vars", []) if str(v).strip()]
-        if not vars_:
-            raise FileNotFoundError("Missing output_layout.vars; cannot derive task_spec without fixed target names")
-        shape = list(layout.get("shape", []))
-        if len(shape) >= 3:
-            grid_shape = [int(shape[1]), int(shape[2])]
-        else:
-            raise FileNotFoundError("Missing output_layout.shape; cannot derive task_spec grid shape")
-        y_scalers = dict(transforms.get("y_scalers", {}))
-        transform_by_var = {name: str(dict(y_scalers.get(name, {})).get("type", "zscore")) for name in vars_}
-        return TaskSpecV1.from_dict(
-            {
-                "outputs": [{"name": name, "units": "", "transform": transform_by_var[name]} for name in vars_],
-                "transforms": transform_by_var,
-                "units": {name: "" for name in vars_},
-                "grid_spec": {
-                    "axes_order": ["y", "x"],
-                    "coord_components": ["x", "y"],
-                    "shape": grid_shape,
-                    "coord_system": "cartesian",
-                },
-                "metadata": {"source": "run_bundle_fallback"},
-            }
-        )
-
     @classmethod
     def _load_task_spec(
         cls,
         run_path: Path,
         cfg: dict[str, Any],
-        schemas: dict[str, Any],
-        transforms: dict[str, Any],
     ) -> TaskSpecV1:
         task_spec_path = run_path / "task_spec.yaml"
         if cfg.get("task", {}).get("spec_path"):
@@ -129,7 +99,7 @@ class RunBundleLoader:
                 task_spec_path = run_path / task_spec_path
         if task_spec_path.exists():
             return TaskSpecV1.from_yaml(task_spec_path)
-        return cls._default_task_spec(schemas, transforms)
+        raise FileNotFoundError(f"Missing task_spec.yaml under {run_path}")
 
     @classmethod
     def load(
@@ -206,6 +176,9 @@ class RunBundleLoader:
             "axis_schema": cls._load_json_if_exists(run_path / "preprocessing" / "schema" / "axis_schema.json"),
             "channel_map": cls._load_json_if_exists(run_path / "preprocessing" / "schema" / "channel_map.json"),
             "output_layout": cls._load_json_if_exists(run_path / "preprocessing" / "schema" / "output_layout.json"),
+            "target_role_schema": cls._load_json_if_exists(
+                run_path / "preprocessing" / "schema" / "target_role_schema.json"
+            ),
             "deeponet_index": cls._load_json_if_exists(
                 run_path / "preprocessing" / "sampling" / "deeponet" / "sensor_query_index.json"
             ),
@@ -229,6 +202,9 @@ class RunBundleLoader:
             ),
             "cond_stats": cls._load_json_if_exists(run_path / "preprocessing" / "stats" / "cond_stats.json"),
             "y_stats": cls._load_json_if_exists(run_path / "preprocessing" / "stats" / "y_stats.json"),
+            "runtime_schema_hashes": cls._load_json_if_exists(
+                run_path / "preprocessing" / "validation" / "runtime_schema_hashes.json"
+            ),
             "geometry_cache_index": cls._load_json_if_exists(run_path / "featurization" / "geometry_cache_index.json"),
             "preprocess_report": preprocess_report,
             "coord_feature_pack_meta": cls._load_json_if_exists(coord_pack_meta_path) if coord_pack_meta_path else {},
@@ -256,7 +232,7 @@ class RunBundleLoader:
                 cls._load_npz_if_exists(case_structure_pack_path) if case_structure_pack_path else None
             ),
         }
-        task_spec = cls._load_task_spec(run_path=run_path, cfg=cfg, schemas=schemas, transforms=transforms)
+        task_spec = cls._load_task_spec(run_path=run_path, cfg=cfg)
 
         ArtifactStore(run_path / "artifacts")
 

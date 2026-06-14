@@ -1,4 +1,4 @@
-benchmark:
+﻿benchmark:
   output_dir: runs/periodic_real_tuned_v48/benchmark_m7_global_frozen_ref_v2
   profile: m7_global_frozen_ref
   seed: 411
@@ -8,14 +8,8 @@ benchmark:
     interp_mode: overlap
     protocol_variant: global_frozen_ref_v2
     target_vars_for_score: [ne, ni, Te, phi]
-    primary_metric: test_r2_plasma_mean_dual
-    primary_mode: max
-    aggregate_score:
-      enabled: true
-      rmse_weight: 0.5
-      r2_weight: 0.4
-      boundary_penalty_weight: 0.1
-      use_plasma_metrics: true
+    primary_metric: surrogate_quality_score
+    objective_mode: min
   eval_protocol:
     mode: dual_axis
     scope: global_frozen
@@ -54,7 +48,7 @@ benchmark:
     distance_contract:
       require_negative_outside: error
     coord_grid_contract:
-      require_requested_source: warn
+      require_requested_source: error
     coord_grid_source: coord_grid
   train:
     global_mlp:

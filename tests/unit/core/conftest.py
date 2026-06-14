@@ -8,7 +8,7 @@ import pytest
 
 
 @pytest.fixture
-def run_dir(tmp_path: Path) -> Path:
+def run_dir(tmp_path: Path, task_spec_dict: dict[str, Any]) -> Path:
     run_root = tmp_path / "run_bundle_case"
     (run_root / "preprocessing" / "scalers").mkdir(parents=True, exist_ok=True)
     (run_root / "preprocessing" / "schema").mkdir(parents=True, exist_ok=True)
@@ -39,6 +39,7 @@ def run_dir(tmp_path: Path) -> Path:
     (run_root / "preprocessing" / "schema" / "output_layout.json").write_text(
         json.dumps(output_layout, indent=2), encoding="utf-8"
     )
+    (run_root / "task_spec.yaml").write_text(json.dumps(task_spec_dict, indent=2), encoding="utf-8")
     return run_root
 
 

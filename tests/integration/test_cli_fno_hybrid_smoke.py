@@ -9,7 +9,7 @@ import yaml
 from plasma_surrogate.cli.main import main
 from tests._runtime_requirements import require_torch_runtime
 from tests._config_presets import (
-    default_target_transforms_ne_ni_te_phi,
+    default_target_transforms_four_field_example,
     runtime_table_plus_structure,
 )
 
@@ -31,13 +31,16 @@ def test_cli_fno_hybrid_train_and_infer_smoke(tmp_path: Path, model_name: str, e
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 3},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
-            "scalers": {"target_transforms": default_target_transforms_ne_ni_te_phi()},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
         },
         "model": {"name": model_name, "phi_mode": "poisson_hybrid", "phi_hybrid_steps": 1, **extra_cfg},
         "train": {
             "epochs": 3,
             "lr": 0.02,
-            "physics": {"enabled": True, "lambda_poisson": 0.02, "lambda_bc": 0.01},
+            "physics": {
+                "enabled": True,
+                "terms": {"poisson": {"weight": 0.02}, "boundary": {"weight": 0.01}},
+            },
             "fno": {
                 "selection": {"mode": "best_val_allvars_balance"},
                 "input_features": {

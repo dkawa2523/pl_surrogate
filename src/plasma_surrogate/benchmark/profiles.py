@@ -117,6 +117,16 @@ BENCHMARK_PROFILE_LOCKS: dict[str, dict[str, Any]] = {
         "sensor_query_seed": None,
         "sensor_query_spec_hash": "",
     },
+    "m7_coord_mlp_siren_isolated": {
+        "profile": "m7_coord_mlp_siren_isolated",
+        "dimension": "2d_steady",
+        "models": ["coord_mlp_siren"],
+        "phi_mode": "direct",
+        "axis_mode": "steady",
+        "poisson_refine_iters": 0,
+        "sensor_query_seed": None,
+        "sensor_query_spec_hash": "",
+    },
     "m7_coord_mlp_pod_residual": {
         "profile": "m7_coord_mlp_pod_residual",
         "dimension": "2d_steady",
@@ -212,6 +222,7 @@ PROFILE_ALIASES = {
     "m7_geom_pod": "m7_geom_deeponet_pod",
     "m7_cno_v2": "m7_cno_operator_unet",
     "m7_geom_deeponet_siren": "m7_geom_deeponet_siren_experimental",
+    "m7_coord_mlp_siren": "m7_coord_mlp_siren_isolated",
     "m7_coord_mlp_pod": "m7_coord_mlp_pod_residual",
 }
 

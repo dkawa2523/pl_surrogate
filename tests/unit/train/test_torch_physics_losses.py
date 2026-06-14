@@ -49,10 +49,10 @@ def test_physics_terms_torch_with_boundary_operator():
         geom_ctx=None,
         cfg={
             "enabled": True,
-            "lambda_poisson": 0.1,
+            "poisson_weight": 0.1,
             "boundary_operator": {
                 "enabled": True,
-                "lambda": 0.2,
+                "weight": 0.2,
                 "mode": "operator_prior",
                 "primary_qoi_key": "Gamma_i",
             },
@@ -80,7 +80,7 @@ def test_physics_terms_torch_uses_pred_rho_eff_when_present():
         "phi": phi,
         "rho_eff": torch.ones((1, 1, 8, 8), dtype=torch.float32),
     }
-    cfg = {"enabled": True, "lambda_poisson": 1.0, "scale_rho": 1.0}
+    cfg = {"enabled": True, "poisson_weight": 1.0, "scale_rho": 1.0}
     total0, terms0 = physics_terms_torch(
         pred_fields=pred_zero,
         cond_vec=torch.zeros((1, 2), dtype=torch.float32),
@@ -111,7 +111,11 @@ def test_compose_torch_returns_common_component_keys():
         pred_fields=pred,
         cond_vec=torch.zeros((1, 2), dtype=torch.float32),
         geom_ctx=None,
-        physics_cfg={"enabled": True, "lambda_poisson": 0.1},
+        physics_cfg={
+            "enabled": True,
+            "terms": {"poisson": {"weight": 0.1}},
+            "symbols": {"density": "log_ne", "temperature": "Te", "potential": "phi"},
+        },
     )
     assert float(total.detach().cpu().item()) >= 0.0
     assert set(components.keys()) == {"data", "physics", "poisson", "boundary", "boundary_operator", "rho"}

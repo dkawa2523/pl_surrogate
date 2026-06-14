@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from plasma_surrogate.preprocessing.scalers import TransformBundle, fit_scalers_train_only
+from plasma_surrogate.preprocessing.scalers import ScalerFactory, TransformBundle, fit_scalers_train_only
 
 
 def test_fit_scalers_train_only_uses_train_indices():
@@ -109,22 +109,93 @@ def test_transform_bundle_cond_dim_roundtrip_and_fail_fast():
         restored.transform_cond(np.zeros((2, 2), dtype=np.float32))
 
 
-def test_transform_bundle_infers_legacy_cond_dim_from_scaler_stats():
-    legacy_cond_scaler = {
-        "type": "zscore",
-        "mean": [0.0, 0.0, 0.0, 0.0, 0.0],
-        "std": [1.0, 1.0, 1.0, 1.0, 1.0],
+def test_robust_scaler_serializes_and_roundtrips():
+    scaler = ScalerFactory.create("robust").fit(
+        np.array([[0.0, 10.0], [2.0, 12.0], [100.0, 14.0]], dtype=np.float32)
+    )
+    transformed = scaler.transform(np.array([[2.0, 12.0]], dtype=np.float32))
+    assert np.allclose(transformed, np.zeros((1, 2), dtype=np.float64))
+
+    restored = ScalerFactory.from_dict(scaler.to_dict())
+    roundtrip = restored.inverse_transform(transformed)
+    assert np.allclose(roundtrip, np.array([[2.0, 12.0]], dtype=np.float64))
+
+    constant = ScalerFactory.create("robust").fit(np.full((3, 1), 5.0, dtype=np.float32))
+    constant_payload = constant.to_dict()
+    assert constant_payload["iqr"] == [1.0]
+    assert np.allclose(constant.transform(np.array([[5.0]], dtype=np.float32)), np.zeros((1, 1), dtype=np.float64))
+
+    bundle = TransformBundle.from_dict(
+        cond_scaler=scaler.to_dict(),
+        y_scalers={"ne": {"type": "none"}},
+        y_order=["ne"],
+        cond_dim=2,
+    )
+    assert bundle.cond_dim == 2
+
+
+def test_target_value_transforms_floor_and_roundtrip():
+    cond = np.array([[0.0], [1.0], [2.0]], dtype=np.float32)
+    y = {
+        "ne": np.array([[0.0], [0.01], [10.0]], dtype=np.float32),
+        "ni": np.array([[0.0], [1.0], [2.0]], dtype=np.float32),
+        "Te": np.array([[3.0], [4.0], [5.0]], dtype=np.float32),
+        "phi": np.array([[-2.0], [0.0], [2.0]], dtype=np.float32),
     }
-    legacy_y_scalers = {
-        "ne": {"type": "zscore", "mean": [0.0], "std": [1.0]},
-        "ni": {"type": "zscore", "mean": [0.0], "std": [1.0]},
-        "Te": {"type": "zscore", "mean": [0.0], "std": [1.0]},
-        "phi": {"type": "zscore", "mean": [0.0], "std": [1.0]},
+    bundle = fit_scalers_train_only(
+        cond,
+        y,
+        np.array([0, 1, 2], dtype=np.int64),
+        y_scaler_type="none",
+        target_transforms={
+            "ne": {"value_transform": "log10_floor", "floor": 1.0e-3, "scaler": "none"},
+            "ni": {"value_transform": "log1p", "floor": 0.0, "scaler": "none"},
+            "phi": {"value_transform": "signed_log1p", "scaler": "none"},
+        },
+    )
+    assert bundle.target_transforms["Te"]["floor"] == 0.0
+    assert bundle.target_transforms["phi"]["floor"] == 0.0
+
+    fields = {
+        "ne": np.array([[0.0, 0.01]], dtype=np.float32),
+        "ni": np.array([[0.0, 2.0]], dtype=np.float32),
+        "Te": np.array([[3.0, 4.0]], dtype=np.float32),
+        "phi": np.array([[-2.0, 2.0]], dtype=np.float32),
     }
-    bundle = TransformBundle.from_dict(cond_scaler=legacy_cond_scaler, y_scalers=legacy_y_scalers)
-    assert bundle.cond_dim == 5
-    out = bundle.transform_cond(np.zeros((1, 5), dtype=np.float32))
-    assert out.shape == (1, 5)
+    transformed = bundle.transform_field_dict(fields)
+    assert transformed["ne"][0, 0] == pytest.approx(np.log10(1.0e-3))
+    assert transformed["ni"][0, 1] == pytest.approx(np.log1p(2.0))
+    assert transformed["phi"][0, 0] == pytest.approx(-np.log1p(2.0))
+
+    inverse = bundle.inverse_field_dict(transformed)
+    assert inverse["ne"][0, 0] == pytest.approx(1.0e-3)
+    assert np.allclose(inverse["ni"], fields["ni"], atol=1e-6)
+    assert np.allclose(inverse["phi"], fields["phi"], atol=1e-6)
+
+    floor_default_bundle = fit_scalers_train_only(
+        cond,
+        y,
+        np.array([0, 1, 2], dtype=np.int64),
+        y_scaler_type="none",
+        target_transforms={"ne": {"value_transform": "log10_floor", "scaler": "none"}},
+    )
+    assert floor_default_bundle.target_transforms["ne"]["floor"] == 0.0
+    inverse_tiny = floor_default_bundle.inverse_field_dict({"ne": np.array([[-1000.0]], dtype=np.float32)})
+    assert inverse_tiny["ne"][0, 0] == pytest.approx(1.0e-30)
+
+
+def test_log10_transform_keeps_strict_positive_requirement():
+    cond = np.array([[0.0], [1.0]], dtype=np.float32)
+    y = {
+        "ne": np.array([[0.0], [1.0]], dtype=np.float32),
+    }
+    with pytest.raises(ValueError, match="requires strictly positive"):
+        fit_scalers_train_only(
+            cond,
+            y,
+            np.array([0, 1], dtype=np.int64),
+            target_transforms={"ne": {"value_transform": "log10"}},
+        )
 
 
 def test_fit_scalers_train_only_target_transforms_quantile_clip_tracks_stats():

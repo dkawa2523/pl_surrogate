@@ -58,10 +58,9 @@ class TorchTrainer:
             {
                 "enabled": bool(cfg.get("enabled", False)),
                 "resolved_terms": list(cfg.get("resolved_terms", [])),
-                "lambda_poisson": float(cfg.get("lambda_poisson", 0.0)),
                 "boundary_operator": {
                     "enabled": bool(cfg.get("boundary_operator", {}).get("enabled", False)),
-                    "lambda": float(cfg.get("boundary_operator", {}).get("lambda", 0.0)),
+                    "weight": float(cfg.get("boundary_operator", {}).get("weight", 0.0)),
                     "mode": str(cfg.get("boundary_operator", {}).get("mode", "operator_prior")),
                     "primary_qoi_key": str(cfg.get("boundary_operator", {}).get("primary_qoi_key", "Gamma_i")),
                 },
@@ -631,12 +630,16 @@ class TorchTrainer:
                     )
                     bsz, _c, hh, ww = pred_stack.shape
                     plasma_mask = self._align_mask_bhw(supervised_mask, batch_size=bsz, h=hh, w=ww)
+                    target_region_by_var = dict(
+                        dict(dict(loss_cfg or {}).get("supervised", {})).get("target_region_by_var", {})
+                    )
                     val_balance_score, parts = allvars_plasma_balance_score(
                         pred=pred_stack,
                         target=target_stack,
                         y_vars=list(y_vars),
                         weights=selection_weights,
                         plasma_mask=plasma_mask,
+                        target_region_by_var=target_region_by_var,
                     )
                     if np.isfinite(val_balance_score) and (
                         best_state is None or float(val_balance_score) > float(best_score)

@@ -21,7 +21,7 @@ def normalize_unet_operator_v2_cfg(raw_cfg: dict[str, Any] | None) -> dict[str, 
     upsample = str(cfg.get("upsample", "bilinear")).strip().lower()
     use_film = bool(cfg.get("use_film", True))
     activation = str(cfg.get("activation", "silu")).strip().lower()
-    head_mode = str(cfg.get("head_mode", "split_density_field")).strip().lower()
+    head_mode = str(cfg.get("head_mode", "shared")).strip().lower()
 
     if width < 1:
         raise ValueError("train.unet_operator_v2.model_cfg.unet_operator_v2_cfg.width must be >= 1")

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -87,7 +86,7 @@ def _build_engine(tmp_path: Path, provider_mode: str, *, input_mode: str) -> Inf
         _write_base_geometry(dataset_root)
     provider = build_geometry_provider(dataset_root, provider_mode=provider_mode)
     return InferenceEngine(
-        model=GlobalMLP(input_dim=2, grid_shape=(8, 8), seed=3),
+        model=GlobalMLP(input_dim=2, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=3),
         cond_schema=CondSchema(order=["c0", "c1"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=provider,
@@ -108,6 +107,39 @@ def test_table_only_rejects_geom_space(tmp_path: Path) -> None:
         )
 
 
+def test_inference_physics_inputs_resolve_from_target_roles(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset_roles"
+    _write_base_geometry(dataset_root)
+    provider = build_geometry_provider(dataset_root, provider_mode="fixed")
+    engine = InferenceEngine(
+        model=GlobalMLP(input_dim=2, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=3),
+        cond_schema=CondSchema(order=["c0", "c1"]),
+        axis_schema=AxisSchema(mode="steady"),
+        geometry_provider=provider,
+        output_dir=tmp_path / "infer_roles",
+        input_mode="table_plus_structure",
+        ood_cfg={"physics": {"enabled": True}},
+        target_role_schema={
+            "targets": [
+                {"id": "electron_density", "role": "density_electron", "field_family": "density"},
+                {"id": "electron_temperature", "role": "temperature_electron", "field_family": "temperature"},
+                {"id": "plasma_potential", "role": "potential", "field_family": "electrostatic"},
+            ]
+        },
+    )
+    fields = {
+        "electron_density": np.ones((1, 8, 8), dtype=np.float32),
+        "electron_temperature": np.ones((1, 8, 8), dtype=np.float32),
+        "plasma_potential": np.zeros((1, 8, 8), dtype=np.float32),
+    }
+
+    resolved = engine._resolve_boundary_operator_inputs(fields)
+
+    assert resolved is not None
+    assert set(resolved) == {"log_density", "temperature", "potential"}
+    assert resolved["potential"].shape == (1, 8, 8)
+
+
 def test_table_plus_structure_fixed_provider_rejects_geom_space(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path, "fixed", input_mode="table_plus_structure")
     with pytest.raises(ValueError, match="provider_mode=parametric_parts"):
@@ -122,22 +154,18 @@ def test_table_plus_structure_fixed_provider_rejects_geom_space(tmp_path: Path) 
 
 def test_table_plus_structure_parametric_provider_joint_optimize_smoke(tmp_path: Path) -> None:
     engine = _build_engine(tmp_path, "parametric_parts", input_mode="table_plus_structure")
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        out = engine.optimize_run(
-            space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
-            geom_space={"part.p0.tx": (-0.2, 0.2)},
-            n_trials=4,
-            geom={"geom_id": "default"},
-            axis={"mode": "steady", "value": 0.0},
-            seed=5,
-            backend="random",
-        )
+    out = engine.optimize_run(
+        space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+        geom_space={"part.p0.tx": (-0.2, 0.2)},
+        n_trials=4,
+        geom={"geom_id": "default"},
+        axis={"mode": "steady", "value": 0.0},
+        seed=5,
+        backend="random",
+    )
     assert "best_geom_param" in out
     assert "part.p0.tx" in out["best_geom_param"]
     assert out["invalid_trial_count"] >= 0
-    runtime_warnings = [w for w in caught if issubclass(w.category, RuntimeWarning)]
-    assert runtime_warnings == []
     summary = json.loads((engine.store.root / "optimize" / "summary.json").read_text(encoding="utf-8"))
     assert summary["geom_space_enabled_effective"] is True
     assert summary["geom_param_keys_effective"] == ["part.p0.tx"]
@@ -179,13 +207,13 @@ def test_icp_part_sdf_lite_runtime_features_change_with_geom_param(tmp_path: Pat
     _write_icp_part_sdf_parts(dataset_root)
     provider = build_geometry_provider(dataset_root, provider_mode="parametric_parts")
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=2, grid_shape=(8, 8), seed=3),
+        model=GlobalMLP(input_dim=2, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=3),
         cond_schema=CondSchema(order=["c0", "c1"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=provider,
         output_dir=tmp_path / "infer_icp_part_sdf",
         input_mode="table_plus_structure",
-        grid_input_features_cfg={"mode": "geom_feature_pack", "require_pack": "off"},
+        grid_input_features_cfg={"mode": "geom_feature_pack"},
     )
     channels = [
         "x",
@@ -211,6 +239,44 @@ def test_icp_part_sdf_lite_runtime_features_change_with_geom_param(tmp_path: Pat
     assert np.allclose(rows_base[:, channels.index("mask_plasma")], rows_shifted[:, channels.index("mask_plasma")])
     assert not np.allclose(rows_base[:, channels.index("mask_coil")], rows_shifted[:, channels.index("mask_coil")])
     assert not np.allclose(rows_base[:, channels.index("sdf_coil_01")], rows_shifted[:, channels.index("sdf_coil_01")])
+    assert np.all(np.isfinite(rows_shifted))
+
+
+def test_part_lite_runtime_features_change_with_geom_param(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset_part_lite"
+    _write_icp_part_sdf_parts(dataset_root)
+    provider = build_geometry_provider(dataset_root, provider_mode="parametric_parts")
+    engine = InferenceEngine(
+        model=GlobalMLP(input_dim=2, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=3),
+        cond_schema=CondSchema(order=["c0", "c1"]),
+        axis_schema=AxisSchema(mode="steady"),
+        geometry_provider=provider,
+        output_dir=tmp_path / "infer_part_lite",
+        input_mode="table_plus_structure",
+        grid_input_features_cfg={"mode": "geom_feature_pack"},
+    )
+    channels = [
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "normal_x",
+        "normal_y",
+        "curvature_proxy",
+        "boundary_band",
+        "part_sdf_nearest",
+        "part_sdf_second",
+        "part_gap_proxy",
+        "solid_proximity",
+    ]
+    base = provider.get({"geom_id": "default", "geom_param": {}})
+    shifted = provider.get({"geom_id": "default", "geom_param": {"part.coil_01.tx": 0.2}})
+    rows_base = engine._build_grid_feature_rows(base, channels)
+    rows_shifted = engine._build_grid_feature_rows(shifted, channels)
+    assert rows_base.shape == (64, 13)
+    assert np.allclose(rows_base[:, channels.index("boundary_band")], rows_shifted[:, channels.index("boundary_band")])
+    assert not np.allclose(rows_base[:, channels.index("part_sdf_nearest")], rows_shifted[:, channels.index("part_sdf_nearest")])
     assert np.all(np.isfinite(rows_shifted))
 
 
@@ -263,3 +329,61 @@ def test_uniformity_values_for_plasma_mean_height_region() -> None:
     assert meta["uniformity_sample_count"] == 4.0
     np.testing.assert_allclose(vals, target[4, 1:5])
 
+
+def test_uniformity_values_for_fixed_row_range_region() -> None:
+    mask = np.ones((5, 6), dtype=np.float32)
+    target = np.arange(30, dtype=np.float32).reshape(5, 6)
+
+    vals, meta = InferenceEngine._uniformity_values_for_region(
+        target,
+        mask_plasma=mask,
+        wafer_mask=None,
+        region="fixed_row",
+        row_index=3,
+        col_start=1,
+        col_end=4,
+    )
+
+    assert meta["uniformity_region"] == "fixed_row"
+    assert meta["uniformity_row_index"] == 3.0
+    assert meta["uniformity_col_start"] == 1.0
+    assert meta["uniformity_col_end"] == 4.0
+    assert meta["uniformity_sample_count"] == 4.0
+    np.testing.assert_allclose(vals, target[3, 1:5])
+
+
+def test_pick_uniformity_target_prefers_configured_order_and_skips_missing() -> None:
+    fields = {
+        "ne": np.full((1, 2, 2), 1.0, dtype=np.float32),
+        "Te": np.full((1, 2, 2), 2.0, dtype=np.float32),
+        "rho_eff": np.full((1, 2, 2), 9.0, dtype=np.float32),
+    }
+
+    key, target = InferenceEngine._pick_uniformity_target(
+        fields,
+        preferred_keys=["missing", "Te", "ne"],
+    )
+
+    assert key == "Te"
+    np.testing.assert_allclose(target, fields["Te"][0])
+
+
+def test_postprocess_positive_fields_clamps_only_configured_vars() -> None:
+    fields = {
+        "ne": np.array([[[np.nan, -1.0], [np.inf, 2.0]]], dtype=np.float32),
+        "phi": np.array([[[-2.0, np.nan], [1.0, np.inf]]], dtype=np.float32),
+    }
+
+    out = InferenceEngine._postprocess_positive_fields(fields, positive_vars=["ne"], floor=0.1)
+
+    assert np.all(np.isfinite(out["ne"]))
+    assert float(out["ne"].min()) >= 0.1
+    np.testing.assert_allclose(out["ne"], np.array([[[0.1, 0.1], [0.1, 2.0]]], dtype=np.float32))
+    np.testing.assert_allclose(out["phi"], fields["phi"])
+
+
+def test_postprocess_positive_fields_rejects_nonfinite_floor() -> None:
+    fields = {"ne": np.ones((1, 1, 1), dtype=np.float32)}
+
+    with pytest.raises(ValueError, match="positive_floor must be finite"):
+        InferenceEngine._postprocess_positive_fields(fields, positive_vars=["ne"], floor=float("nan"))

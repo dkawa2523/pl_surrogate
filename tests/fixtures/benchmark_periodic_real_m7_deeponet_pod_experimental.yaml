@@ -1,4 +1,4 @@
-benchmark:
+﻿benchmark:
   output_dir: runs/periodic_real_tuned_v83/benchmark_m7_deeponet_pod_experimental
   profile: m7_deeponet_pod_experimental
   seed: 511
@@ -61,7 +61,7 @@ benchmark:
     distance_contract:
       require_negative_outside: error
     coord_grid_contract:
-      require_requested_source: warn
+      require_requested_source: error
     coord_grid_source: coord_grid
     coord_features:
       enabled: true

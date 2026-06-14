@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,10 +19,13 @@ from plasma_surrogate.core.input_modes import (
     STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
     TABLE_ONLY,
     TABLE_PLUS_STRUCTURE,
+    attach_runtime_schema_hashes,
     build_input_mode_effective_metadata,
+    build_runtime_schema_hashes,
     normalize_input_mode_cfg,
     validate_input_mode_cfg,
 )
+from plasma_surrogate.core.target_roles import build_target_role_schema
 from plasma_surrogate.data.geometry_context import build_signed_distance_fields
 from plasma_surrogate.data.geometry_provider import build_geometry_provider
 from plasma_surrogate.features.structure_feature_registry import (
@@ -48,6 +50,15 @@ from plasma_surrogate.preprocessing.split import (
     build_interpolation_overlap_split_with_status,
     build_interpolation_split,
 )
+from plasma_surrogate.train.spatial_features import (
+    ICP_PART_SDF_CHANNELS,
+    ICP_PART_SDF_LITE_CASE_CHANNELS,
+    ICP_STRUCT_CASE_CHANNELS,
+    ICP_STRUCT_STATIC_CHANNELS,
+    PART_SDF_SUMMARY_CHANNELS,
+    derive_geom_feature_maps,
+    part_sdf_summary_maps_from_stack,
+)
 
 
 def _resolve_y_vars(cases: list[dict[str, Any]]) -> list[str]:
@@ -68,36 +79,14 @@ def _coord_xy_maps(coord_grid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     raise ValueError(f"coord_grid must be (2,H,W) or (H,W,2), got {grid.shape}")
 
 
-def _derive_geometry_feature_maps(
-    *,
-    distance_signed: np.ndarray,
-) -> dict[str, np.ndarray]:
-    signed = np.asarray(distance_signed, dtype=np.float32)
-    gy, gx = np.gradient(signed, edge_order=1)
-    gnorm = np.sqrt(gx**2 + gy**2).astype(np.float32)
-    gnorm = np.where(gnorm < 1e-6, 1e-6, gnorm).astype(np.float32)
-    normal_x = (gx / gnorm).astype(np.float32)
-    normal_y = (gy / gnorm).astype(np.float32)
-    dnx_dy, dnx_dx = np.gradient(normal_x, edge_order=1)
-    dny_dy, dny_dx = np.gradient(normal_y, edge_order=1)
-    curvature_proxy = (dnx_dx + dny_dy).astype(np.float32)
-    return {
-        "normal_x": normal_x,
-        "normal_y": normal_y,
-        "curvature_proxy": curvature_proxy,
-    }
-
-
-ICP_STRUCT_STATIC_CHANNELS: tuple[str, ...] = (
-    "x",
-    "y",
-    "mask_plasma",
-    "distance_signed",
-    "distance_any",
+PART_LITE_STATIC_CHANNELS: tuple[str, ...] = (
+    *ICP_STRUCT_STATIC_CHANNELS,
+    "normal_x",
+    "normal_y",
+    "curvature_proxy",
+    "boundary_band",
 )
-ICP_STRUCT_CASE_CHANNELS: tuple[str, ...] = ("mask_coil", "distance_coil", "coil_proximity")
-ICP_PART_SDF_CHANNELS: tuple[str, ...] = tuple(f"sdf_coil_{i:02d}" for i in range(1, 7))
-ICP_PART_SDF_LITE_CASE_CHANNELS: tuple[str, ...] = (*ICP_STRUCT_CASE_CHANNELS, *ICP_PART_SDF_CHANNELS)
+PART_LITE_CASE_CHANNELS: tuple[str, ...] = PART_SDF_SUMMARY_CHANNELS
 
 
 def _is_mask_like_channel(name: str) -> bool:
@@ -108,7 +97,12 @@ def _is_mask_like_channel(name: str) -> bool:
     }
 
 
-def _load_case_structure_npz(case: dict[str, Any], *, shape: tuple[int, int]) -> dict[str, np.ndarray]:
+def _load_case_structure_npz(
+    case: dict[str, Any],
+    *,
+    shape: tuple[int, int],
+    require_mask_coil: bool = True,
+) -> dict[str, np.ndarray]:
     raw_path = case.get("structure_npz")
     if raw_path is None:
         raise ValueError(
@@ -120,9 +114,15 @@ def _load_case_structure_npz(case: dict[str, Any], *, shape: tuple[int, int]) ->
         raise FileNotFoundError(f"structure npz not found for case={case.get('case_id')}: {path}")
     out: dict[str, np.ndarray] = {}
     with np.load(path, allow_pickle=True) as data:
-        for key in ("mask_plasma", "mask_coil", "valid_field_mask", "outside_mask"):
+        required_keys = ["mask_plasma", "valid_field_mask", "outside_mask"]
+        if require_mask_coil:
+            required_keys.append("mask_coil")
+        for key in required_keys:
             if key not in data.files:
                 raise ValueError(f"structure npz missing key={key!r} for case={case.get('case_id')}: {path}")
+        for key in ("mask_plasma", "mask_coil", "valid_field_mask", "outside_mask"):
+            if key not in data.files:
+                continue
             arr = np.asarray(data[key], dtype=np.float32)
             if arr.shape != shape:
                 raise ValueError(
@@ -132,6 +132,16 @@ def _load_case_structure_npz(case: dict[str, Any], *, shape: tuple[int, int]) ->
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"structure npz contains non-finite values for case={case.get('case_id')} key={key}")
             out[key] = (arr > 0.5).astype(np.float32)
+        if "part_mask_stack" in data.files:
+            stack = np.asarray(data["part_mask_stack"], dtype=np.float32)
+            if stack.ndim != 3 or tuple(stack.shape[1:]) != shape:
+                raise ValueError(
+                    f"structure npz shape mismatch for case={case.get('case_id')} key=part_mask_stack: "
+                    f"expected=[P,{shape[0]},{shape[1]}], got={stack.shape}"
+                )
+            if not np.all(np.isfinite(stack)):
+                raise ValueError(f"structure npz contains non-finite values for case={case.get('case_id')} key=part_mask_stack")
+            out["part_mask_stack"] = (stack > 0.5).astype(np.float32)
         for key in ICP_PART_SDF_CHANNELS:
             if key not in data.files:
                 continue
@@ -165,18 +175,32 @@ def _build_compact_case_spatial_feature_pack(
     coil_proximity_percentile: float,
 ) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
     shape = tuple(int(v) for v in np.asarray(coord_x, dtype=np.float32).shape)
+    coord_xy = np.stack(
+        [
+            np.asarray(coord_x, dtype=np.float32).reshape(-1),
+            np.asarray(coord_y, dtype=np.float32).reshape(-1),
+        ],
+        axis=1,
+    ).astype(np.float32)
     struct_channels = [*ICP_STRUCT_STATIC_CHANNELS, *ICP_STRUCT_CASE_CHANNELS]
     part_sdf_channels = [*ICP_STRUCT_STATIC_CHANNELS, *ICP_PART_SDF_LITE_CASE_CHANNELS]
+    part_lite_channels = [*PART_LITE_STATIC_CHANNELS, *PART_LITE_CASE_CHANNELS]
     if list(channels) == struct_channels:
+        static_channels = ICP_STRUCT_STATIC_CHANNELS
         case_channels = ICP_STRUCT_CASE_CHANNELS
         feature_profile = "icp_struct_spatial_v1"
     elif list(channels) == part_sdf_channels:
+        static_channels = ICP_STRUCT_STATIC_CHANNELS
         case_channels = ICP_PART_SDF_LITE_CASE_CHANNELS
         feature_profile = "icp_part_sdf_lite_v1"
+    elif list(channels) == part_lite_channels:
+        static_channels = PART_LITE_STATIC_CHANNELS
+        case_channels = PART_LITE_CASE_CHANNELS
+        feature_profile = "part_lite_v1"
     else:
         raise ValueError(
-            "compact ICP structure packs expect channels="
-            f"{struct_channels} or {part_sdf_channels}; got={list(channels)}"
+            "compact structure packs expect channels="
+            f"{struct_channels}, {part_sdf_channels}, or {part_lite_channels}; got={list(channels)}"
         )
 
     static_map: dict[str, np.ndarray] | None = None
@@ -184,37 +208,46 @@ def _build_compact_case_spatial_feature_pack(
     train_distance_coil_values: list[np.ndarray] = []
     train_set = set(int(v) for v in np.asarray(train_indices, dtype=np.int64).reshape(-1).tolist())
     for idx, case in enumerate(cases):
-        structure = _load_case_structure_npz(case, shape=shape)
+        uses_coil_channels = any(name in set(case_channels) for name in ICP_STRUCT_CASE_CHANNELS)
+        structure = _load_case_structure_npz(case, shape=shape, require_mask_coil=uses_coil_channels)
         mask_plasma = structure["mask_plasma"]
         distance_signed = build_signed_distance_fields(mask_plasma).astype(np.float32)
         distance_any = np.abs(distance_signed).astype(np.float32)
-        distance_coil = _distance_to_mask(structure["mask_coil"]).astype(np.float32)
 
         current_static = {
-            "x": np.asarray(coord_x, dtype=np.float32),
-            "y": np.asarray(coord_y, dtype=np.float32),
-            "mask_plasma": mask_plasma,
-            "distance_signed": distance_signed,
-            "distance_any": distance_any,
+            name: np.asarray(arr, dtype=np.float32).reshape(shape)
+            for name, arr in derive_geom_feature_maps(
+                coord_xy=coord_xy,
+                distance_signed=distance_signed.reshape(-1),
+                distance_any=distance_any.reshape(-1),
+                mask_plasma=mask_plasma.reshape(-1),
+                h=shape[0],
+                w=shape[1],
+            ).items()
         }
         if static_map is None:
-            static_map = {name: np.asarray(value, dtype=np.float32) for name, value in current_static.items()}
+            static_map = {name: np.asarray(current_static[name], dtype=np.float32) for name in static_channels}
         else:
             changed = [
                 name
-                for name, value in current_static.items()
-                if not np.array_equal(np.asarray(value, dtype=np.float32), static_map[name])
+                for name in static_channels
+                if not np.array_equal(np.asarray(current_static[name], dtype=np.float32), static_map[name])
             ]
             if changed:
                 raise ValueError(
-                    "icp_struct_spatial_v1 compact packs require fixed plasma/coordinate structure; "
+                    f"{feature_profile} compact packs require fixed static geometry features; "
                     f"case={case.get('case_id')} changed={changed}"
                 )
 
-        fmap = {
-            "mask_coil": structure["mask_coil"],
-            "distance_coil": distance_coil,
-        }
+        fmap: dict[str, np.ndarray] = {}
+        if uses_coil_channels:
+            distance_coil = _distance_to_mask(structure["mask_coil"]).astype(np.float32)
+            fmap.update(
+                {
+                    "mask_coil": structure["mask_coil"],
+                    "distance_coil": distance_coil,
+                }
+            )
         for name in ICP_PART_SDF_CHANNELS:
             if name in case_channels:
                 if name not in structure:
@@ -223,25 +256,34 @@ def _build_compact_case_spatial_feature_pack(
                         f"for case={case.get('case_id')}"
                     )
                 fmap[name] = structure[name]
+        if feature_profile == "part_lite_v1":
+            if "part_mask_stack" not in structure:
+                raise ValueError(
+                    f"{feature_profile} requires structure npz key='part_mask_stack' "
+                    f"for case={case.get('case_id')}"
+                )
+            fmap.update(part_sdf_summary_maps_from_stack(structure["part_mask_stack"]))
         case_maps.append(fmap)
-        if idx in train_set:
+        if uses_coil_channels and idx in train_set:
             sel = mask_plasma > 0.5
             vals = distance_coil[sel] if np.any(sel) else distance_coil.reshape(-1)
             train_distance_coil_values.append(np.asarray(vals, dtype=np.float32).reshape(-1))
-    if train_distance_coil_values:
-        coil_values = np.concatenate(train_distance_coil_values, axis=0)
-    else:
-        coil_values = np.concatenate([m["distance_coil"].reshape(-1) for m in case_maps], axis=0)
-    coil_values = coil_values[np.isfinite(coil_values)]
-    if coil_values.size == 0:
-        coil_values = np.asarray([float(max(shape))], dtype=np.float32)
-    coil_tau = float(max(np.percentile(coil_values, float(coil_proximity_percentile)), 1.0e-3))
-    for fmap in case_maps:
-        fmap["coil_proximity"] = np.exp(-np.maximum(fmap["distance_coil"], 0.0) / coil_tau).astype(np.float32)
+    coil_tau: float | None = None
+    if "coil_proximity" in set(case_channels):
+        if train_distance_coil_values:
+            coil_values = np.concatenate(train_distance_coil_values, axis=0)
+        else:
+            coil_values = np.concatenate([m["distance_coil"].reshape(-1) for m in case_maps], axis=0)
+        coil_values = coil_values[np.isfinite(coil_values)]
+        if coil_values.size == 0:
+            coil_values = np.asarray([float(max(shape))], dtype=np.float32)
+        coil_tau = float(max(np.percentile(coil_values, float(coil_proximity_percentile)), 1.0e-3))
+        for fmap in case_maps:
+            fmap["coil_proximity"] = np.exp(-np.maximum(fmap["distance_coil"], 0.0) / coil_tau).astype(np.float32)
     if static_map is None:
         raise ValueError("cannot build compact spatial pack from empty cases")
     static_data = np.stack(
-        [np.asarray(static_map[name], dtype=np.float32) for name in ICP_STRUCT_STATIC_CHANNELS],
+        [np.asarray(static_map[name], dtype=np.float32) for name in static_channels],
         axis=0,
     ).astype(np.float32)
     case_data = np.stack(
@@ -251,17 +293,18 @@ def _build_compact_case_spatial_feature_pack(
     if not np.all(np.isfinite(static_data)) or not np.all(np.isfinite(case_data)):
         raise ValueError("compact case spatial feature packs contain non-finite values")
     meta = {
-        "coil_proximity_tau": coil_tau,
         "case_ids": [str(c["case_id"]) for c in cases],
         "feature_profile": feature_profile,
         "logical_channels": list(channels),
-        "static_channels": list(ICP_STRUCT_STATIC_CHANNELS),
+        "static_channels": list(static_channels),
         "case_channels": list(case_channels),
         "static_shape": [int(v) for v in static_data.shape],
         "case_shape": [int(v) for v in case_data.shape],
         "logical_shape": [int(len(cases)), int(len(channels)), int(shape[0]), int(shape[1])],
         "storage": "split_static_case",
     }
+    if coil_tau is not None:
+        meta["coil_proximity_tau"] = coil_tau
     return static_data, case_data, meta
 
 
@@ -454,7 +497,12 @@ class PreprocessRunner:
         )
         return list(validate_coord_feature_channels(coord_feature_channels_raw))
 
-    def run(self, cases: list[dict[str, Any]], geometry_root: str | Path) -> PreprocessOutput:
+    def run(
+        self,
+        cases: list[dict[str, Any]],
+        geometry_root: str | Path,
+        target_metadata: list[dict[str, Any]] | None = None,
+    ) -> PreprocessOutput:
         split_cfg = self.cfg.get("split", {})
         ratios = split_cfg.get("ratios", [0.7, 0.15, 0.15])
         split_groups = [str(c.get("split_group", c["case_id"])) for c in cases]
@@ -501,15 +549,9 @@ class PreprocessRunner:
         split_interp_overlap = dict(split_interp_overlap_status["split"])
         overlap_feasible = bool(split_interp_overlap_status.get("feasible", True))
         overlap_reason = str(split_interp_overlap_status.get("reason", ""))
-        fallback_applied = bool(interp_mode == "overlap" and (not overlap_feasible))
-        split_interp = split_interp_overlap if (interp_mode == "overlap" and overlap_feasible) else split_interp_marginal
-        interp_status = {
-            "requested_mode": interp_mode,
-            "applied_mode": "marginal" if fallback_applied else interp_mode,
-            "feasible": overlap_feasible,
-            "reason": overlap_reason,
-            "fallback_applied": fallback_applied,
-        }
+        if interp_mode == "overlap" and not overlap_feasible:
+            raise ValueError(f"split.interp_mode=overlap is not feasible: {overlap_reason or 'unknown'}")
+        split_interp = split_interp_overlap if interp_mode == "overlap" else split_interp_marginal
         split_extrap_v1 = build_extrapolation_split(
             [c["case_id"] for c in cases],
             cond_values=cond_by_case,
@@ -527,18 +569,18 @@ class PreprocessRunner:
 
         y_vars = _resolve_y_vars(cases)
         y_by_var = {var: np.stack([np.asarray(c["y"][var], dtype=np.float32) for c in cases], axis=0) for var in y_vars}
-        coord_grid_source = str(self.cfg.get("coord_grid_source", "coord_grid"))
+        coord_grid_source = str(self.cfg.get("coord_grid_source", "normalized"))
         distance_contract_cfg = dict(self.cfg.get("distance_contract", {}))
-        distance_contract_mode = str(distance_contract_cfg.get("require_negative_outside", "warn")).strip().lower()
-        if distance_contract_mode not in {"warn", "error", "off"}:
+        distance_contract_mode = str(distance_contract_cfg.get("require_negative_outside", "error")).strip().lower()
+        if distance_contract_mode not in {"error", "off"}:
             raise ValueError(
-                "preprocessing.distance_contract.require_negative_outside must be one of: warn, error, off"
+                "preprocessing.distance_contract.require_negative_outside must be one of: error, off"
             )
         coord_contract_cfg = dict(self.cfg.get("coord_grid_contract", {}))
-        coord_contract_mode = str(coord_contract_cfg.get("require_requested_source", "warn")).strip().lower()
-        if coord_contract_mode not in {"warn", "error", "off"}:
+        coord_contract_mode = str(coord_contract_cfg.get("require_requested_source", "error")).strip().lower()
+        if coord_contract_mode not in {"error", "off"}:
             raise ValueError(
-                "preprocessing.coord_grid_contract.require_requested_source must be one of: warn, error, off"
+                "preprocessing.coord_grid_contract.require_requested_source must be one of: error, off"
             )
         provider_mode = str(
             self.runtime_input_mode_meta.get(
@@ -607,10 +649,7 @@ class PreprocessRunner:
         if len(target_transforms_cfg) == 0:
             raise ValueError(
                 "preprocessing.scalers.target_transforms is required. "
-                "Define per-var config: value_transform/scaler/fit_scope/clip for each target var. "
-                "For deeponet_pod benchmark runs, define "
-                "tests/fixtures/benchmark_periodic_real_m7_deeponet_pod_experimental.yaml "
-                "preprocessing.scalers.target_transforms.<var>."
+                "Define per-var config: value_transform/scaler/fit_scope/clip for each target var."
             )
         missing_transform_vars = [name for name in y_vars if name not in target_transforms_cfg]
         if missing_transform_vars:
@@ -618,12 +657,16 @@ class PreprocessRunner:
                 "preprocessing.scalers.target_transforms is incomplete. "
                 f"Missing vars: {missing_transform_vars}"
             )
+        cond_scaler_type = str(scaler_cfg.get("cond") or "zscore")
+        y_scaler_type = str(scaler_cfg.get("target") or "zscore")
         transforms = fit_scalers_train_only(
             cond_matrix,
             y_by_var,
             train_indices,
             mask_plasma=geom.mask_plasma,
             scaler_fit_policy=y_fit_policy,
+            cond_scaler_type=cond_scaler_type,
+            y_scaler_type=y_scaler_type,
             target_transforms=target_transforms_cfg,
         )
 
@@ -641,7 +684,6 @@ class PreprocessRunner:
         self.store.save_json("split/split_interp_marginal_v1.json", split_interp_marginal)
         self.store.save_json("split/split_interp_overlap_v1.json", split_interp_overlap)
         self.store.save_json("split/split_interp_v1.json", split_interp)
-        self.store.save_json("split/split_interp_status_v1.json", interp_status)
         self.store.save_json("split/split_pressure_extrap_v1.json", split_extrap)
         self.store.save_json("split/split_extrap_v1.json", split_extrap_v1)
         self.store.save_json("split/split_structure_holdout_v1.json", split_structure_holdout)
@@ -672,12 +714,17 @@ class PreprocessRunner:
                     ]
                 }
             )
-        self.store.save_json("schema/channel_map.json", channel_map.to_dict())
+        channel_map_payload = channel_map.to_dict()
+        self.store.save_json("schema/channel_map.json", channel_map_payload)
         sample_shape = np.asarray(cases[0]["y"][y_vars[0]], dtype=np.float32).shape
-        self.store.save_json(
-            "schema/output_layout.json",
-            {"order": "C", "shape": [len(y_vars), int(sample_shape[0]), int(sample_shape[1])], "vars": y_vars},
-        )
+        output_layout_payload = {
+            "order": "C",
+            "shape": [len(y_vars), int(sample_shape[0]), int(sample_shape[1])],
+            "vars": y_vars,
+        }
+        target_role_schema_payload = build_target_role_schema(target_metadata, y_vars=y_vars)
+        self.store.save_json("schema/output_layout.json", output_layout_payload)
+        self.store.save_json("schema/target_role_schema.json", target_role_schema_payload)
         cond_scaler_payload = transforms.cond_scaler.to_dict()
         cond_scaler_payload["cond_dim"] = transforms.cond_dim
         cond_scaler_payload["fit_policy"] = transforms.fit_policy
@@ -816,26 +863,54 @@ class PreprocessRunner:
         coord_feature_channels = self._resolve_coord_feature_channels(coord_features_cfg)
         coord_feature_rel_path = str(coord_features_cfg.get("output", "features/coord_feature_pack.npz"))
         coord_x, coord_y = _coord_xy_maps(raw_coord_grid)
-        coord_feature_maps = {
-            "x": np.asarray(coord_x, dtype=np.float32),
-            "y": np.asarray(coord_y, dtype=np.float32),
-            "distance_signed": np.asarray(distance_signed, dtype=np.float32),
-            "distance_any": np.asarray(geom.distance_any, dtype=np.float32),
-            "mask_plasma": np.asarray(geom.mask_plasma, dtype=np.float32),
-        }
-        coord_feature_maps.update(_derive_geometry_feature_maps(distance_signed=distance_signed))
+        mask_plasma_map = np.asarray(geom.mask_plasma, dtype=np.float32)
+        geom_shape = tuple(int(v) for v in mask_plasma_map.shape)
+        regions = dict(getattr(geom, "regions", {}) or {})
+        runtime_feature_profile = self._resolve_runtime_feature_profile()
+        case_structure_available = any(case.get("structure_npz") is not None for case in cases)
         case_spatial_feature_enabled = bool(
             coord_features_enabled
             and self.input_mode_effective == TABLE_PLUS_STRUCTURE
-            and self._resolve_runtime_feature_profile() in {"icp_struct_spatial_v1", "icp_part_sdf_lite_v1"}
+            and (
+                runtime_feature_profile in {"icp_struct_spatial_v1", "icp_part_sdf_lite_v1"}
+                or (runtime_feature_profile == "part_lite_v1" and case_structure_available)
+            )
         )
+        part_stack = None
+        if (not case_spatial_feature_enabled) and any(name in PART_SDF_SUMMARY_CHANNELS for name in coord_feature_channels):
+            part_stack = regions.get("part_mask_stack")
+        coord_xy_flat = np.stack(
+            [
+                np.asarray(coord_x, dtype=np.float32).reshape(-1),
+                np.asarray(coord_y, dtype=np.float32).reshape(-1),
+            ],
+            axis=1,
+        ).astype(np.float32)
+        coord_feature_maps = {
+            name: np.asarray(arr, dtype=np.float32).reshape(geom_shape)
+            for name, arr in derive_geom_feature_maps(
+                coord_xy=coord_xy_flat,
+                distance_signed=np.asarray(distance_signed, dtype=np.float32).reshape(-1),
+                distance_any=np.asarray(geom.distance_any, dtype=np.float32).reshape(-1),
+                mask_plasma=mask_plasma_map.reshape(-1),
+                h=geom_shape[0],
+                w=geom_shape[1],
+                part_mask_stack=np.asarray(part_stack, dtype=np.float32) if part_stack is not None else None,
+            ).items()
+        }
+        if not case_spatial_feature_enabled:
+            missing_coord_feature_channels = [name for name in coord_feature_channels if name not in coord_feature_maps]
+            if missing_coord_feature_channels:
+                raise ValueError(
+                    "preprocessing.coord_features requested channels that are unavailable for the current geometry: "
+                    f"{missing_coord_feature_channels}"
+                )
         static_spatial_feature_rel_path = str(
             coord_features_cfg.get("static_output", "features/static_spatial_feature_pack.npz")
         )
         case_structure_feature_rel_path = str(
             coord_features_cfg.get("case_structure_output", "features/case_structure_feature_pack.npz")
         )
-        case_spatial_feature_rel_path = str(coord_features_cfg.get("case_output", ""))
         static_spatial_feature_meta_rel = ""
         case_structure_feature_meta_rel = ""
         case_spatial_feature_meta_rel = ""
@@ -845,6 +920,7 @@ class PreprocessRunner:
         static_spatial_feature_data: np.ndarray | None = None
         case_structure_feature_data: np.ndarray | None = None
         case_spatial_meta: dict[str, Any] = {}
+        coord_feature_pack_meta_payload: dict[str, Any] = {}
         compact_fit_mask = np.ones_like(coord_x, dtype=bool)
         if case_spatial_feature_enabled:
             static_spatial_feature_data, case_structure_feature_data, case_spatial_meta = (
@@ -857,9 +933,10 @@ class PreprocessRunner:
                     coil_proximity_percentile=proximity_pct,
                 )
             )
+            static_channels_effective = tuple(case_spatial_meta.get("static_channels", ICP_STRUCT_STATIC_CHANNELS))
             static_map = {
                 name: static_spatial_feature_data[i]
-                for i, name in enumerate(list(ICP_STRUCT_STATIC_CHANNELS))
+                for i, name in enumerate(list(static_channels_effective))
             }
             signed_static = static_map["distance_signed"]
             any_static = static_map["distance_any"]
@@ -892,10 +969,7 @@ class PreprocessRunner:
             if coord_features_scaling_fit_scope == "all":
                 compact_fit_mask = np.ones_like(compact_fit_mask, dtype=bool)
             if not np.any(compact_fit_mask):
-                compact_fit_mask = np.ones_like(compact_fit_mask, dtype=bool)
-                coord_feature_scalers_payload_fallback = True
-            else:
-                coord_feature_scalers_payload_fallback = False
+                raise ValueError("coord feature scaler fit mask is empty")
             case_spatial_meta["scaling"] = {
                 "enabled": bool(coord_features_scaling_enabled),
                 "mode": str(coord_features_scaling_mode),
@@ -905,8 +979,6 @@ class PreprocessRunner:
             case_spatial_feature_shape = list(case_spatial_meta["logical_shape"])
             static_spatial_feature_shape = list(case_spatial_meta["static_shape"])
             case_structure_feature_shape = list(case_spatial_meta["case_shape"])
-            if coord_feature_scalers_payload_fallback:
-                case_spatial_meta["fit_scope_fallback"] = "all_pixels"
         coord_feature_scalers_payload: dict[str, Any] = {
             "enabled": bool(coord_features_scaling_enabled),
             "mode": str(coord_features_scaling_mode),
@@ -923,10 +995,7 @@ class PreprocessRunner:
         if coord_features_scaling_fit_scope == "all":
             fit_mask = np.ones_like(fit_mask, dtype=bool)
         if not np.any(fit_mask):
-            fit_mask = np.ones_like(fit_mask, dtype=bool)
-            coord_feature_scalers_payload["fit_scope_fallback"] = "all_pixels"
-        if case_spatial_feature_enabled and case_spatial_meta.get("fit_scope_fallback"):
-            coord_feature_scalers_payload["fit_scope_fallback"] = str(case_spatial_meta["fit_scope_fallback"])
+            raise ValueError("coord feature scaler fit mask is empty")
         for i_channel, name in enumerate(coord_feature_channels):
             if case_spatial_feature_enabled:
                 if static_spatial_feature_data is None or case_structure_feature_data is None:
@@ -986,19 +1055,17 @@ class PreprocessRunner:
             self.store.save_npz(coord_feature_rel_path, data=coord_feature_data, channels=np.asarray(coord_feature_channels))
             pack_path = Path(coord_feature_rel_path)
             meta_rel = str(pack_path.parent / f"{pack_path.stem}_meta.json")
-            self.store.save_json(
-                meta_rel,
-                {
-                    "enabled": True,
-                    "channels": coord_feature_channels,
-                    "shape": [int(v) for v in coord_feature_data.shape],
-                    "coord_source": str(getattr(geom, "coord_source", "unknown")),
-                    "scaling": {
-                        "enabled": bool(coord_features_scaling_enabled),
-                        "mode": str(coord_features_scaling_mode),
-                    },
+            coord_feature_pack_meta_payload = {
+                "enabled": True,
+                "channels": coord_feature_channels,
+                "shape": [int(v) for v in coord_feature_data.shape],
+                "coord_source": str(getattr(geom, "coord_source", "unknown")),
+                "scaling": {
+                    "enabled": bool(coord_features_scaling_enabled),
+                    "mode": str(coord_features_scaling_mode),
                 },
-            )
+            }
+            self.store.save_json(meta_rel, coord_feature_pack_meta_payload)
         self.store.save_npz("sampling/patch_index/patches_train.npz", patches=patches)
         sample_ids = list(range(len(cases)))
         axis_values = [float(c.get("axis", 0.0)) for c in cases]
@@ -1009,7 +1076,6 @@ class PreprocessRunner:
         self.store.save_json("sampling/pairs/phase_wrap_pairs.json", {"pairs": phase_pairs})
         self.store.save_json("sampling/pairs/time_adj_pairs.json", {"pairs": time_pairs})
         deeponet_cfg = self.cfg.get("sampling", {}).get("deeponet", {})
-        deeponet_index_payload: dict[str, Any] = {}
         deeponet_index_meta: dict[str, Any] = {}
         deeponet_index_hash = ""
         deeponet_task_hashes: dict[str, str] = {}
@@ -1100,7 +1166,6 @@ class PreprocessRunner:
 
                 # Keep legacy single-task paths for backward compatibility.
                 if task_name == legacy_task:
-                    deeponet_index_payload = payload
                     deeponet_index_meta = meta
                     self.store.save_json("sampling/deeponet/sensor_query_index.json", payload)
                     self.store.save_json("sampling/deeponet/index_meta.json", meta)
@@ -1169,15 +1234,12 @@ class PreprocessRunner:
         if negative_ratio <= 0.0:
             distance_contract_status = "invalid_no_negative_outside"
             if distance_contract_mode == "error":
-                raise ValueError(
-                    "distance contract violation: outside signed-distance has no negative values. "
-                    "Set preprocessing.distance_contract.require_negative_outside=warn|off to proceed."
-                )
+                raise ValueError("distance contract violation: outside signed-distance has no negative values")
         coord_source_applied = str(getattr(geom, "coord_source", "unknown"))
         coord_source_requested = coord_grid_source
         coord_contract_status = "ok"
         if coord_source_applied != coord_source_requested:
-            coord_contract_status = "fallback_applied"
+            coord_contract_status = "mismatch"
             if coord_contract_mode == "error":
                 raise ValueError(
                     "coord-grid contract violation: requested source "
@@ -1204,6 +1266,24 @@ class PreprocessRunner:
             "latent_feature_dim": 0,
             DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: False,
         }
+        runtime_schema_hashes = build_runtime_schema_hashes(
+            {
+                "output_layout": output_layout_payload,
+                "target_role_schema": target_role_schema_payload,
+                "channel_map": channel_map_payload,
+                "coord_feature_pack_meta": coord_feature_pack_meta_payload,
+                "static_spatial_feature_pack_meta": case_spatial_meta if case_spatial_feature_enabled else {},
+                "case_spatial_feature_pack_meta": {},
+                "case_structure_feature_pack_meta": case_spatial_meta if case_spatial_feature_enabled else {},
+                "structure_descriptor_pack_meta": {},
+                "latent_feature_pack_meta": {},
+            }
+        )
+        self.runtime_input_mode_meta = attach_runtime_schema_hashes(
+            self.runtime_input_mode_meta,
+            schema_hashes=runtime_schema_hashes,
+        )
+        self.store.save_json("validation/runtime_schema_hashes.json", runtime_schema_hashes)
 
         report_payload = {
             "status": "ok",
@@ -1281,5 +1361,6 @@ class PreprocessRunner:
                 "split_hash": split_hash,
                 "sampling_hash": sampling_hash,
                 "deeponet_index_hash": deeponet_index_hash,
+                **runtime_schema_hashes,
             },
         )

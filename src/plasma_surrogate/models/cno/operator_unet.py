@@ -97,7 +97,7 @@ class CNOOperatorUNet(_TorchGridFieldBaseline):
             input_feature_channels=input_feature_channels,
             backend=backend,
             cfg_prefix="train.cno_operator_unet",
-            default_output_keys=["ne", "ni", "Te", "phi"],
+            default_output_keys=[f"target_{i}" for i in range(int(out_channels))],
             impl_version="cno_operator_unet_v1",
             head_arch_version="operator_unet_v1",
         )

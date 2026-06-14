@@ -1,7 +1,5 @@
 runtime:
   input_mode: table_plus_structure
-  strict_input_mode: error
-  allow_mode_fallback: false
   structure:
     feature_profile: geom_v1_mainline
     descriptor_profile: none
@@ -13,8 +11,6 @@ benchmark:
   output_dir: runs/benchmark_dual_mode_table_plus_structure_deeponet_pod_smoke
   runtime:
     input_mode: table_plus_structure
-    strict_input_mode: error
-    allow_mode_fallback: false
     structure:
       feature_profile: geom_v1_mainline
       descriptor_profile: none

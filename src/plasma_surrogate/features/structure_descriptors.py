@@ -12,7 +12,8 @@ from plasma_surrogate.data.geometry_context import GeometryContext, build_signed
 
 STRUCT_DESC_V1 = "struct_desc_v1"
 STRUCT_DESC_V2 = "struct_desc_v2"
-STRUCTURE_DESCRIPTOR_PROFILES: tuple[str, ...] = (STRUCT_DESC_V1, STRUCT_DESC_V2)
+STRUCT_DESC_LITE_V1 = "struct_desc_lite_v1"
+STRUCTURE_DESCRIPTOR_PROFILES: tuple[str, ...] = (STRUCT_DESC_V1, STRUCT_DESC_V2, STRUCT_DESC_LITE_V1)
 
 _GLOBAL_FEATURE_NAMES: tuple[str, ...] = (
     "n_parts",
@@ -71,18 +72,18 @@ def _normalize_descriptor_profile_name(profile: Any) -> str:
     return name
 
 
-def _resolve_part_mask_stack(geom_ctx: GeometryContext) -> np.ndarray:
+def _resolve_part_mask_stack(geom_ctx: GeometryContext, *, profile: str) -> np.ndarray:
     regions = dict(getattr(geom_ctx, "regions", {}) or {})
     if "part_mask_stack" not in regions:
         raise ValueError(
-            "struct_desc_v1 requires GeometryContext.regions.part_mask_stack; "
+            f"{profile} requires GeometryContext.regions.part_mask_stack; "
             "descriptor lane is fail-fast when part masks are unavailable"
         )
     stack = np.asarray(regions["part_mask_stack"], dtype=np.float32)
     if stack.ndim != 3:
         raise ValueError(f"part_mask_stack must be [P,H,W], got shape={stack.shape}")
     if stack.shape[0] < 1:
-        raise ValueError("part_mask_stack must contain at least one part for struct_desc_v1")
+        raise ValueError(f"part_mask_stack must contain at least one part for {profile}")
     if not np.all(np.isfinite(stack)):
         raise ValueError("part_mask_stack must contain only finite values")
     h, w = np.asarray(geom_ctx.mask_plasma, dtype=np.float32).shape
@@ -180,7 +181,7 @@ def _build_struct_desc(
     total_area = float(max(int(h * w), 1))
     length_scale = float(max(int(h), int(w), 1))
     perimeter_scale = float(max(2 * (int(h) + int(w)), 1))
-    part_mask_stack = _resolve_part_mask_stack(geom_ctx)
+    part_mask_stack = _resolve_part_mask_stack(geom_ctx, profile=profile)
     n_parts = int(part_mask_stack.shape[0])
     union_solid = _resolve_union_solid(part_mask_stack, geom_ctx)
     x_map, y_map = _resolve_coord_maps(geom_ctx)
@@ -207,10 +208,19 @@ def _build_struct_desc(
     if normalize_lengths:
         mean_distance_to_plasma_boundary = float(mean_distance_to_plasma_boundary / length_scale)
 
+    lite_profile = profile == STRUCT_DESC_LITE_V1
     per_part_rows: list[list[float]] = []
     per_part_gap_values: list[float] = []
     for i in range(n_parts):
         mask_i = (part_mask_stack[i] > 0.5).astype(np.float32)
+        union_others = np.maximum.reduce(np.delete(part_mask_stack, i, axis=0), axis=0) if n_parts > 1 else np.zeros_like(mask_i)
+        min_gap_to_other = _min_gap_to_other_parts(mask_i, union_others)
+        if normalize_lengths:
+            min_gap_to_other = float(min_gap_to_other / length_scale)
+        per_part_gap_values.append(float(min_gap_to_other))
+        if lite_profile:
+            continue
+
         area = float(np.sum(mask_i, dtype=np.float32))
         area_frac = float(area / total_area)
         sel = mask_i > 0.5
@@ -229,14 +239,10 @@ def _build_struct_desc(
             min_gap_to_plasma = 0.0
         principal_angle = _principal_angle(mask_i, x_map, y_map)
         perimeter = _perimeter_proxy(mask_i)
-        union_others = np.maximum.reduce(np.delete(part_mask_stack, i, axis=0), axis=0) if n_parts > 1 else np.zeros_like(mask_i)
-        min_gap_to_other = _min_gap_to_other_parts(mask_i, union_others)
         if normalize_lengths:
             principal_angle = float(principal_angle / np.pi)
             perimeter = float(perimeter / perimeter_scale)
             min_gap_to_plasma = float(min_gap_to_plasma / length_scale)
-            min_gap_to_other = float(min_gap_to_other / length_scale)
-        per_part_gap_values.append(float(min_gap_to_other))
         per_part_rows.append(
             [
                 float(area_frac),
@@ -264,16 +270,20 @@ def _build_struct_desc(
         ],
         dtype=np.float32,
     )
-    part_vec = np.asarray(per_part_rows, dtype=np.float32).reshape(-1) if per_part_rows else np.zeros((0,), dtype=np.float32)
-    vec = np.concatenate([global_vec, part_vec], axis=0).astype(np.float32)
+    if lite_profile:
+        vec = global_vec.astype(np.float32)
+    else:
+        part_vec = np.asarray(per_part_rows, dtype=np.float32).reshape(-1) if per_part_rows else np.zeros((0,), dtype=np.float32)
+        vec = np.concatenate([global_vec, part_vec], axis=0).astype(np.float32)
     if vec.ndim != 1 or int(vec.shape[0]) < len(_GLOBAL_FEATURE_NAMES):
         raise RuntimeError(f"{profile} produced invalid descriptor shape")
     if not np.all(np.isfinite(vec)):
         raise ValueError(f"{profile} produced non-finite descriptor values")
     feature_names = list(_GLOBAL_FEATURE_NAMES)
-    for i in range(n_parts):
-        prefix = f"part_{i:03d}"
-        feature_names.extend(f"{prefix}.{name}" for name in _PART_FEATURE_NAMES)
+    if not lite_profile:
+        for i in range(n_parts):
+            prefix = f"part_{i:03d}"
+            feature_names.extend(f"{prefix}.{name}" for name in _PART_FEATURE_NAMES)
     if len(feature_names) != int(vec.shape[0]):
         raise RuntimeError(
             f"{profile} feature-name length mismatch: "
@@ -295,20 +305,28 @@ def build_struct_desc_v2(geom_ctx: GeometryContext) -> StructureDescriptorPack:
     return _build_struct_desc(geom_ctx, profile=STRUCT_DESC_V2, normalize_lengths=True)
 
 
+def build_struct_desc_lite_v1(geom_ctx: GeometryContext) -> StructureDescriptorPack:
+    return _build_struct_desc(geom_ctx, profile=STRUCT_DESC_LITE_V1, normalize_lengths=True)
+
+
 def build_structure_descriptor(profile: Any, geom_ctx: GeometryContext) -> StructureDescriptorPack:
     profile_name = _normalize_descriptor_profile_name(profile)
     if profile_name == STRUCT_DESC_V1:
         return build_struct_desc_v1(geom_ctx)
     if profile_name == STRUCT_DESC_V2:
         return build_struct_desc_v2(geom_ctx)
+    if profile_name == STRUCT_DESC_LITE_V1:
+        return build_struct_desc_lite_v1(geom_ctx)
     raise ValueError(f"unsupported descriptor profile: {profile_name!r}")
 
 
 __all__ = [
     "STRUCT_DESC_V1",
     "STRUCT_DESC_V2",
+    "STRUCT_DESC_LITE_V1",
     "STRUCTURE_DESCRIPTOR_PROFILES",
     "StructureDescriptorPack",
+    "build_struct_desc_lite_v1",
     "build_struct_desc_v1",
     "build_struct_desc_v2",
     "build_structure_descriptor",

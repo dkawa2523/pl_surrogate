@@ -52,7 +52,7 @@ def test_resolve_effective_benchmark_cfg_prefers_benchmark_runtime() -> None:
 def test_benchmark_runtime_missing_everywhere_fails_fast(tmp_path: Path) -> None:
     with pytest.raises(
         ValueError,
-        match="runtime.input_mode=table_plus_structure requires runtime.structure.feature_profile",
+        match="runtime.structure.feature_profile",
     ):
         BenchmarkRunner({"benchmark": {"output_dir": str(tmp_path / "bench")}})
 
@@ -63,27 +63,5 @@ def test_resolve_effective_benchmark_cfg_conflict_strict_error_fails() -> None:
             {
                 "runtime": runtime_table_only(),
                 "benchmark": {"runtime": runtime_table_plus_structure()},
-            }
-        )
-
-
-def test_resolve_effective_benchmark_cfg_rejects_non_error_strict_mode() -> None:
-    with pytest.raises(ValueError, match="requires runtime.strict_input_mode='error'"):
-        resolve_effective_benchmark_cfg(
-            {
-                "benchmark": {
-                    "runtime": runtime_table_plus_structure(strict_input_mode="warn"),
-                },
-            }
-        )
-
-
-def test_resolve_effective_benchmark_cfg_rejects_allow_mode_fallback_true() -> None:
-    with pytest.raises(ValueError, match="forbids runtime.allow_mode_fallback=true"):
-        resolve_effective_benchmark_cfg(
-            {
-                "benchmark": {
-                    "runtime": runtime_table_plus_structure(allow_mode_fallback=True),
-                },
             }
         )

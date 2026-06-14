@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 from plasma_surrogate.cli.main import main
-from tests._config_presets import default_target_transforms_ne_ni_te_phi, runtime_table_only
+from tests._config_presets import default_target_transforms_four_field_example, runtime_table_only
 
 
 def test_train_with_boundary_operator_smoke(tmp_path: Path):
@@ -18,7 +18,7 @@ def test_train_with_boundary_operator_smoke(tmp_path: Path):
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 6},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
-            "scalers": {"target_transforms": default_target_transforms_ne_ni_te_phi()},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
         },
         "model": {"name": "global_mlp", "phi_mode": "direct"},
         "train": {
@@ -26,11 +26,13 @@ def test_train_with_boundary_operator_smoke(tmp_path: Path):
             "lr": 0.01,
             "physics": {
                 "enabled": True,
-                "lambda_poisson": 0.02,
-                "lambda_bc": 0.01,
+                "terms": {
+                    "poisson": {"weight": 0.02},
+                    "boundary": {"weight": 0.01},
+                    "boundary_operator": {"weight": 0.05},
+                },
                 "boundary_operator": {
                     "enabled": True,
-                    "lambda": 0.05,
                     "delta_edge": 1.5,
                     "target_coeffs": {"log_ne": 0.1, "Te": 0.05, "bias": 0.0},
                 },
@@ -72,7 +74,7 @@ def test_train_with_boundary_operator_external_stub_smoke(tmp_path: Path):
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 5},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
-            "scalers": {"target_transforms": default_target_transforms_ne_ni_te_phi()},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
         },
         "model": {"name": "global_mlp", "phi_mode": "direct"},
         "train": {
@@ -80,11 +82,13 @@ def test_train_with_boundary_operator_external_stub_smoke(tmp_path: Path):
             "lr": 0.01,
             "physics": {
                 "enabled": True,
-                "lambda_poisson": 0.01,
-                "lambda_bc": 0.01,
+                "terms": {
+                    "poisson": {"weight": 0.01},
+                    "boundary": {"weight": 0.01},
+                    "boundary_operator": {"weight": 0.05},
+                },
                 "boundary_operator": {
                     "enabled": True,
-                    "lambda": 0.05,
                     "delta_edge": 1.5,
                     "mode": "external_operator",
                     "external_operator": {

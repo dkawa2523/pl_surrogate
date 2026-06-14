@@ -11,7 +11,7 @@ from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 
 
 def test_optimize_runner_smoke(tmp_path: Path, geometry_root: Path):
-    model = GlobalMLP(input_dim=2, grid_shape=(8, 8), seed=2)
+    model = GlobalMLP(input_dim=2, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=2)
     engine = InferenceEngine(
         model=model,
         cond_schema=CondSchema(order=["c0", "c1"]),
@@ -28,11 +28,21 @@ def test_optimize_runner_smoke(tmp_path: Path, geometry_root: Path):
         axis={"mode": "steady", "value": 0.0},
         seed=3,
         backend="random",
+        output_cfg={"save_fields": "top_k", "top_k": 1},
     )
-    assert "best_value" in result
+    assert "best_objective_value" in result
+    assert "best_search_value" in result
+    assert "best_feasible" in result
     assert (tmp_path / "infer" / "optimize" / "best.json").exists()
     assert (tmp_path / "infer" / "optimize" / "summary.json").exists()
     with (tmp_path / "infer" / "optimize" / "summary.json").open("r", encoding="utf-8") as f:
         summary = json.load(f)
     assert summary["backend"] == "random"
     assert summary["objective_key"] == "uniformity"
+    assert summary["objective_mode"] == "weighted_sum"
+    assert "best_objective_value" in summary
+    assert "best_search_value" in summary
+    assert "best_feasible" in summary
+    assert summary["output"]["save_fields"] == "top_k"
+    single_dirs = list((tmp_path / "infer" / "single").glob("*"))
+    assert len(single_dirs) == 1

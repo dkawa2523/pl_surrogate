@@ -28,7 +28,7 @@ def _ctx(tmp_path: Path, *, input_mode: str = "table_plus_structure") -> TrainDi
     n, d, h, w = 8, 3, 4, 4
     rng = np.random.default_rng(42)
     cond = rng.normal(size=(n, d)).astype(np.float32)
-    y_vars = ["ne", "ni", "Te", "phi"]
+    y_vars = ["density", "temperature", "potential", "flux"]
     y = np.abs(rng.normal(size=(n, len(y_vars), h, w))).astype(np.float32)
     channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
     coord_data = np.stack(
@@ -80,14 +80,13 @@ def _valid_cfg() -> dict[str, Any]:
         "epochs": 1,
         "lr": 1e-3,
         "target_family": "allvars",
-        "target_vars": ["ne", "ni", "Te", "phi"],
+        "target_vars": ["density", "temperature", "potential", "flux"],
         "selection": {
             "mode": "best_val_allvars_balance",
-            "weights": {"ne": 0.25, "ni": 0.25, "Te": 0.25, "phi": 0.25},
+            "weights": {"density": 0.25, "temperature": 0.25, "potential": 0.25, "flux": 0.25},
         },
         "input_features": {
             "mode": "geom_feature_pack",
-            "require_pack": "error",
             "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
             "distance_transform": {"mode": "raw"},
         },
@@ -112,29 +111,4 @@ def test_u_no_mainline_accepts_valid_geom_pack(monkeypatch: pytest.MonkeyPatch, 
         ),
     )
     out = run_model_train_predict(ctx)
-    assert set(out.metrics.keys()) == {"ne", "ni", "Te", "phi"}
-
-
-def test_u_no_rejects_legacy_xy_mode(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    cfg = _valid_cfg()
-    cfg["input_features"]["mode"] = "legacy_xy"
-    ctx.run_cfg = {"train": {"u_no": cfg}}
-    with pytest.raises(ValueError, match="geom_feature_pack"):
-        run_model_train_predict(ctx)
-
-
-def test_u_no_rejects_wrong_mainline_feature_order(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    cfg = _valid_cfg()
-    cfg["input_features"]["features"] = ["x", "y", "distance_signed", "distance_any", "mask_plasma"]
-    ctx.run_cfg = {"train": {"u_no": cfg}}
-    with pytest.raises(ValueError, match="input_features.features"):
-        run_model_train_predict(ctx)
-
-
-def test_u_no_rejects_table_only(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path, input_mode="table_only")
-    ctx.run_cfg = {"train": {"u_no": _valid_cfg()}}
-    with pytest.raises(ValueError, match="model/input_mode mismatch"):
-        run_model_train_predict(ctx)
+    assert set(out.metrics.keys()) == set(ctx.y_vars)

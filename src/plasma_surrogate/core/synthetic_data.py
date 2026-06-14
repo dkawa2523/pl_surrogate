@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,42 @@ class SyntheticDataset:
     geometry_root: Path
     shape: tuple[int, int]
     structure_root: Path | None = None
+    target_metadata: list[dict[str, Any]] = field(default_factory=list)
+
+
+def synthetic_target_metadata() -> list[dict[str, Any]]:
+    """Metadata for the built-in synthetic compatibility fixture."""
+
+    return [
+        {
+            "id": "ne",
+            "role": "density_electron",
+            "positive": True,
+            "field_family": "density",
+            "default_region": "plasma_only",
+        },
+        {
+            "id": "ni",
+            "role": "density_ion",
+            "positive": True,
+            "field_family": "density",
+            "default_region": "plasma_only",
+        },
+        {
+            "id": "Te",
+            "role": "temperature_electron",
+            "positive": True,
+            "field_family": "temperature",
+            "default_region": "plasma_only",
+        },
+        {
+            "id": "phi",
+            "role": "potential",
+            "positive": False,
+            "field_family": "electrostatic",
+            "default_region": "all",
+        },
+    ]
 
 
 def build_synthetic_dataset(cfg: dict[str, Any], output_root: str | Path) -> SyntheticDataset:
@@ -85,4 +121,10 @@ def build_synthetic_dataset(cfg: dict[str, Any], output_root: str | Path) -> Syn
             }
         )
 
-    return SyntheticDataset(cases=cases, cond_order=cond_order, geometry_root=geom_root, shape=(h, w))
+    return SyntheticDataset(
+        cases=cases,
+        cond_order=cond_order,
+        geometry_root=geom_root,
+        shape=(h, w),
+        target_metadata=synthetic_target_metadata(),
+    )

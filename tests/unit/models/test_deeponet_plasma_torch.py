@@ -13,13 +13,18 @@ pytestmark = pytest.mark.torch_runtime
 def test_deeponet_plasma_torch_forward_shapes():
     require_torch_runtime()
     torch = require_torch()
-    model = DeepONetPlasmaOperatorTorch(cond_dim=5, grid_shape=(8, 8), output_keys=["log_ne", "Te", "phi"])
+    model = DeepONetPlasmaOperatorTorch(
+        cond_dim=5,
+        grid_shape=(8, 8),
+        output_keys=["density", "temperature", "potential"],
+    )
     cond = torch.rand((2, 5), dtype=torch.float32)
     x = torch.rand((2, 16, 2), dtype=torch.float32)
-    v = torch.rand((2, 16, 1), dtype=torch.float32)
-    out = model.forward(sensors={"x": x, "v": v}, query={"x": x}, cond=cond)
-    assert set(out.keys()) == {"log_ne", "Te", "phi"}
-    assert tuple(out["phi"].shape) == (2, 16, 1)
+    v = torch.rand((2, 16, 5), dtype=torch.float32)
+    f = torch.rand((2, 16, 3), dtype=torch.float32)
+    out = model.forward(sensors={"x": x, "v": v}, query={"x": x, "f": f}, cond=cond)
+    assert set(out.keys()) == {"density", "temperature", "potential"}
+    assert tuple(out["potential"].shape) == (2, 16, 1)
 
 
 def test_deeponet_plasma_torch_forward_geom_set_pool_shapes():
@@ -209,25 +214,6 @@ def test_deeponet_plasma_missing_query_features_policy_error_raises():
     x = torch.rand((2, 16, 2), dtype=torch.float32)
     with pytest.raises(ValueError, match="query.f"):
         model.forward(sensors={"x": None, "v": None}, query={"x": x}, cond=cond)
-
-
-def test_deeponet_plasma_missing_query_features_policy_warn_zero_runs():
-    require_torch_runtime()
-    torch = require_torch()
-    model = DeepONetPlasmaOperatorTorch(
-        cond_dim=5,
-        grid_shape=(8, 8),
-        output_keys=["ne", "ni", "Te", "phi"],
-        trunk_input_mode="geom_feature_pack",
-        branch_mode="cond_only",
-        missing_geom_feature_policy="warn_zero",
-    )
-    cond = torch.rand((2, 5), dtype=torch.float32)
-    x = torch.rand((2, 16, 2), dtype=torch.float32)
-    with pytest.warns(RuntimeWarning, match="query.f"):
-        out = model.forward(sensors={"x": None, "v": None}, query={"x": x}, cond=cond)
-    vals = torch.cat([out["ne"], out["ni"], out["Te"], out["phi"]], dim=2)
-    assert torch.isfinite(vals).all()
 
 
 def test_deeponet_plasma_missing_sensor_features_policy_error_raises():

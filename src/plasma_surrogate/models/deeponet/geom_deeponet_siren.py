@@ -191,8 +191,6 @@ class GeomDeepONetSIREN:
             grid_shape=self.grid_shape,
             spatial_feature_dim=self.spatial_feature_dim,
             label=type(self).__name__,
-            coord_grid=self.coord_grid,
-            allow_coord_fallback=bool(self.spatial_feature_dim == 2),
             explicit_requirement_message=(
                 f"{type(self).__name__} requires geom_feature_pack spatial features; "
                 "call set_static_spatial_features(...) or pass spatial_features to predict/forward"

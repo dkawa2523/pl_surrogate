@@ -49,6 +49,11 @@ def test_validate_model_input_mode_rejects_unsupported_pair() -> None:
         validate_model_input_mode("global_mlp", TABLE_PLUS_STRUCTURE)
 
 
+def test_resolve_supported_input_modes_rejects_unknown_model() -> None:
+    with pytest.raises(ValueError, match="Unsupported model"):
+        resolve_supported_input_modes("missing_model")
+
+
 def test_validate_adapter_mode_success_and_failure() -> None:
     assert ADAPTER_GRID_PACK in set(resolve_allowed_adapter_modes("ffno"))
     validate_adapter_mode("ffno", TABLE_PLUS_STRUCTURE, ADAPTER_GRID_PACK)

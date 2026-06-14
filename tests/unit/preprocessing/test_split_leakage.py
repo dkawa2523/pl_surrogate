@@ -113,7 +113,7 @@ def test_build_interpolation_overlap_split_guarantees_tuple_overlap_when_possibl
     assert len(split["test"]) > 0
 
 
-def test_build_interpolation_overlap_split_with_status_fallback_when_no_duplicates():
+def test_build_interpolation_overlap_split_with_status_reports_infeasible_when_no_duplicates():
     ids = [f"case_{i}" for i in range(9)]
     cond_values = {
         cid: {"c0": float(i // 3), "c1": float(i % 3)}

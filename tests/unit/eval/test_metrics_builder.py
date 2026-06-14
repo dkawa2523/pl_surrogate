@@ -10,10 +10,6 @@ from plasma_surrogate.eval.metrics_builder import (
     build_eval_metrics_payload,
     build_region_metrics,
     build_single_case_physics_metrics,
-    build_spatial_distribution_by_case_rows,
-    build_spatial_distribution_summary_rows,
-    build_spatial_error_by_case_rows,
-    build_spatial_error_summary_rows,
     build_viz_tables_payload,
 )
 
@@ -38,7 +34,7 @@ def test_build_single_case_physics_metrics_reads_maps(tmp_path: Path):
 
 
 def test_build_region_metrics_and_benchmark_row():
-    ne = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
+    density = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float32)
     masks = {
         "plasma": np.array([[1, 1], [1, 1]], dtype=bool),
         "bulk": np.array([[1, 0], [0, 1]], dtype=bool),
@@ -46,7 +42,7 @@ def test_build_region_metrics_and_benchmark_row():
     }
     region = build_region_metrics(
         case_key="k1",
-        density=ne,
+        density=density,
         mask_plasma=masks["plasma"],
         mask_bulk=masks["bulk"],
         mask_boundary=masks["boundary"],
@@ -54,48 +50,58 @@ def test_build_region_metrics_and_benchmark_row():
     assert region["case_key"] == "k1"
     assert float(region["bulk_mean_density"]) == 2.5
 
-    pred_phi = np.zeros((2, 1, 4, 4), dtype=np.float32)
+    pred = np.zeros((2, 1, 4, 4), dtype=np.float32)
     row = build_benchmark_eval_row(
         model_id="global_mlp",
-        metrics={"ne": 0.1, "ni": 0.11, "Te": 0.2, "phi": 0.3},
-        r2_scores={"ne": 0.91, "ni": 0.89, "Te": 0.82, "phi": 0.73},
-        pred_eval={"phi": pred_phi, "ne": pred_phi + 1.0, "ni": pred_phi + 1.25, "Te": pred_phi + 2.0},
-        true_eval={"phi": pred_phi + 0.5, "ne": pred_phi + 1.5, "ni": pred_phi + 1.75, "Te": pred_phi + 2.5},
+        metrics={
+            "electron_density": 0.1,
+            "ion_density": 0.11,
+            "electron_temperature": 0.2,
+            "potential": 0.3,
+        },
+        r2_scores={
+            "electron_density": 0.91,
+            "ion_density": 0.89,
+            "electron_temperature": 0.82,
+            "potential": 0.73,
+        },
+        pred_eval={
+            "potential": pred,
+            "electron_density": pred + 1.0,
+            "ion_density": pred + 1.25,
+            "electron_temperature": pred + 2.0,
+        },
+        true_eval={
+            "potential": pred + 0.5,
+            "electron_density": pred + 1.5,
+            "ion_density": pred + 1.75,
+            "electron_temperature": pred + 2.5,
+        },
         mask_plasma=np.ones((4, 4), dtype=np.float32),
         single_qoi={"uniformity": 0.4, "boundary_gamma_uniformity": 0.5},
         single_diagnostics={"poisson_residual_norm": 0.6, "boundary_operator_proxy_loss": 0.7},
-        opt_best_uniformity=0.8,
-        aggregate_cfg={
-            "enabled": True,
-            "rmse_weight": 0.5,
-            "r2_weight": 0.4,
-            "boundary_penalty_weight": 0.1,
-            "use_plasma_metrics": True,
-        },
-        target_vars_for_score=["ne", "ni"],
+        target_vars_for_score=["electron_density", "ion_density"],
     )
     assert row["model_id"] == "global_mlp"
-    assert float(row["qoi_uniformity"]) == 0.4
-    assert float(row["opt_best_uniformity"]) == 0.8
-    assert float(row["test_r2_phi"]) == 0.73
-    assert "test_rmse_phi_plasma" in row
-    assert "test_r2_phi_plasma" in row
-    assert "score_total" in row
-    assert "score_nrmse_plasma_mean" in row
-    assert float(row["score_total"]) != 0.0
-    assert "test_r2_logpair_plasma_mean" not in row
-    assert "score_total_logpair" not in row
-    assert "test_rmse_ne_boundary_in" in row
-    assert "test_rmse_ni_boundary_in" in row
-    assert "test_r2_ne_plasma_deep" in row
-    assert "test_r2_ni_plasma_deep" in row
-    assert "test_neg_ratio_ne_plasma" in row
-    assert "test_neg_ratio_ni_plasma" in row
+    assert float(row["test_r2_potential"]) == 0.73
+    assert "test_rmse_potential_plasma" in row
+    assert "test_r2_potential_plasma" in row
+    assert "score_total" not in row
+    assert "test_rmse_electron_density_boundary_in" in row
+    assert "test_rmse_ion_density_boundary_in" in row
+    assert "test_r2_electron_density_plasma_deep" in row
+    assert "test_r2_ion_density_plasma_deep" in row
+    assert "test_neg_ratio_electron_density_plasma" in row
+    assert "test_neg_ratio_ion_density_plasma" in row
     assert "continuity_grad_ratio_all_plasma" in row
     assert "continuity_lap_ratio_all_plasma" in row
+    assert "surrogate_quality_score" in row
+    assert np.isfinite(float(row["surrogate_quality_score"]))
+    assert "score_nrmse_component" in row
+    assert "test_r2_potential" in row
 
 
-def test_aggregate_score_uses_unitless_normalized_rmse():
+def test_quality_score_uses_unitless_normalized_rmse():
     mask = np.ones((2, 2), dtype=np.float32)
     true_small = np.array([[[[0.0, 2.0], [0.0, 2.0]]]], dtype=np.float32)
     pred_small = true_small + 1.0
@@ -110,20 +116,11 @@ def test_aggregate_score_uses_unitless_normalized_rmse():
         mask_plasma=mask,
         single_qoi={"uniformity": 0.0, "boundary_gamma_uniformity": 0.0},
         single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
-        opt_best_uniformity=0.0,
-        aggregate_cfg={
-            "enabled": True,
-            "rmse_weight": 1.0,
-            "r2_weight": 0.0,
-            "boundary_penalty_weight": 0.0,
-            "use_plasma_metrics": True,
-        },
         target_vars_for_score=["small", "large"],
     )
 
-    assert float(row["score_rmse_plasma_mean"]) > 100.0
-    assert np.isclose(float(row["score_nrmse_plasma_mean"]), 1.0)
-    assert np.isclose(float(row["score_total"]), 1.0)
+    assert np.isclose(float(row["mean_nrmse_plasma_by_target"]), 1.0)
+    assert np.isclose(float(row["score_nrmse_component"]), 1.0)
 
 
 def test_build_benchmark_eval_row_supports_dynamic_target_names():
@@ -137,13 +134,78 @@ def test_build_benchmark_eval_row_supports_dynamic_target_names():
         mask_plasma=np.ones((4, 4), dtype=np.float32),
         single_qoi={"uniformity": 0.1, "boundary_gamma_uniformity": 0.0},
         single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
-        opt_best_uniformity=0.0,
         target_vars_for_score=["density_main", "temp_main"],
-        aggregate_cfg={"enabled": True, "use_plasma_metrics": True},
     )
     assert "test_rmse_density_main" in row
     assert "test_r2_density_main_plasma" in row
     assert "test_rmse_temp_main_plasma_deep" in row
+
+
+def test_surrogate_quality_score_increases_for_worse_prediction():
+    mask = np.ones((4, 4), dtype=np.float32)
+    yy, xx = np.meshgrid(np.arange(4, dtype=np.float32), np.arange(4, dtype=np.float32), indexing="ij")
+    true = (xx * xx + yy * yy + 1.0).reshape(1, 1, 4, 4)
+    pred_good = true + 0.1
+    pred_bad = true + 1.0
+
+    good = build_benchmark_eval_row(
+        model_id="good",
+        metrics={"electron_density": 0.0},
+        r2_scores={"electron_density": 1.0},
+        pred_eval={"electron_density": pred_good},
+        true_eval={"electron_density": true},
+        mask_plasma=mask,
+        single_qoi={"uniformity": 0.0, "boundary_gamma_uniformity": 0.0},
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["electron_density"],
+    )
+    bad = build_benchmark_eval_row(
+        model_id="bad",
+        metrics={"electron_density": 0.0},
+        r2_scores={"electron_density": 0.0},
+        pred_eval={"electron_density": pred_bad},
+        true_eval={"electron_density": true},
+        mask_plasma=mask,
+        single_qoi={"uniformity": 0.0, "boundary_gamma_uniformity": 0.0},
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["electron_density"],
+    )
+
+    assert np.isfinite(float(good["surrogate_quality_score"]))
+    assert np.isfinite(float(bad["surrogate_quality_score"]))
+    assert float(bad["surrogate_quality_score"]) > float(good["surrogate_quality_score"])
+
+
+def test_surrogate_quality_score_uses_positive_role_sign_penalty():
+    mask = np.ones((4, 4), dtype=np.float32)
+    true = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4) + 1.0
+    pred = true.copy()
+    pred[:, :, :2, :] = -1.0
+    base_kwargs = {
+        "model_id": "sign",
+        "metrics": {"electron_density": 0.0},
+        "r2_scores": {"electron_density": 0.0},
+        "pred_eval": {"electron_density": pred},
+        "true_eval": {"electron_density": true},
+        "mask_plasma": mask,
+        "single_qoi": {"uniformity": 0.0, "boundary_gamma_uniformity": 0.0},
+        "single_diagnostics": {"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        "target_vars_for_score": ["electron_density"],
+    }
+
+    no_schema = build_benchmark_eval_row(**base_kwargs)
+    with_schema = build_benchmark_eval_row(
+        **base_kwargs,
+        target_role_schema={
+            "positive_targets": ["electron_density"],
+            "targets": [{"id": "electron_density", "role": "density_electron", "positive": True}],
+        },
+    )
+
+    assert float(no_schema["score_sign_component"]) == 0.0
+    assert float(no_schema["positive_target_negative_ratio_penalty"]) == 0.0
+    assert float(with_schema["score_sign_component"]) > 0.0
+    assert float(with_schema["surrogate_quality_score"]) > float(no_schema["surrogate_quality_score"])
 
 
 def test_build_benchmark_eval_row_adds_sdf_boundary_deep_contrast():
@@ -152,43 +214,42 @@ def test_build_benchmark_eval_row_adds_sdf_boundary_deep_contrast():
         dtype=np.float32,
     )
     mask_plasma = (distance_signed >= 0.0).astype(np.float32)
-    true_te = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
-    pred_te = true_te.copy()
+    true_temperature = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+    pred_temperature = true_temperature.copy()
     boundary = np.logical_and(mask_plasma > 0.5, distance_signed <= 2.0)
     deep = np.logical_and(mask_plasma > 0.5, distance_signed > 10.0)
-    pred_te[:, :, boundary] += 2.0
-    pred_te[:, :, deep] += 1.0
+    pred_temperature[:, :, boundary] += 2.0
+    pred_temperature[:, :, deep] += 1.0
 
     row = build_benchmark_eval_row(
         model_id="fno",
-        metrics={"Te": 0.0},
-        r2_scores={"Te": 1.0},
-        pred_eval={"Te": pred_te},
-        true_eval={"Te": true_te},
+        metrics={"temperature": 0.0},
+        r2_scores={"temperature": 1.0},
+        pred_eval={"temperature": pred_temperature},
+        true_eval={"temperature": true_temperature},
         mask_plasma=mask_plasma,
         distance_signed=distance_signed,
         single_qoi={"uniformity": 0.0, "boundary_gamma_uniformity": 0.0},
         single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
-        opt_best_uniformity=0.0,
-        target_vars_for_score=["Te"],
+        target_vars_for_score=["temperature"],
     )
 
-    assert np.isclose(float(row["test_rmse_Te_boundary_to_deep_ratio"]), 2.0)
+    assert np.isclose(float(row["test_rmse_temperature_boundary_to_deep_ratio"]), 2.0)
     assert np.isclose(float(row["sdf_boundary_to_deep_rmse_ratio_mean"]), 2.0)
-    assert "test_r2_Te_boundary_minus_deep" in row
+    assert "test_r2_temperature_boundary_minus_deep" in row
     assert "sdf_boundary_minus_deep_r2_mean" in row
 
 
 def test_build_eval_and_viz_payload_helpers():
     true_eval = {
-        "ne": np.zeros((2, 1, 3, 3), dtype=np.float32),
-        "Te": np.zeros((2, 1, 3, 3), dtype=np.float32),
-        "phi": np.zeros((2, 1, 3, 3), dtype=np.float32),
+        "density": np.zeros((2, 1, 3, 3), dtype=np.float32),
+        "temperature": np.zeros((2, 1, 3, 3), dtype=np.float32),
+        "potential": np.zeros((2, 1, 3, 3), dtype=np.float32),
     }
     pred_eval = {
-        "ne": np.ones((2, 1, 3, 3), dtype=np.float32),
-        "Te": np.ones((2, 1, 3, 3), dtype=np.float32),
-        "phi": np.ones((2, 1, 3, 3), dtype=np.float32),
+        "density": np.ones((2, 1, 3, 3), dtype=np.float32),
+        "temperature": np.ones((2, 1, 3, 3), dtype=np.float32),
+        "potential": np.ones((2, 1, 3, 3), dtype=np.float32),
     }
     payload = build_eval_metrics_payload(true_eval=true_eval, pred_eval=pred_eval, eps=None)
     assert "rmse" in payload
@@ -201,8 +262,6 @@ def test_build_eval_and_viz_payload_helpers():
     )
     assert "rmse_plasma" in payload_masked
     assert "r2_plasma" in payload_masked
-    assert "phi_poisson_residual" in payload["rmse"]
-    assert "phi_poisson_residual_norm" in payload["rmse"]
 
     tables = build_viz_tables_payload(
         diag_rows=[{"case_key": "a", "poisson_residual_norm": 1.0}],
@@ -210,151 +269,3 @@ def test_build_eval_and_viz_payload_helpers():
     )
     assert "diag_header" in tables and "diag_rows" in tables
     assert "region_header" in tables and "region_rows" in tables
-
-
-def test_build_spatial_error_summary_rows_has_regions():
-    true_eval = {
-        "Te": np.ones((2, 1, 4, 4), dtype=np.float32),
-        "phi": np.ones((2, 1, 4, 4), dtype=np.float32) * 2.0,
-    }
-    pred_eval = {
-        "Te": np.zeros((2, 1, 4, 4), dtype=np.float32),
-        "phi": np.zeros((2, 1, 4, 4), dtype=np.float32),
-    }
-    distance_signed = np.array(
-        [[-3.0, -1.0, 0.0, 1.0], [2.0, 5.0, 11.0, 20.0], [-12.0, -1.5, 0.5, 9.0], [3.0, 12.0, 25.0, -20.0]],
-        dtype=np.float32,
-    )
-    mask_plasma = (distance_signed >= 0.0).astype(np.float32)
-    rows = build_spatial_error_summary_rows(
-        pred_eval=pred_eval,
-        true_eval=true_eval,
-        mask_plasma=mask_plasma,
-        distance_signed=distance_signed,
-        vars_for_summary=["Te", "phi"],
-    )
-    assert len(rows) > 0
-    regions = {(str(r["var"]), str(r["region"])) for r in rows}
-    assert ("Te", "boundary_in") in regions
-    assert ("phi", "plasma_deep") in regions
-
-
-def test_build_spatial_error_summary_rows_signed_quantile_mode_runs():
-    true_eval = {"Te": np.ones((1, 1, 4, 4), dtype=np.float32)}
-    pred_eval = {"Te": np.zeros((1, 1, 4, 4), dtype=np.float32)}
-    distance_signed = np.array(
-        [[0.0, 0.2, 0.4, 0.6], [0.8, 1.0, 1.2, 1.4], [1.6, 1.8, 2.0, 2.2], [2.4, 2.6, 2.8, 3.0]],
-        dtype=np.float32,
-    )
-    mask_plasma = np.ones((4, 4), dtype=np.float32)
-    rows = build_spatial_error_summary_rows(
-        pred_eval=pred_eval,
-        true_eval=true_eval,
-        mask_plasma=mask_plasma,
-        distance_signed=distance_signed,
-        vars_for_summary=["Te"],
-        region_band_cfg={"mode": "signed_quantile", "boundary_q": 0.2, "deep_q": 0.7},
-    )
-    assert any(str(r["region"]) == "boundary_in" for r in rows)
-    assert any(str(r["region"]) == "plasma_deep" for r in rows)
-
-
-def test_build_spatial_error_by_case_rows_has_case_dimension():
-    true_eval = {
-        "Te": np.ones((2, 1, 4, 4), dtype=np.float32),
-        "phi": np.ones((2, 1, 4, 4), dtype=np.float32) * 2.0,
-    }
-    pred_eval = {
-        "Te": np.zeros((2, 1, 4, 4), dtype=np.float32),
-        "phi": np.zeros((2, 1, 4, 4), dtype=np.float32),
-    }
-    distance_signed = np.array(
-        [[-3.0, -1.0, 0.0, 1.0], [2.0, 5.0, 11.0, 20.0], [-12.0, -1.5, 0.5, 9.0], [3.0, 12.0, 25.0, -20.0]],
-        dtype=np.float32,
-    )
-    mask_plasma = (distance_signed >= 0.0).astype(np.float32)
-    rows = build_spatial_error_by_case_rows(
-        pred_eval=pred_eval,
-        true_eval=true_eval,
-        mask_plasma=mask_plasma,
-        distance_signed=distance_signed,
-        vars_for_summary=["Te", "phi"],
-        case_ids=["c0", "c1"],
-    )
-    assert len(rows) > 0
-    keys = {(str(r["case_id"]), str(r["var"]), str(r["region"])) for r in rows}
-    assert ("c0", "Te", "boundary_in") in keys
-    assert ("c1", "phi", "plasma_deep") in keys
-
-
-def test_build_spatial_error_rows_boundary_type_breakdown_has_bc_dir():
-    true_eval = {"Te": np.ones((1, 1, 3, 3), dtype=np.float32)}
-    pred_eval = {"Te": np.zeros((1, 1, 3, 3), dtype=np.float32)}
-    distance_signed = np.array([[0.0, 0.5, 3.0], [1.0, 8.0, 12.0], [-1.0, -3.0, 20.0]], dtype=np.float32)
-    distance_any = np.abs(distance_signed)
-    mask_plasma = (distance_signed >= 0.0).astype(np.float32)
-    bc_dir_mask = np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]], dtype=np.float32)
-
-    rows = build_spatial_error_summary_rows(
-        pred_eval=pred_eval,
-        true_eval=true_eval,
-        mask_plasma=mask_plasma,
-        distance_signed=distance_signed,
-        distance_any=distance_any,
-        bc_dir_mask=bc_dir_mask,
-        boundary_type_breakdown=True,
-        vars_for_summary=["Te"],
-    )
-    boundary_types = {(str(r["region"]), str(r.get("boundary_type", "na"))) for r in rows}
-    assert ("boundary_in", "bc_dir") in boundary_types
-    assert ("boundary_in", "interface") in boundary_types
-
-
-def test_build_spatial_error_summary_rows_uses_nan_when_region_has_no_points():
-    true_eval = {"Te": np.ones((1, 1, 2, 2), dtype=np.float32)}
-    pred_eval = {"Te": np.zeros((1, 1, 2, 2), dtype=np.float32)}
-    # No deep-plasma pixels in this tiny map.
-    distance_signed = np.array([[0.0, 0.5], [1.0, 1.5]], dtype=np.float32)
-    mask_plasma = np.ones((2, 2), dtype=np.float32)
-    rows = build_spatial_error_summary_rows(
-        pred_eval=pred_eval,
-        true_eval=true_eval,
-        mask_plasma=mask_plasma,
-        distance_signed=distance_signed,
-        vars_for_summary=["Te"],
-    )
-    deep_rows = [r for r in rows if str(r["region"]) == "plasma_deep" and str(r["var"]) == "Te"]
-    assert deep_rows
-    assert np.isnan(float(deep_rows[0]["rmse"]))
-    assert np.isnan(float(deep_rows[0]["r2"]))
-
-
-def test_build_spatial_distribution_rows_detect_integral_peak_and_center_shift():
-    true = np.zeros((1, 1, 4, 4), dtype=np.float32)
-    pred = np.zeros_like(true)
-    true[0, 0, 1, 1] = 10.0
-    true[0, 0, 1, 2] = 4.0
-    pred[0, 0, 2, 2] = 7.0
-    pred[0, 0, 2, 3] = 2.0
-    mask = np.ones((4, 4), dtype=np.float32)
-
-    rows = build_spatial_distribution_by_case_rows(
-        pred_eval={"ne": pred},
-        true_eval={"ne": true},
-        mask_plasma=mask,
-        vars_for_summary=["ne"],
-        case_ids=["case_a"],
-    )
-
-    assert len(rows) == 1
-    row = rows[0]
-    assert row["case_id"] == "case_a"
-    assert float(row["integral_rel_error"]) > 0.0
-    assert float(row["peak_location_error_px"]) > 0.0
-    assert float(row["center_of_mass_error_px"]) > 0.0
-    assert np.isfinite(float(row["distribution_error_score"]))
-
-    summary = build_spatial_distribution_summary_rows(rows)
-    assert len(summary) == 1
-    assert summary[0]["var"] == "ne"
-    assert float(summary[0]["integral_rel_error_mean"]) == float(row["integral_rel_error"])

@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 
 from plasma_surrogate.models._torch_spatial_common import (
     _backward_raw_torch_step,
-    _build_unit_coord_grid,
     _load_state_dict_numpy_torch,
     _resolve_batched_spatial_features,
     _resolve_torch_device,
@@ -54,8 +51,6 @@ class _TorchSpatialFieldMixin:
             grid_shape=self.grid_shape,
             spatial_feature_dim=self.spatial_feature_dim,
             label=self._torch_label(),
-            coord_grid=self.coord,
-            allow_coord_fallback=bool(self.spatial_feature_dim == 2),
             explicit_requirement_message=(
                 f"{self._torch_label()} input_features requires explicit spatial features for channels "
                 f"{self.input_feature_channels}"
@@ -66,7 +61,6 @@ class _TorchSpatialFieldMixin:
         x = np.asarray(cond, dtype=np.float32)
         if x.ndim == 1:
             x = x[None, :]
-        bsz = x.shape[0]
         h, w = self.grid_shape
         cond_map = np.repeat(x[:, None, None, :], h, axis=1)
         cond_map = np.repeat(cond_map, w, axis=2)

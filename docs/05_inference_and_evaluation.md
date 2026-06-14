@@ -1,113 +1,24 @@
 # 05 Inference And Evaluation
 
-## 1. `infer` の役割
+inference / evaluation は checkpoint と preprocessing artifact を接続し、field、QoI、metrics、benchmark summary を作る。
 
-`infer` は、学習済みモデルと preprocess artifact を組み合わせて予測 field を作る stage です。  
-中心実装は `src/plasma_surrogate/infer/engine.py` です。
+## Inference Contract
 
-### 主な入力
+`InferenceEngine` は次を正本として読む。
 
-- checkpoint
-- `preprocessing/schema/output_layout.json`
-- `preprocessing/scalers/y_scalers.json`
-- `preprocessing/features/coord_feature_pack.npz`
-- `preprocessing/scalers/distance_transform_stats.json`
-- geometry 情報
+- target order: `preprocessing/schema/output_layout.json`
+- target role metadata: `preprocessing/schema/target_role_schema.json`
+- target transforms: `preprocessing/scalers/y_scalers.json`
+- feature order: `preprocessing/features/coord_feature_pack_meta.json`
+- channel order: `preprocessing/schema/channel_map.json`
+- runtime schema hash: `preprocessing/validation/runtime_schema_hashes.json`
+- model capability: `src/plasma_surrogate/core/model_specs.py`
 
-### 主な出力
+checkpoint metadata と runtime request metadata の required keys が一致しない場合は fail-fast とする。
 
-- 予測 field
-- 物理量スケールへ戻した field
-- 必要なら OOD / boundary / optimization 用の補助出力
+## Physics Symbol Mapping
 
-## 2. `evaluate` の役割
-
-`evaluate` は、推論結果と GT を比較して metrics を作る stage です。  
-mainline は target 非固定のため、列名は active target に応じて動的に決まります。
-
-代表的な列:
-
-- `test_rmse_<var>`
-- `test_r2_<var>`
-- `test_rmse_<var>_plasma`
-- `test_r2_<var>_plasma`
-
-## 3. benchmark と通常 evaluate の違い
-
-### 通常 `infer -> evaluate`
-
-- 単一 run の結果確認に向く
-- モデル開発、学習成否確認、GT との差の把握が目的
-
-### `benchmark run`
-
-- split や protocol ごとの集計まで含める
-- compare 用の leaderboard を作る
-- `resolved_benchmark.json` で effective contract を残す
-
-## 4. benchmark の主要生成物
-
-### `leaderboard.csv`
-
-モデルごとの主要指標をまとめた表です。  
-mainline では fixed header ではなく、active target 群に応じて列が増減します。
-
-例:
-
-- `test_rmse_density`
-- `test_r2_density`
-- `test_r2_density_plasma`
-- `test_r2_density_plasma_interp`
-
-### `resolved_benchmark.json`
-
-実行時に最終的に使われた契約をまとめた JSON です。  
-比較で困ったときは、まずこれを見ます。
-
-重要キー:
-
-- `target_vars_effective`
-- `eval.target_vars_for_score_effective`
-- `eval.primary_metric_effective`
-- モデルごとの `*_feature_contract_effective`
-
-### `selected_models_comparison.csv`
-
-`scripts/compare_selected_models.py` が作る比較表です。  
-各 leaderboard から最適行を拾い、動的 target 列を維持したまま 1 表にまとめます。
-
-## 5. dynamic target 列の読み方
-
-mainline compare / benchmark は、active target ごとに列を作ります。
-
-基本列:
-
-- `test_rmse_<var>`
-- `test_r2_<var>`
-- `test_rmse_<var>_plasma`
-- `test_r2_<var>_plasma`
-
-dual-axis benchmark の列:
-
-- `test_r2_<var>_plasma_interp`
-- `test_r2_<var>_plasma_extrap`
-- `test_r2_<var>_plasma_dual`
-
-### `target_vars_effective` と `target_vars_for_score_effective`
-
-- `target_vars_effective`
-  - その run が実際に持っている target 群
-- `target_vars_for_score_effective`
-  - 集計や primary metric に使う target 群
-
-多くの mainline run では同じですが、評価対象を部分集合にしたい場合は別れます。
-
-## 6. inference 時の physics symbol mapping
-
-推論時 physics は target 名直参照では動きません。  
-`InferenceEngine` は symbol resolver を使って必要物理量を引き当てます。
-
-### `inference.ood.physics.symbols`
+physics / OOD / boundary operator は target 名 alias に依存しない。明示 `symbols` を最優先し、無い場合だけ一意の role / field family から解決する。解決不能または曖昧な場合は fail-fast とする。
 
 ```yaml
 inference:
@@ -115,67 +26,76 @@ inference:
     physics:
       enabled: true
       symbols:
-        density: density
-        temperature: temperature
-        potential: potential
+        density: electron_density
+        temperature: electron_temperature
+        potential: plasma_potential
 ```
 
-### `inference.ood.boundary_operator.symbols`
+## Metrics
+
+evaluate / benchmark は active target に応じた dynamic metric column を作る。
+
+- `test_rmse_<var>`
+- `test_r2_<var>`
+- `test_rmse_<var>_plasma`
+- `test_r2_<var>_plasma`
+
+固定 target header は product contract にしない。
+
+## Benchmark Selection
+
+benchmark selection の default は lower-better の `surrogate_quality_score` である。R2 / RMSE は補助指標として残すが、primary selection にはしない。
+
+`surrogate_quality_score` は次の component を集約する。
+
+- target ごとの normalized RMSE
+- boundary / deep region の誤差バランス
+- continuity diagnostic
+- physics residual diagnostic
+- positive target の sign penalty
+
+role schema が無い場合、sign penalty は 0 contribution とする。
+
+## Optimization Objective
+
+`inference.optimize.objective` の product contract は `weighted_sum` のみである。各 term は `InferenceResult.qoi` を先に参照し、無ければ `InferenceResult.diagnostics` を参照する。
 
 ```yaml
 inference:
-  ood:
-    boundary_operator:
-      enabled: true
-      symbols:
-        density: density
-        potential: potential
+  optimize:
+    enabled: true
+    backend: optuna
+    objective:
+      mode: weighted_sum
+      terms:
+        - key: uniformity
+          direction: min
+          weight: 1.0
+        - key: boundary_gamma_uniformity
+          direction: min
+          weight: 0.3
+        - key: poisson_residual_norm
+          direction: min
+          weight: 0.2
+          transform: log1p_abs
+          scale: 1.0
+    constraints:
+      - key: poisson_residual_norm
+        upper: 0.05
 ```
 
-### 何のために必要か
+Term fields:
 
-- target 名を dataset ごとに変えても physics を使えるようにする
-- `log_ne` や `Te` 固定のような dataset 依存を排除する
+- `key`: QoI または scalar diagnostic 名。
+- `direction`: `min` または `max`。`max` は lower-better objective へ負寄与で変換する。
+- `weight`: weighted sum の係数。
+- `scale`: 正の有限値。既定は `1.0`。
+- `transform`: `identity` または `log1p_abs`。
 
-### symbol 未解決時の挙動
+missing / non-finite term は config error として fail-fast とする。Best selection は feasible trial を優先し、feasible trial が無い場合だけ全 trial の最小 `objective_value` を使う。
 
-- `physics.enabled=true` で未解決なら fail-fast
-- `boundary_operator.enabled=true` で未解決なら fail-fast
+Trial record は `objective_value`, `search_value`, `feasible`, `violated_constraints`, `constraint_violation_total`, `qoi_*`, `diagnostic_*`, `objective_term_*` を持つ。
 
-エラーメッセージは `infer/engine.py` 内で明示されています。
+## Planned Extension Points
 
-## 7. target 名変更時にどこを直すか
-
-target 名を変えたときに見る場所:
-
-1. `dataset.targets[]`
-2. `preprocessing.scalers.target_transforms`
-3. `train.<model>.target_vars`
-4. `benchmark.eval.target_vars_for_score`
-5. `physics.symbols`
-6. `inference.ood.physics.symbols`
-7. plot の `--vars`
-
-## 8. plot スクリプト
-
-空間可視化スクリプトは `scripts/plot_spatial_distribution_summary.py` です。
-
-### mainline 上の前提
-
-- `--vars` は必須
-- compare CSV と GT 側に同じ target 列が存在すること
-- 暗黙変換はしない
-- `ne -> log_ne` のような fallback は mainline では使わない
-
-### どういうときに壊れるか
-
-- compare CSV 側は logical target 名、GT 側は別名のまま
-- `dataset.targets[]` を変えたのに `--vars` を古いまま使う
-
-## 9. 修正入口
-
-- inference symbol 解決: `src/plasma_surrogate/infer/engine.py`
-- metrics: `src/plasma_surrogate/eval/metrics_builder.py`
-- benchmark 集計: `src/plasma_surrogate/benchmark/runner.py`
-- compare: `scripts/compare_selected_models.py`
-- spatial plot: `scripts/plot_spatial_distribution_summary.py`
+能動学習、多様性最適化、Pareto front は未実装である。将来は `objective.mode` を追加して拡張し、現行の `weighted_sum` contract を肥大化させない。

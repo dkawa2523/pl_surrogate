@@ -8,21 +8,63 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.dataset_io import load_dataset
 from plasma_surrogate.core.feature_cache import prepare_feature_cache
 from plasma_surrogate.core.input_modes import (
+    attach_runtime_schema_hashes,
     build_input_mode_effective_metadata,
     normalize_input_mode_cfg,
-    resolve_benchmark_runtime_controls,
     validate_input_mode_cfg,
 )
 from plasma_surrogate.core.run_bundle import RunBundle, RunBundleLoader, ensure_preprocess_contract
 from plasma_surrogate.data.geometry_provider import GeometryProviderLike, build_geometry_provider
 from plasma_surrogate.features.geometry_feature_store import GeometryFeatureStore, hash_json
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
+
+
+def _write_benchmark_run_metadata(
+    *,
+    output_root: Path,
+    cfg: dict[str, Any],
+    y_vars: list[str],
+    shape: tuple[int, int],
+) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    resolved = dict(cfg)
+    resolved.setdefault("task", {})
+    resolved["task"]["spec_path"] = "task_spec.yaml"
+    with (output_root / "resolved_config.yaml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(resolved, f, sort_keys=True)
+
+    task_spec = dict(cfg.get("task_spec", {}) or {})
+    outputs = list(task_spec.get("outputs", [{"name": name} for name in y_vars]))
+    transforms = dict(task_spec.get("transforms", {}))
+    units = dict(task_spec.get("units", {}))
+    for output in outputs:
+        name = str(dict(output).get("name", "")).strip()
+        if not name:
+            continue
+        transforms.setdefault(name, str(dict(output).get("transform", "zscore")))
+        units.setdefault(name, str(dict(output).get("units", "")))
+    task_spec.update(
+        {
+            "outputs": outputs,
+            "transforms": transforms,
+            "units": units,
+            "grid_spec": {
+                "axes_order": ["y", "x"],
+                "coord_components": ["x", "y"],
+                "shape": [int(shape[0]), int(shape[1])],
+                "coord_system": "cartesian",
+            },
+        }
+    )
+    with (output_root / "task_spec.yaml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(task_spec, f, sort_keys=True)
 
 
 def resolve_effective_benchmark_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
@@ -50,7 +92,6 @@ def resolve_effective_benchmark_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
         benchmark_cfg_raw["runtime"] = copy.deepcopy(runtime_raw)
     effective = normalize_input_mode_cfg(benchmark_cfg_raw)
     validate_input_mode_cfg(effective)
-    resolve_benchmark_runtime_controls(effective)
     return effective
 
 
@@ -195,9 +236,24 @@ def build_benchmark_data_context(
         runtime_input_mode_meta=input_mode_meta,
         runtime_cfg=dict(cfg.get("runtime", {})),
     )
-    pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
+    pre.run(
+        cases=dataset.cases,
+        geometry_root=dataset.geometry_root,
+        target_metadata=getattr(dataset, "target_metadata", []),
+    )
+    _write_benchmark_run_metadata(
+        output_root=output_root,
+        cfg=cfg,
+        y_vars=[str(k) for k in dataset.cases[0]["y"].keys()],
+        shape=dataset.shape,
+    )
     ensure_preprocess_contract(output_root)
     bundle = RunBundleLoader.load(output_root)
+    input_mode_meta = attach_runtime_schema_hashes(
+        input_mode_meta,
+        schemas=dict(bundle.schemas or {}),
+        schema_hashes=dict(bundle.schemas.get("runtime_schema_hashes", {}) or {}),
+    )
 
     split = bundle.split_random()
     repro_hashes = ArtifactStore(output_root / "preprocessing" / "validation").load_json("repro_hashes.json")
@@ -259,7 +315,9 @@ def build_benchmark_data_context(
             f"Preprocessing axis_schema.mode mismatch: expected={requested_axis_mode} actual={axis_schema.mode}"
         )
     cond = build_cond_matrix_with_axis(dataset.cases, cond_schema, axis_schema)
-    y_vars = list(bundle.schemas.get("output_layout", {}).get("vars", ["ne", "ni", "Te", "phi"]))
+    y_vars = list(bundle.schemas.get("output_layout", {}).get("vars", []))
+    if not y_vars:
+        raise FileNotFoundError("Missing preprocessing/schema/output_layout.json vars for benchmark runtime")
     y = np.stack(
         [np.stack([c["y"][name] for name in y_vars], axis=0).astype(np.float32) for c in dataset.cases],
         axis=0,

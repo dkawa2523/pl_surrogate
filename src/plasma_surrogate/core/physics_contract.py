@@ -10,10 +10,23 @@ import numpy as np
 from plasma_surrogate.data.geometry_context import GeometryContext
 
 
+REMOVED_PHYSICS_KEYS = ("lambda_poisson", "lambda_bc", "lambda_rho")
+
+
+def _reject_removed_physics_keys(cfg: dict[str, Any]) -> None:
+    removed = [key for key in REMOVED_PHYSICS_KEYS if key in cfg]
+    bo_cfg = dict(cfg.get("boundary_operator", {}) or {})
+    if "lambda" in bo_cfg:
+        removed.append("boundary_operator.lambda")
+    if removed:
+        raise ValueError(f"removed physics keys: {removed}; use physics.terms[].weight")
+
+
 def normalize_physics_terms(raw_cfg: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """Normalize physics-term weights with backward-compatible key precedence."""
+    """Normalize physics-term weights from physics.terms only."""
 
     cfg = dict(raw_cfg or {})
+    _reject_removed_physics_keys(cfg)
     terms_raw = cfg.get("terms", {})
     if isinstance(terms_raw, list):
         terms_cfg = {
@@ -23,42 +36,20 @@ def normalize_physics_terms(raw_cfg: dict[str, Any] | None) -> dict[str, dict[st
         }
     else:
         terms_cfg = dict(terms_raw or {})
-    bo_cfg = dict(cfg.get("boundary_operator", {}))
 
-    def _normalize(name: str, *, legacy_key: str, legacy_weight: float) -> dict[str, Any]:
+    def _normalize(name: str) -> dict[str, Any]:
         term_cfg = dict(terms_cfg.get(name, {}))
         weight_raw = term_cfg.get("weight")
-        if weight_raw is None:
-            weight = float(legacy_weight)
-            source_key = legacy_key
-        else:
-            weight = float(weight_raw)
-            source_key = "terms"
+        weight = 0.0 if weight_raw is None else float(weight_raw)
         enabled_raw = term_cfg.get("enabled")
         enabled = bool((weight > 0.0) if enabled_raw is None else enabled_raw)
-        return {"enabled": enabled, "weight": weight, "source_key": source_key}
+        return {"enabled": enabled, "weight": weight, "source_key": "terms"}
 
     return {
-        "poisson": _normalize(
-            "poisson",
-            legacy_key="lambda_poisson",
-            legacy_weight=float(cfg.get("lambda_poisson", 0.0)),
-        ),
-        "boundary": _normalize(
-            "boundary",
-            legacy_key="lambda_bc",
-            legacy_weight=float(cfg.get("lambda_bc", 0.0)),
-        ),
-        "boundary_operator": _normalize(
-            "boundary_operator",
-            legacy_key="boundary_operator.lambda",
-            legacy_weight=float(bo_cfg.get("lambda", 0.0)),
-        ),
-        "rho": _normalize(
-            "rho",
-            legacy_key="lambda_rho",
-            legacy_weight=float(cfg.get("lambda_rho", 0.0)),
-        ),
+        "poisson": _normalize("poisson"),
+        "boundary": _normalize("boundary"),
+        "boundary_operator": _normalize("boundary_operator"),
+        "rho": _normalize("rho"),
     }
 
 
@@ -77,14 +68,29 @@ def _resolved_terms_payload(terms: dict[str, dict[str, Any]]) -> list[dict[str, 
     return out
 
 
+def _terms_from_resolved_payload(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        out[name] = {
+            "weight": float(row.get("weight", 0.0)),
+            "enabled": bool(row.get("enabled", float(row.get("weight", 0.0)) > 0.0)),
+        }
+    return out
+
+
 def build_physics_cfg(
     raw_cfg: dict[str, Any] | None,
     geom_ctx: GeometryContext,
     *,
     default_enabled: bool = False,
     default_primary_qoi_key: str = "Gamma_i",
-    default_lambda_poisson: float = 0.05,
-    default_lambda_bc: float = 0.02,
 ) -> dict[str, Any]:
     """Build normalized physics config contract from raw user config."""
 
@@ -116,7 +122,7 @@ def build_physics_cfg(
             raise ValueError("physics.boundary_operator.mode=external_operator is removed from mainline")
         boundary_operator_cfg = {
             "enabled": True,
-            "lambda": float(terms["boundary_operator"]["weight"]),
+            "weight": float(terms["boundary_operator"]["weight"]),
             "mask_band": mask_band.astype(np.float32),
             "mode": bo_mode,
             "primary_qoi_key": str(bo_cfg.get("primary_qoi_key", default_primary_qoi_key)),
@@ -131,23 +137,15 @@ def build_physics_cfg(
             "target_clamp": bo_cfg.get("target_clamp"),
         }
 
-    lambda_poisson = terms["poisson"]["weight"]
-    if "terms" not in cfg and "lambda_poisson" not in cfg:
-        lambda_poisson = float(default_lambda_poisson)
-        terms["poisson"]["source_key"] = "default_lambda_poisson"
-    terms["poisson"]["weight"] = float(lambda_poisson)
-    lambda_bc = terms["boundary"]["weight"]
-    if "terms" not in cfg and "lambda_bc" not in cfg:
-        lambda_bc = float(default_lambda_bc)
-        terms["boundary"]["source_key"] = "default_lambda_bc"
-    terms["boundary"]["weight"] = float(lambda_bc)
+    poisson_weight = float(terms["poisson"]["weight"])
+    boundary_weight = float(terms["boundary"]["weight"])
+    terms["poisson"]["weight"] = float(poisson_weight)
+    terms["boundary"]["weight"] = float(boundary_weight)
     terms["boundary_operator"]["weight"] = float(terms["boundary_operator"]["weight"])
     terms["rho"]["weight"] = float(terms["rho"]["weight"])
 
     return {
         "enabled": True,
-        "lambda_poisson": float(lambda_poisson),
-        "lambda_bc": float(lambda_bc),
         "rhs": None,
         "bc_mask": np.asarray(bc_mask, dtype=np.float32),
         "bc_value": np.asarray(bc_value, dtype=np.float32),
@@ -163,7 +161,7 @@ def resolve_epoch_scaled_physics(
     epoch: int,
     curriculum_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve epoch-dependent lambda scaling from train.curriculum.physics_lambda_ramp."""
+    """Resolve epoch-dependent physics-term scaling."""
 
     cfg = copy.deepcopy(dict(physics_cfg or {}))
     if not bool(cfg.get("enabled", False)):
@@ -190,13 +188,17 @@ def resolve_epoch_scaled_physics(
     def _scaled(value: float | int | None) -> float:
         return float(scale * float(value if value is not None else 0.0))
 
-    cfg["lambda_poisson"] = _scaled(cfg.get("lambda_poisson", 0.0))
-    cfg["lambda_bc"] = _scaled(cfg.get("lambda_bc", 0.0))
+    terms_raw = cfg.get("terms")
+    if not terms_raw:
+        terms_raw = _terms_from_resolved_payload(cfg.get("resolved_terms"))
+    terms = normalize_physics_terms({"terms": terms_raw})
+    for name, term in terms.items():
+        term["weight"] = _scaled(term.get("weight", 0.0))
+        term["enabled"] = bool(term.get("enabled", False)) and float(term["weight"]) > 0.0
     bo = dict(cfg.get("boundary_operator", {}))
     if bo:
-        bo["lambda"] = _scaled(bo.get("lambda", 0.0))
+        bo["weight"] = float(terms["boundary_operator"]["weight"])
         cfg["boundary_operator"] = bo
-    terms = normalize_physics_terms(cfg)
     cfg["terms"] = terms
     cfg["resolved_terms"] = _resolved_terms_payload(terms)
     cfg["physics_ramp_scale"] = scale

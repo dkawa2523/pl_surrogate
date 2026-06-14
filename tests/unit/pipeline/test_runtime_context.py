@@ -11,7 +11,7 @@ from plasma_surrogate.pipeline.runtime_context import (
     build_preprocess_context,
     build_train_context,
 )
-from tests._config_presets import default_target_transforms_ne_ni_te_phi, runtime_table_only
+from tests._config_presets import default_target_transforms_four_field_example, runtime_table_only
 
 
 def _write_cfg(path: Path, run_dir: Path) -> None:
@@ -22,7 +22,7 @@ def _write_cfg(path: Path, run_dir: Path) -> None:
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
             "axis_schema": {"mode": "steady", "harmonics": 1},
-            "scalers": {"target_transforms": default_target_transforms_ne_ni_te_phi()},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
         },
         "model": {"name": "global_mlp", "phi_mode": "direct"},
         "train": {"epochs": 2, "lr": 0.01},
@@ -84,9 +84,10 @@ def test_runtime_metadata_contract_flows_to_checkpoint_infer_and_evaluate(
     assert_input_mode_metadata_keys(checkpoint_meta)
     assert checkpoint_meta["input_mode_effective"] == "table_only"
     assert checkpoint_meta["structure_feature_profile_effective"] == "none"
-    assert checkpoint_meta["structure_descriptor_profile_effective"] == "none"
-    assert checkpoint_meta["structure_latent_profile_effective"] == "none"
-    assert checkpoint_meta["has_structure_inputs_effective"] is False
+    assert checkpoint_meta["structure_adapter_mode_effective"] == "none"
+    assert checkpoint_meta["geometry_provider_mode_effective"] == "fixed"
+    assert checkpoint_meta["target_schema_hash"]
+    assert checkpoint_meta["feature_schema_hash"]
 
     infer_out = run_infer(cfg_path)
     infer_summary = json.loads(Path(infer_out["summary"]).read_text(encoding="utf-8"))

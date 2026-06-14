@@ -45,6 +45,21 @@ GRID_CHECKPOINT_MODEL_TYPES = frozenset(
     }
 )
 
+
+def _model_output_keys(model: Any) -> list[str]:
+    keys = [str(v) for v in list(getattr(model, "output_keys", []))]
+    if not keys:
+        raise ValueError("checkpoint requires model.output_keys")
+    return keys
+
+
+def _meta_output_keys(meta: dict[str, Any]) -> list[str]:
+    keys = [str(v) for v in list(meta.get("output_keys", []))]
+    if not keys:
+        raise ValueError("checkpoint meta requires output_keys")
+    return keys
+
+
 def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
     """Return checkpoint metadata for a grid family model, or None if unsupported."""
 
@@ -54,7 +69,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["log_ne", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "backend": str(getattr(model, "backend", "numpy")),
             "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
@@ -84,7 +99,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["log_ne", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "backend": str(getattr(model, "backend", "torch")),
             "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
@@ -119,7 +134,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
             "backend": str(getattr(model, "backend", "torch")),
             "input_feature_channels": list(
@@ -139,7 +154,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
             "backend": str(getattr(model, "backend", "torch")),
             "n_modes": int(getattr(model, "n_modes", 2)),
@@ -156,7 +171,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
             "backend": str(getattr(model, "backend", "torch")),
             "n_modes": int(getattr(model, "n_modes", 2)),
@@ -173,7 +188,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
             "backend": str(getattr(model, "backend", "torch")),
             "n_modes": int(getattr(model, "n_modes", 12)),
@@ -190,7 +205,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
             "backend": str(getattr(model, "backend", "torch")),
             "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
@@ -206,7 +221,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": model.input_dim,
             "grid_shape": list(model.grid_shape),
             "out_channels": model.out_channels,
-            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
             "backend": str(getattr(model, "backend", "torch")),
             "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
@@ -224,7 +239,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "input_dim": int(model.input_dim),
             "grid_shape": list(model.grid_shape),
             "out_channels": int(model.out_channels),
-            "output_keys": list(getattr(model, "output_keys", ["ne", "ni", "Te", "phi"])),
+            "output_keys": _model_output_keys(model),
             "with_rho_eff_head": bool(getattr(model, "with_rho_eff_head", False)),
             "backend": str(getattr(model, "backend", "torch")),
             "input_feature_channels": list(getattr(model, "input_feature_channels", ["x", "y"])),
@@ -287,7 +302,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["log_ne", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             backend=str(meta.get("backend", "numpy")),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
@@ -308,7 +323,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["log_ne", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             backend=str(meta.get("backend", "torch")),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
@@ -328,7 +343,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(
@@ -351,7 +366,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
             n_modes=int(meta.get("n_modes", 2)),
             head_mlp=dict(meta.get("head_mlp", {})),
@@ -371,7 +386,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
             n_modes=int(meta.get("n_modes", 2)),
             head_mlp=dict(meta.get("head_mlp", {})),
@@ -391,7 +406,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
             n_modes=int(meta.get("n_modes", 12)),
             head_mlp=dict(meta.get("head_mlp", {})),
@@ -411,7 +426,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
@@ -430,7 +445,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
@@ -451,7 +466,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
             out_channels=int(meta.get("out_channels", 3)),
-            output_keys=list(meta.get("output_keys", ["ne", "ni", "Te", "phi"])),
+            output_keys=_meta_output_keys(meta),
             with_rho_eff_head=bool(meta.get("with_rho_eff_head", False)),
             input_feature_channels=list(
                 meta.get("input_feature_channels", ["x", "y", "mask_plasma", "distance_signed", "distance_any"])

@@ -12,7 +12,7 @@ from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 
 def test_inference_engine_deeponet_poisson_not_implemented(tmp_path: Path, geometry_root: Path):
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=0),
+        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=0),
         cond_schema=CondSchema(order=["c0", "c1", "c2"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=FixedGeometryProvider(geometry_root),

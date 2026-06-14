@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,17 +44,49 @@ class StandardScaler(BaseScaler):
             raise RuntimeError("Scaler not fitted")
         out = np.asarray(x, dtype=np.float64) * self.std + self.mean
         if not np.all(np.isfinite(out)):
-            warnings.warn(
-                "StandardScaler.inverse_transform produced non-finite values",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            raise ValueError("StandardScaler.inverse_transform produced non-finite values")
         return out
 
     def to_dict(self) -> dict[str, Any]:
         if self.mean is None or self.std is None:
             return {"type": "zscore", "mean": None, "std": None}
         return {"type": "zscore", "mean": np.asarray(self.mean).tolist(), "std": np.asarray(self.std).tolist()}
+
+
+@dataclass
+class RobustScaler(BaseScaler):
+    median: np.ndarray | None = None
+    iqr: np.ndarray | None = None
+
+    def fit(self, x: np.ndarray) -> "RobustScaler":
+        arr = np.asarray(x, dtype=np.float64)
+        self.median = np.median(arr, axis=0)
+        q25 = np.quantile(arr, 0.25, axis=0)
+        q75 = np.quantile(arr, 0.75, axis=0)
+        self.iqr = np.where((q75 - q25) < 1e-12, 1.0, q75 - q25)
+        return self
+
+    def transform(self, x: np.ndarray) -> np.ndarray:
+        if self.median is None or self.iqr is None:
+            raise RuntimeError("Scaler not fitted")
+        return (np.asarray(x, dtype=np.float64) - self.median) / self.iqr
+
+    def inverse_transform(self, x: np.ndarray) -> np.ndarray:
+        if self.median is None or self.iqr is None:
+            raise RuntimeError("Scaler not fitted")
+        out = np.asarray(x, dtype=np.float64) * self.iqr + self.median
+        if not np.all(np.isfinite(out)):
+            raise ValueError("RobustScaler.inverse_transform produced non-finite values")
+        return out
+
+    def to_dict(self) -> dict[str, Any]:
+        if self.median is None or self.iqr is None:
+            return {"type": "robust", "median": None, "iqr": None}
+        return {
+            "type": "robust",
+            "median": np.asarray(self.median).tolist(),
+            "iqr": np.asarray(self.iqr).tolist(),
+        }
 
 
 @dataclass
@@ -81,11 +112,7 @@ class MinMaxScaler(BaseScaler):
         denom = np.where((self.max_ - self.min_) < 1e-12, 1.0, self.max_ - self.min_)
         out = np.asarray(x, dtype=np.float64) * denom + self.min_
         if not np.all(np.isfinite(out)):
-            warnings.warn(
-                "MinMaxScaler.inverse_transform produced non-finite values",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            raise ValueError("MinMaxScaler.inverse_transform produced non-finite values")
         return out
 
     def to_dict(self) -> dict[str, Any]:
@@ -102,8 +129,11 @@ class IdentityScaler(BaseScaler):
 class ScalerFactory:
     @staticmethod
     def create(kind: str) -> BaseScaler:
+        kind = str(kind).strip().lower()
         if kind == "zscore":
             return StandardScaler()
+        if kind == "robust":
+            return RobustScaler()
         if kind == "minmax":
             return MinMaxScaler()
         if kind == "none":
@@ -112,13 +142,20 @@ class ScalerFactory:
 
     @staticmethod
     def from_dict(raw: dict[str, Any]) -> BaseScaler:
-        kind = raw.get("type", "none")
+        kind = str(raw.get("type", "none")).strip().lower()
         if kind == "zscore":
             sc = StandardScaler()
             if raw.get("mean") is not None:
                 sc.mean = np.array(raw["mean"], dtype=np.float64)
             if raw.get("std") is not None:
                 sc.std = np.array(raw["std"], dtype=np.float64)
+            return sc
+        if kind == "robust":
+            sc = RobustScaler()
+            if raw.get("median") is not None:
+                sc.median = np.array(raw["median"], dtype=np.float64)
+            if raw.get("iqr") is not None:
+                sc.iqr = np.array(raw["iqr"], dtype=np.float64)
             return sc
         if kind == "minmax":
             sc = MinMaxScaler()
@@ -130,8 +167,8 @@ class ScalerFactory:
         return IdentityScaler()
 
 
-_ALLOWED_VALUE_TRANSFORMS = {"identity", "log10"}
-_ALLOWED_SCALERS = {"none", "zscore", "minmax"}
+_ALLOWED_VALUE_TRANSFORMS = {"identity", "log10", "log10_floor", "log1p", "signed_log1p"}
+_ALLOWED_SCALERS = {"none", "zscore", "minmax", "robust"}
 _ALLOWED_FIT_SCOPES = {"all", "plasma_only"}
 _ALLOWED_CLIP_MODES = {"none", "quantile"}
 
@@ -140,11 +177,7 @@ def _to_float32_checked(values: np.ndarray, *, label: str) -> np.ndarray:
     with np.errstate(over="ignore", invalid="ignore"):
         out = np.asarray(values, dtype=np.float64).astype(np.float32)
     if not np.all(np.isfinite(out)):
-        warnings.warn(
-            f"{label} produced non-finite float32 values; evaluation metrics will mark them invalid",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+        raise ValueError(f"{label} produced non-finite float32 values")
     return out
 
 
@@ -154,6 +187,7 @@ def _default_target_transform(var: str, *, default_scaler: str, default_fit_scop
         "scaler": str(default_scaler),
         "fit_scope": str(default_fit_scope),
         "clip": {"mode": "none"},
+        "floor": 0.0,
     }
 
 
@@ -188,15 +222,24 @@ def _normalize_target_transform_spec(
             raise ValueError(f"target_transforms.{var}.clip requires 0 <= q_low < q_high <= 1")
         clip_spec["q_low"] = q_low
         clip_spec["q_high"] = q_high
+    floor_raw = spec.get("floor", 0.0)
+    floor = 0.0 if floor_raw is None else float(floor_raw)
     return {
         "value_transform": value_transform,
         "scaler": scaler_kind,
         "fit_scope": fit_scope,
         "clip": clip_spec,
+        "floor": floor,
     }
 
 
-def _apply_value_transform(values: np.ndarray, *, mode: str, var: str) -> np.ndarray:
+def _apply_value_transform(
+    values: np.ndarray,
+    *,
+    mode: str,
+    var: str,
+    floor: float = 0.0,
+) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float32)
     if mode == "identity":
         return arr
@@ -204,23 +247,46 @@ def _apply_value_transform(values: np.ndarray, *, mode: str, var: str) -> np.nda
         if np.any(arr <= 0.0):
             raise ValueError(f"target_transforms.{var}.value_transform=log10 requires strictly positive values")
         return np.log10(arr.astype(np.float64)).astype(np.float32)
+    if mode == "log10_floor":
+        f = max(float(floor), 1.0e-30)
+        return np.log10(np.maximum(arr.astype(np.float64), f)).astype(np.float32)
+    if mode == "log1p":
+        x = arr.astype(np.float64)
+        x = np.maximum(x, float(floor))
+        if np.any(x <= -1.0):
+            raise ValueError(f"target_transforms.{var}.value_transform=log1p requires values > -1")
+        return np.log1p(x).astype(np.float32)
+    if mode == "signed_log1p":
+        x = arr.astype(np.float64)
+        return (np.sign(x) * np.log1p(np.abs(x))).astype(np.float32)
     raise ValueError(f"Unsupported value_transform: {mode}")
 
 
-def _apply_inverse_value_transform(values: np.ndarray, *, mode: str) -> np.ndarray:
+def _apply_inverse_value_transform(
+    values: np.ndarray,
+    *,
+    mode: str,
+    floor: float = 0.0,
+) -> np.ndarray:
     arr = np.asarray(values, dtype=np.float64)
     if mode == "identity":
         return arr
-    if mode == "log10":
+    if mode in {"log10", "log10_floor"}:
         with np.errstate(over="ignore", invalid="ignore"):
             out = np.power(10.0, arr)
+        floor_eff = max(float(floor), 1.0e-30) if mode == "log10_floor" else float(floor)
+        out = np.maximum(out, floor_eff)
         if not np.all(np.isfinite(out)):
-            warnings.warn(
-                "target inverse value_transform=log10 produced non-finite values",
-                RuntimeWarning,
-                stacklevel=2,
-            )
+            raise ValueError(f"target inverse value_transform={mode} produced non-finite values")
         return out
+    if mode == "log1p":
+        with np.errstate(over="ignore", invalid="ignore"):
+            out = np.expm1(arr)
+        out = np.maximum(out, float(floor))
+        return out
+    if mode == "signed_log1p":
+        with np.errstate(over="ignore", invalid="ignore"):
+            return np.sign(arr) * np.expm1(np.abs(arr))
     raise ValueError(f"Unsupported value_transform: {mode}")
 
 
@@ -230,45 +296,14 @@ class TransformBundle:
 
     cond_scaler: BaseScaler
     y_scalers: dict[str, BaseScaler]
-    y_order: list[str] = field(default_factory=lambda: ["ne", "Te", "phi"])
+    y_order: list[str] = field(default_factory=list)
     cond_dim: int | None = None
     fit_policy: str = "all"
     mask_applied: bool = False
     target_transforms: dict[str, dict[str, Any]] = field(default_factory=dict)
 
-    @staticmethod
-    def _infer_cond_dim_from_scaler_payload(payload: dict[str, Any]) -> int | None:
-        for key in ("mean", "std", "min", "max"):
-            values = payload.get(key)
-            if values is None:
-                continue
-            arr = np.asarray(values)
-            if arr.ndim == 0:
-                return 1
-            flat = arr.reshape(-1)
-            return int(flat.shape[0])
-        return None
-
-    @staticmethod
-    def _infer_cond_dim_from_scaler(scaler: BaseScaler) -> int | None:
-        if isinstance(scaler, StandardScaler):
-            if scaler.mean is not None:
-                return int(np.asarray(scaler.mean).reshape(-1).shape[0])
-            if scaler.std is not None:
-                return int(np.asarray(scaler.std).reshape(-1).shape[0])
-            return None
-        if isinstance(scaler, MinMaxScaler):
-            if scaler.min_ is not None:
-                return int(np.asarray(scaler.min_).reshape(-1).shape[0])
-            if scaler.max_ is not None:
-                return int(np.asarray(scaler.max_).reshape(-1).shape[0])
-            return None
-        return None
-
     def _resolve_cond_dim(self) -> int | None:
-        if self.cond_dim is not None:
-            return int(self.cond_dim)
-        return self._infer_cond_dim_from_scaler(self.cond_scaler)
+        return None if self.cond_dim is None else int(self.cond_dim)
 
     def _validate_cond_matrix(self, cond_matrix: np.ndarray, *, op: str) -> np.ndarray:
         arr = np.asarray(cond_matrix, dtype=np.float32)
@@ -296,13 +331,15 @@ class TransformBundle:
             )
         )
         value_mode = str(spec.get("value_transform", "identity")).strip().lower()
+        floor_raw = spec.get("floor", 0.0)
+        floor = 0.0 if floor_raw is None else float(floor_raw)
         clip_spec = dict(spec.get("clip", {}))
         flat = np.asarray(values, dtype=np.float64).reshape(-1, 1)
         if inverse:
             out = scaler.inverse_transform(flat)
-            out = _apply_inverse_value_transform(out, mode=value_mode)
+            out = _apply_inverse_value_transform(out, mode=value_mode, floor=floor)
         else:
-            out = _apply_value_transform(flat, mode=value_mode, var=var)
+            out = _apply_value_transform(flat, mode=value_mode, var=var, floor=floor)
             if str(clip_spec.get("mode", "none")).strip().lower() == "quantile":
                 lo = float(clip_spec.get("clip_low", clip_spec.get("q_low_value", 0.0)))
                 hi = float(clip_spec.get("clip_high", clip_spec.get("q_high_value", 0.0)))
@@ -379,7 +416,7 @@ class TransformBundle:
         if inferred_dim is None:
             inferred_dim = cond_scaler.get("cond_dim")
         if inferred_dim is None:
-            inferred_dim = cls._infer_cond_dim_from_scaler_payload(cond_scaler)
+            raise ValueError("TransformBundle.from_dict requires cond_dim")
         return cls(
             cond_scaler=ScalerFactory.from_dict(cond_scaler),
             y_scalers={k: ScalerFactory.from_dict(v) for k, v in y_scalers.items()},
@@ -450,7 +487,12 @@ def fit_scalers_train_only(
                 sampled = sampled_all.reshape(-1, 1)
         else:
             sampled = sampled_all.reshape(-1, 1)
-        sampled_fit = _apply_value_transform(sampled, mode=str(spec["value_transform"]), var=var)
+        sampled_fit = _apply_value_transform(
+            sampled,
+            mode=str(spec["value_transform"]),
+            var=var,
+            floor=float(spec.get("floor", 0.0)),
+        )
         clip_spec = dict(spec.get("clip", {}))
         if str(clip_spec.get("mode", "none")).strip().lower() == "quantile":
             flat = sampled_fit.reshape(-1).astype(np.float64)

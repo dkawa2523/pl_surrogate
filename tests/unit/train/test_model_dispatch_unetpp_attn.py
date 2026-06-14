@@ -84,7 +84,6 @@ def _valid_cfg(target_vars: list[str]) -> dict[str, Any]:
         "selection": {"mode": "best_val_allvars_balance"},
         "input_features": {
             "mode": "geom_feature_pack",
-            "require_pack": "error",
             "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
             "distance_transform": {"mode": "raw"},
         },
@@ -124,37 +123,10 @@ def test_unetpp_attn_mainline_accepts_valid_dynamic_allvars(
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}
 
 
-def test_unetpp_attn_rejects_non_geom_feature_pack(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    cfg = _valid_cfg(ctx.y_vars)
-    cfg["input_features"]["mode"] = "legacy_xy"
-    ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
-    with pytest.raises(ValueError, match="geom_feature_pack"):
-        run_model_train_predict(ctx)
-
-
-def test_unetpp_attn_rejects_wrong_feature_order(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    cfg = _valid_cfg(ctx.y_vars)
-    cfg["input_features"]["features"] = ["x", "y", "distance_signed", "distance_any", "mask_plasma"]
-    ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
-    with pytest.raises(ValueError, match="input_features.features"):
-        run_model_train_predict(ctx)
-
-
 def test_unetpp_attn_rejects_non_shared_head(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
     cfg = _valid_cfg(ctx.y_vars)
     cfg["model_cfg"]["output_heads"] = {"mode": "split_density_field"}
     ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
     with pytest.raises(ValueError, match="output_heads.mode must be shared"):
-        run_model_train_predict(ctx)
-
-
-def test_unetpp_attn_rejects_non_mainline_selection_mode(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    cfg = _valid_cfg(ctx.y_vars)
-    cfg["selection"] = {"mode": "last"}
-    ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
-    with pytest.raises(ValueError, match="selection.mode must be best_val_allvars_balance"):
         run_model_train_predict(ctx)

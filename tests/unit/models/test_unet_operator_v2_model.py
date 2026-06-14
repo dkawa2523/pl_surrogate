@@ -24,7 +24,7 @@ def _cfg() -> dict[str, object]:
         "upsample": "bilinear",
         "use_film": True,
         "activation": "silu",
-        "head_mode": "split_density_field",
+        "head_mode": "shared",
     }
 
 
@@ -41,7 +41,7 @@ def test_build_unet_operator_v2_smoke() -> None:
     )
     assert isinstance(model, UNetOperatorV2)
     assert model.output_keys == ["ne", "ni", "Te", "phi"]
-    assert model.unet_operator_v2_cfg["head_mode"] == "split_density_field"
+    assert model.unet_operator_v2_cfg["head_mode"] == "shared"
 
 
 def test_unet_operator_v2_forward_shape() -> None:
