@@ -168,8 +168,8 @@ def boundary_operator_loss_torch(
     """
     torch = require_torch()
     density = _as_bchw(pred_fields.get("density"))
-    te = _as_bchw(pred_fields.get("temperature", pred_fields.get("Te")))
-    phi = _as_bchw(pred_fields.get("potential", pred_fields.get("phi")))
+    te = _as_bchw(pred_fields.get("temperature"))
+    phi = _as_bchw(pred_fields.get("potential"))
     if mask_band is None:
         m = torch.ones_like(phi)
     else:
@@ -197,6 +197,8 @@ def boundary_operator_loss_torch(
             tgt = 0.10 * _gather_points(density, sample_idx) + 0.05 * _gather_points(te, sample_idx)
         else:
             tgt = 0.10 * density + 0.05 * te
+    m = m.to(device=pred.device, dtype=pred.dtype)
+    tgt = tgt.to(device=pred.device, dtype=pred.dtype)
     diff = (pred - tgt) * m
     denom = torch.clamp(m.sum(), min=1.0)
     return (diff * diff).sum() / denom
@@ -218,7 +220,7 @@ def physics_terms_torch(
         z = torch.zeros((), dtype=torch.float32, device=ref_device)
         return z, {"poisson": 0.0, "boundary_operator": 0.0}
 
-    phi = _as_bchw(pred_fields.get("potential", pred_fields.get("phi")))
+    phi = _as_bchw(pred_fields.get("potential"))
     poisson_weight = float(cfg.get("poisson_weight", 0.0))
     rhs = cfg.get("rhs")
     if rhs is None and bool(cfg.get("use_pred_rho_eff", True)) and ("rho_eff" in pred_fields):

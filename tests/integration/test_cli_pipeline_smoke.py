@@ -11,7 +11,7 @@ from tests._config_presets import csv_npz_targets_three_field_example, runtime_t
 
 
 def test_cli_pipeline_smoke(tmp_path: Path):
-    run_dir = tmp_path / "cycle1_run"
+    run_dir = tmp_path / "mainline_run"
     cfg = {
         "run_dir": str(run_dir),
         "runtime": runtime_table_only(),
@@ -34,6 +34,7 @@ def test_cli_pipeline_smoke(tmp_path: Path):
         "model": {"name": "global_mlp"},
         "train": {"epochs": 5, "lr": 0.01},
         "inference": {
+            "qoi": {"uniformity": {"target": "ne"}},
             "single": {"enabled": True, "cond": {"c0": 0.2, "c1": 0.5, "c2": 0.8}},
             "batch": {
                 "enabled": True,
@@ -45,7 +46,7 @@ def test_cli_pipeline_smoke(tmp_path: Path):
             "optimize": {
                 "enabled": True,
                 "n_trials": 4,
-                "sampler": "random",
+                "backend": "random",
                 "space": {"c0": [0.0, 1.0], "c1": [0.0, 1.0], "c2": [0.0, 1.0]},
             },
         },
@@ -65,15 +66,16 @@ def test_cli_pipeline_smoke(tmp_path: Path):
     assert (run_dir / "preprocessing" / "split" / "split_interp_overlap_v1.json").exists()
     assert (run_dir / "preprocessing" / "split" / "split_extrap_v1.json").exists()
     assert (run_dir / "data_cleaning" / "report.json").exists()
-    assert (run_dir / "preprocessing" / "split" / "split_pressure_extrap_v1.json").exists()
+    assert not (run_dir / "preprocessing" / "split" / "split_pressure_extrap_v1.json").exists()
     assert (run_dir / "preprocessing" / "scalers" / "xgrid_channel_scalers.json").exists()
     assert (run_dir / "preprocessing" / "scalers" / "fit_policy.json").exists()
     assert (run_dir / "preprocessing" / "schema" / "output_layout.json").exists()
     assert (run_dir / "preprocessing" / "scalers" / "coord_scaler.json").exists()
-    assert (run_dir / "preprocessing" / "sampling" / "deeponet" / "sensor_query_index.json").exists()
-    assert (run_dir / "preprocessing" / "sampling" / "deeponet" / "index_meta.json").exists()
-    assert (run_dir / "preprocessing" / "sampling" / "deeponet" / "sensor_coords.npy").exists()
-    assert (run_dir / "preprocessing" / "sampling" / "deeponet" / "query_coords.npy").exists()
+    deeponet_default = run_dir / "preprocessing" / "sampling" / "deeponet" / "default"
+    assert (deeponet_default / "sensor_query_index.json").exists()
+    assert (deeponet_default / "index_meta.json").exists()
+    assert (deeponet_default / "sensor_coords.npy").exists()
+    assert (deeponet_default / "query_coords.npy").exists()
     assert (run_dir / "preprocessing" / "sampling" / "geometry" / "distance_signed.npy").exists()
     assert (run_dir / "preprocessing" / "scalers" / "distance_transform_stats.json").exists()
     assert (run_dir / "checkpoints" / "meta.json").exists()
@@ -101,6 +103,7 @@ def test_cli_pipeline_smoke(tmp_path: Path):
 
     cfg_cases = json.loads(json.dumps(cfg))
     cfg_cases["inference"] = {
+        "qoi": {"uniformity": {"target": "ne"}},
         "single": {"enabled": False},
         "batch": {
             "enabled": True,
@@ -139,7 +142,7 @@ def test_cli_pipeline_csv_npz_smoke(tmp_path: Path):
     for i in range(6):
         np.savez_compressed(
             dataset_root / f"case_{i:03d}.npz",
-            log_ne=np.full((8, 8), 0.1 + i * 0.01, dtype=np.float32),
+            ne=np.full((8, 8), 0.1 + i * 0.01, dtype=np.float32),
             Te=np.full((8, 8), 0.2 + i * 0.01, dtype=np.float32),
             phi=np.full((8, 8), 0.3 + i * 0.01, dtype=np.float32),
         )
@@ -177,6 +180,7 @@ def test_cli_pipeline_csv_npz_smoke(tmp_path: Path):
         "model": {"name": "global_mlp", "phi_mode": "direct"},
         "train": {"epochs": 2, "lr": 0.01},
         "inference": {
+            "qoi": {"uniformity": {"target": "ne"}},
             "single": {
                 "enabled": True,
                 "cond": {"c0": 0.2, "c1": 0.3, "c2": 0.4},
@@ -225,7 +229,7 @@ def test_cli_preprocess_csv_npz_group_split_no_leak(tmp_path: Path):
             cid = f"{g}_t{ti}"
             np.savez_compressed(
                 dataset_root / f"{cid}.npz",
-                log_ne=np.full((8, 8), 0.1 + gi * 0.01 + ti * 0.001, dtype=np.float32),
+                ne=np.full((8, 8), 0.1 + gi * 0.01 + ti * 0.001, dtype=np.float32),
                 Te=np.full((8, 8), 0.2 + gi * 0.01 + ti * 0.001, dtype=np.float32),
                 phi=np.full((8, 8), 0.3 + gi * 0.01 + ti * 0.001, dtype=np.float32),
             )

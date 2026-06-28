@@ -1,5 +1,9 @@
 # Improvement Cycle 20260401 R2
 
+This is an archived experimental matrix, not a mainline product route. Generated
+fixtures are reproducible artifacts and should stay out of standard docs/tests
+unless an archive-specific test regenerates them.
+
 This directory stores the fixed 12-run matrix for the R2 improvement cycle:
 
 1. `C3_coord_siren_control`
@@ -18,9 +22,9 @@ This directory stores the fixed 12-run matrix for the R2 improvement cycle:
 Materialize fixtures:
 
 ```powershell
-python scripts/materialize_improvement_cycle_20260401_r2.py
+python experiments/improvement_cycle_20260401/scripts/materialize_improvement_cycle_20260401_r2.py
 ```
 
-Generated fixtures are emitted to:
+Legacy materializers may emit generated fixtures to:
 
 `tests/fixtures/generated/improvement_cycle_20260401_r2/`

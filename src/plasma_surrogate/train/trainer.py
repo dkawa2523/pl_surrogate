@@ -24,7 +24,7 @@ from plasma_surrogate.train.artifact_writers import (
 )
 from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy
 from plasma_surrogate.train.losses import laplacian2d
-from plasma_surrogate.train.spatial_features import materialize_case_spatial_batch
+from plasma_surrogate.preprocessing.spatial_features import materialize_case_spatial_batch
 from plasma_surrogate.train.target_contracts import resolve_mainline_selection_weights
 
 
@@ -86,6 +86,25 @@ def _resolve_numpy_trainer_physics_fields(
     )
 
 
+def _resolve_numpy_trainer_potential_index(
+    y_vars: list[str],
+    *,
+    physics_cfg: dict[str, Any] | None = None,
+    loss_cfg: dict[str, Any] | None = None,
+) -> int:
+    cfg = dict(physics_cfg or {})
+    loss = dict(loss_cfg or {})
+    role_schema = cfg.get("target_role_schema") or loss.get("target_role_schema") or cfg.get("target_roles")
+    resolved = resolve_physics_symbol_keys(
+        [str(v) for v in y_vars],
+        symbols=dict(cfg.get("symbols", {}) or {}),
+        target_role_schema=dict(role_schema or {}),
+        required=("potential",),
+        context="rho auxiliary training",
+    )
+    return int(y_vars.index(resolved["potential"]))
+
+
 def _clone_model_state_numpy(model: Any) -> dict[str, np.ndarray]:
     if not hasattr(model, "state_dict_numpy"):
         raise TypeError("model does not support state_dict_numpy")
@@ -108,6 +127,14 @@ def _normalize_unet_selection_mode(raw_mode: Any) -> str:
     if mode == "best_val_data_loss":
         return "best_val_loss"
     return mode
+
+
+def _model_output_keys(model: Any) -> list[str]:
+    keys = [str(v) for v in list(getattr(model, "output_keys", []) or [])]
+    if keys:
+        return keys
+    n_outputs = int(getattr(model, "out_channels", 0) or 0)
+    return [f"target_{idx}" for idx in range(max(n_outputs, 0))]
 
 
 def _unet_allvars_boundary_balance_score(
@@ -421,7 +448,7 @@ def train_one_epoch_global_physics(
         (rng or np.random.default_rng(0)).shuffle(order)
 
     h, w = model.grid_shape
-    y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
+    y_vars = _model_output_keys(model)
     accum = {
         "total": 0.0,
         "data": 0.0,
@@ -463,7 +490,7 @@ def train_one_epoch_global_physics(
         pred_fields = pred.reshape(pred.shape[0], model.out_channels, h, w)
         pred_dict = {name: pred_fields[:, i] for i, name in enumerate(y_vars)}
         tgt_dict = {name: np.asarray(y_batch[:, i], dtype=np.float32) for i, name in enumerate(y_vars)}
-        data_loss, grad_by_var, _ = compose_supervised_numpy(
+        data_loss, grad_by_var, loss_parts = compose_supervised_numpy(
             pred_dict,
             tgt_dict,
             y_order=y_vars,
@@ -521,6 +548,10 @@ def train_one_epoch_global_physics(
         total_seen += seen
         accum["total"] += float(total_loss) * seen
         accum["data"] += float(data_loss) * seen
+        for key, value in loss_parts.items():
+            if str(key).startswith("loss_supervised_group_"):
+                accum.setdefault(str(key), 0.0)
+                accum[str(key)] += float(value) * seen
         accum["physics"] += float(phys_loss) * seen
         accum["poisson"] += float(terms.get("poisson", 0.0)) * seen
         accum["boundary"] += float(terms.get("boundary", 0.0)) * seen
@@ -575,7 +606,7 @@ def train_one_epoch_unet(
     if shuffle_cases and n_cases > 1:
         (rng or np.random.default_rng(0)).shuffle(order)
 
-    y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
+    y_vars = _model_output_keys(model)
     accum = {
         "total": 0.0,
         "data": 0.0,
@@ -603,7 +634,7 @@ def train_one_epoch_unet(
         pred = raw_pred[:, : model.out_channels]
         pred_dict = {name: pred[:, i] for i, name in enumerate(y_vars)}
         tgt_dict = {name: np.asarray(y_batch[:, i], dtype=np.float32) for i, name in enumerate(y_vars)}
-        data_loss, grad_by_var, _ = compose_supervised_numpy(
+        data_loss, grad_by_var, loss_parts = compose_supervised_numpy(
             pred_dict,
             tgt_dict,
             y_order=y_vars,
@@ -634,7 +665,7 @@ def train_one_epoch_unet(
             total_loss = float(data_loss + phys_loss)
 
         if getattr(model, "with_rho_eff_head", False) and raw_pred.shape[1] > model.out_channels:
-            phi_idx = y_vars.index("phi")
+            phi_idx = _resolve_numpy_trainer_potential_index(y_vars, physics_cfg=physics_cfg, loss_cfg=loss_cfg)
             rho_pred = raw_pred[:, model.out_channels : model.out_channels + 1]
             rho_target = -laplacian2d(y_batch[:, phi_idx]).astype(np.float32)[:, None]
             rho_err = rho_pred - rho_target
@@ -725,6 +756,10 @@ def train_one_epoch_unet(
         total_seen += seen
         accum["total"] += float(total_loss) * seen
         accum["data"] += float(data_loss) * seen
+        for key, value in loss_parts.items():
+            if str(key).startswith("loss_supervised_group_"):
+                accum.setdefault(str(key), 0.0)
+                accum[str(key)] += float(value) * seen
         accum["physics"] += float(phys_loss) * seen
         accum["rho"] += float(rho_loss) * seen
         accum["poisson"] += float(terms.get("poisson", 0.0)) * seen
@@ -797,7 +832,7 @@ class Trainer:
             )
         selection_eval_every = int(max(int(selection_cfg.get("eval_every_n_epochs", 2)), 1))
         selection_warmup = int(max(int(selection_cfg.get("warmup_epochs", 5)), 0))
-        y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
+        y_vars = _model_output_keys(model)
         selection_weights = resolve_mainline_selection_weights(
             selection_cfg=selection_cfg,
             target_vars=list(y_vars),
@@ -842,7 +877,7 @@ class Trainer:
                 head_refresh_applied = 1.0
             val_pred = _forward_model(model, cond_val, training=False)
             val_fields = val_pred.reshape(val_pred.shape[0], model.out_channels, *model.grid_shape)
-            y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
+            y_vars = _model_output_keys(model)
             val_data_loss, _, _ = compose_supervised_numpy(
                 {name: val_fields[:, i] for i, name in enumerate(y_vars)},
                 {name: y_val_field[:, i] for i, name in enumerate(y_vars)},
@@ -923,6 +958,11 @@ class Trainer:
                         if selection_mode == "best_val_loss" and best_epoch >= 0
                         else (best_score if best_epoch >= 0 else 0.0)
                     ),
+                    **{
+                        str(key): float(value)
+                        for key, value in stats.items()
+                        if str(key).startswith("loss_supervised_group_")
+                    },
                 }
             )
             diagnostics_rows.append(
@@ -1036,7 +1076,7 @@ class Trainer:
         selection_band_px = float(selection_cfg.get("boundary_band_px", 2.0))
         y_vars = [str(v) for v in list(getattr(model, "output_keys", []))]
         if len(y_vars) == 0:
-            y_vars = ["ne", "Te", "phi"]
+            y_vars = _model_output_keys(model)
         raw_weights = dict(selection_cfg.get("weights", {}))
         if len(raw_weights) == 0:
             uniform = 1.0 / float(max(len(y_vars), 1))
@@ -1212,6 +1252,11 @@ class Trainer:
                     "selection_score_phi": float(selection_score_phi if np.isfinite(selection_score_phi) else 0.0),
                     "selection_valid_flag": 1.0 if selection_valid else 0.0,
                     "train_lr": float(lr),
+                    **{
+                        str(key): float(value)
+                        for key, value in stats.items()
+                        if str(key).startswith("loss_supervised_group_")
+                    },
                 }
             )
             if diagnostics_enabled:

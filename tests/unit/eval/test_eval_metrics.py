@@ -203,6 +203,313 @@ def test_build_benchmark_eval_row_supports_dynamic_target_names():
     assert "test_rmse_temp_main_plasma_deep" in row["_diagnostics"]
 
 
+def test_build_benchmark_eval_row_adds_group_metrics_from_target_role_schema():
+    base = np.arange(4, dtype=np.float32).reshape(1, 1, 2, 2)
+    true_eval = {
+        "electron_density": base,
+        "ion_density": base,
+        "electron_temperature": base,
+        "plasma_potential": base,
+    }
+    pred_eval = {
+        "electron_density": base + 1.0,
+        "ion_density": base + 3.0,
+        "electron_temperature": base + 2.0,
+        "plasma_potential": base + 4.0,
+    }
+
+    row = build_benchmark_eval_row(
+        model_id="grouped",
+        metrics={
+            "electron_density": 1.0,
+            "ion_density": 3.0,
+            "electron_temperature": 2.0,
+            "plasma_potential": 4.0,
+        },
+        r2_scores={
+            "electron_density": 0.9,
+            "ion_density": 0.7,
+            "electron_temperature": 0.5,
+            "plasma_potential": 0.1,
+        },
+        pred_eval=pred_eval,
+        true_eval=true_eval,
+        mask_plasma=np.ones((2, 2), dtype=np.float32),
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["electron_density", "ion_density"],
+        output_vars=[
+            "electron_density",
+            "ion_density",
+            "electron_temperature",
+            "plasma_potential",
+            "ion_flux",
+        ],
+        target_role_schema={
+            "targets": [
+                {"id": "electron_density", "field_family": "density"},
+                {"id": "ion_density", "field_family": "density"},
+                {"id": "electron_temperature", "field_family": "temperature"},
+                {"id": "plasma_potential", "field_family": "electrostatic"},
+                {"id": "ion_flux", "field_family": "flux"},
+            ],
+        },
+    )
+
+    assert np.isclose(float(row["test_rmse_group_density"]), 2.0)
+    assert np.isclose(float(row["test_r2_group_density"]), 0.8)
+    assert np.isclose(
+        float(row["test_rmse_group_density_plasma"]),
+        np.mean(
+            [
+                float(row["test_rmse_electron_density_plasma"]),
+                float(row["test_rmse_ion_density_plasma"]),
+            ]
+        ),
+    )
+    assert float(row["test_rmse_group_temperature"]) == float(row["test_rmse_electron_temperature"])
+    assert float(row["test_rmse_group_temperature_plasma"]) == float(row["test_rmse_electron_temperature_plasma"])
+    assert np.isclose(float(row["test_r2_group_electrostatic"]), 0.1)
+    assert "test_rmse_group_flux" not in row
+    assert "test_r2_group_flux_plasma" not in row
+
+
+def test_build_benchmark_eval_row_skips_group_metrics_without_target_role_schema():
+    pred = np.zeros((1, 1, 2, 2), dtype=np.float32)
+    row = build_benchmark_eval_row(
+        model_id="no_schema",
+        metrics={"density": 1.0},
+        r2_scores={"density": 0.0},
+        pred_eval={"density": pred + 1.0},
+        true_eval={"density": pred},
+        mask_plasma=np.ones((2, 2), dtype=np.float32),
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["density"],
+        output_vars=["density"],
+        target_role_schema={},
+    )
+
+    assert "test_rmse_density" in row
+    assert not any(str(key).startswith("test_rmse_group_") for key in row)
+    assert not any(str(key).startswith("test_r2_group_") for key in row)
+
+
+def test_build_benchmark_eval_row_adds_region_and_group_region_metrics():
+    distance_signed = np.array(
+        [
+            [0.0, 1.0, 3.0, 12.0],
+            [0.0, 1.0, 3.0, 12.0],
+            [-1.0, -1.0, -12.0, -12.0],
+            [-1.0, -1.0, -12.0, -12.0],
+        ],
+        dtype=np.float32,
+    )
+    mask_plasma = (distance_signed >= 0.0).astype(np.float32)
+    true_temperature = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+    pred_temperature = true_temperature.copy()
+    boundary = np.logical_and(mask_plasma > 0.5, distance_signed <= 2.0)
+    deep = np.logical_and(mask_plasma > 0.5, distance_signed > 10.0)
+    outside = distance_signed < 0.0
+    pred_temperature[:, :, boundary] += 2.0
+    pred_temperature[:, :, deep] += 1.0
+    pred_temperature[:, :, outside] += 3.0
+
+    row = build_benchmark_eval_row(
+        model_id="region_diag",
+        metrics={"electron_temperature": 0.0},
+        r2_scores={"electron_temperature": 1.0},
+        pred_eval={"electron_temperature": pred_temperature},
+        true_eval={"electron_temperature": true_temperature},
+        mask_plasma=mask_plasma,
+        distance_signed=distance_signed,
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["electron_temperature"],
+        output_vars=["electron_temperature"],
+        target_role_schema={
+            "targets": [{"id": "electron_temperature", "field_family": "temperature"}],
+        },
+        extended_diagnostics_enabled=True,
+    )
+
+    assert np.isclose(float(row["test_rmse_electron_temperature_boundary_band"]), 2.0)
+    assert np.isclose(float(row["test_rmse_electron_temperature_deep_plasma"]), 1.0)
+    assert np.isclose(float(row["test_rmse_electron_temperature_outside"]), 3.0)
+    assert np.isclose(float(row["test_rmse_group_temperature_boundary_band"]), 2.0)
+    assert np.isclose(float(row["test_rmse_group_temperature_deep_plasma"]), 1.0)
+    assert np.isclose(float(row["test_rmse_group_temperature_outside"]), 3.0)
+    assert np.isclose(float(row["_diagnostics"]["test_rmse_electron_temperature_boundary_in"]), 2.0)
+    assert np.isclose(float(row["_diagnostics"]["test_rmse_electron_temperature_plasma_deep"]), 1.0)
+
+
+def test_build_benchmark_eval_row_builds_region_metrics_from_mask_and_distance_any():
+    mask_plasma = np.array(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0, 1.0],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.float32,
+    )
+    distance_any = np.array(
+        [
+            [0.0, 1.0, 3.0, 12.0],
+            [0.0, 1.0, 3.0, 12.0],
+            [1.0, 1.0, 12.0, 12.0],
+            [1.0, 1.0, 12.0, 12.0],
+        ],
+        dtype=np.float32,
+    )
+    true_density = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4)
+    pred_density = true_density.copy()
+    boundary = np.logical_and(mask_plasma > 0.5, distance_any <= 2.0)
+    deep = np.logical_and(mask_plasma > 0.5, distance_any > 10.0)
+    outside = mask_plasma <= 0.5
+    pred_density[:, :, boundary] += 2.0
+    pred_density[:, :, deep] += 1.0
+    pred_density[:, :, outside] += 3.0
+
+    row = build_benchmark_eval_row(
+        model_id="region_diag_distance_any",
+        metrics={"density": 0.0},
+        r2_scores={"density": 1.0},
+        pred_eval={"density": pred_density},
+        true_eval={"density": true_density},
+        mask_plasma=None,
+        region_mask_plasma=mask_plasma,
+        distance_any=distance_any,
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["density"],
+        extended_diagnostics_enabled=True,
+    )
+
+    assert np.isclose(float(row["test_rmse_density_boundary_band"]), 2.0)
+    assert np.isclose(float(row["test_rmse_density_deep_plasma"]), 1.0)
+    assert np.isclose(float(row["test_rmse_density_outside"]), 3.0)
+
+
+def test_build_benchmark_eval_row_skips_region_columns_without_region_masks():
+    pred = np.zeros((1, 1, 2, 2), dtype=np.float32)
+    row = build_benchmark_eval_row(
+        model_id="no_region",
+        metrics={"density": 1.0},
+        r2_scores={"density": 0.0},
+        pred_eval={"density": pred + 1.0},
+        true_eval={"density": pred},
+        mask_plasma=np.ones((2, 2), dtype=np.float32),
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["density"],
+    )
+
+    assert "test_rmse_density" in row
+    assert "test_rmse_density_boundary_band" not in row
+    assert "test_rmse_density_deep_plasma" not in row
+    assert "test_rmse_density_outside" not in row
+
+
+def test_build_benchmark_eval_row_keeps_extended_region_columns_out_of_default_row():
+    distance_signed = np.array([[0.0, 12.0], [-1.0, -12.0]], dtype=np.float32)
+    mask_plasma = (distance_signed >= 0.0).astype(np.float32)
+    true_density = np.zeros((1, 1, 2, 2), dtype=np.float32)
+    pred_density = np.ones((1, 1, 2, 2), dtype=np.float32)
+
+    row = build_benchmark_eval_row(
+        model_id="default_region_diag",
+        metrics={"density": 1.0},
+        r2_scores={"density": 0.0},
+        pred_eval={"density": pred_density},
+        true_eval={"density": true_density},
+        mask_plasma=mask_plasma,
+        distance_signed=distance_signed,
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["density"],
+        output_vars=["density"],
+        target_role_schema={"targets": [{"id": "density", "field_family": "density"}]},
+    )
+
+    assert "test_rmse_density" in row
+    assert "test_rmse_density_boundary_band" not in row
+    assert "test_rmse_density_deep_plasma" not in row
+    assert "test_rmse_density_outside" not in row
+    assert "test_rmse_group_density_boundary_band" not in row
+    assert "test_rmse_density_boundary_in" in row["_diagnostics"]
+
+
+def test_build_benchmark_eval_row_adds_positive_diagnostics_from_schema():
+    true = np.zeros((1, 1, 2, 2), dtype=np.float32)
+    density_pred = np.array([[[[-1.0, 0.5], [2.0, 3.0]]]], dtype=np.float32)
+    temperature_pred = np.ones((1, 1, 2, 2), dtype=np.float32)
+
+    row = build_benchmark_eval_row(
+        model_id="positive_diag",
+        metrics={"density_main": 0.0, "temperature_main": 0.0},
+        r2_scores={"density_main": 1.0, "temperature_main": 1.0},
+        pred_eval={"density_main": density_pred, "temperature_main": temperature_pred},
+        true_eval={"density_main": true, "temperature_main": true},
+        mask_plasma=np.ones((2, 2), dtype=np.float32),
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["density_main"],
+        output_vars=["density_main", "temperature_main"],
+        target_role_schema={
+            "positive_targets": ["density_main"],
+            "targets": [
+                {"id": "density_main", "field_family": "density", "positive": True},
+                {"id": "temperature_main", "field_family": "temperature", "positive": False},
+            ],
+        },
+        extended_diagnostics_enabled=True,
+    )
+
+    assert np.isclose(float(row["positive_violation_rate_density_main"]), 0.25)
+    assert np.isclose(float(row["negative_min_density_main"]), -1.0)
+    assert np.isclose(float(row["positive_violation_rate_group_density"]), 0.25)
+    assert "positive_violation_rate_temperature_main" not in row
+    assert "negative_min_temperature_main" not in row
+
+
+def test_build_benchmark_eval_row_keeps_positive_diagnostics_out_of_default_row():
+    pred = np.array([[[[-1.0, 0.5], [2.0, 3.0]]]], dtype=np.float32)
+    row = build_benchmark_eval_row(
+        model_id="default_positive_diag",
+        metrics={"density": 0.0},
+        r2_scores={"density": 1.0},
+        pred_eval={"density": pred},
+        true_eval={"density": np.zeros_like(pred)},
+        mask_plasma=np.ones((2, 2), dtype=np.float32),
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["density"],
+        output_vars=["density"],
+        target_role_schema={
+            "positive_targets": ["density"],
+            "targets": [{"id": "density", "field_family": "density", "positive": True}],
+        },
+    )
+
+    assert "positive_violation_rate_density" not in row
+    assert "negative_min_density" not in row
+    assert "positive_violation_rate_group_density" not in row
+    assert np.isclose(float(row["_diagnostics"]["positive_violation_rate_density"]), 0.25)
+
+
+def test_build_benchmark_eval_row_skips_positive_diagnostics_without_positive_targets():
+    pred = np.full((1, 1, 2, 2), -1.0, dtype=np.float32)
+    row = build_benchmark_eval_row(
+        model_id="no_positive",
+        metrics={"density": 1.0},
+        r2_scores={"density": 0.0},
+        pred_eval={"density": pred},
+        true_eval={"density": np.zeros_like(pred)},
+        mask_plasma=np.ones((2, 2), dtype=np.float32),
+        single_diagnostics={"poisson_residual_norm": 0.0, "boundary_operator_proxy_loss": 0.0},
+        target_vars_for_score=["density"],
+        output_vars=["density"],
+        target_role_schema={"targets": [{"id": "density", "field_family": "density"}]},
+    )
+
+    assert "test_rmse_density" in row
+    assert not any(str(key).startswith("positive_violation_rate_") for key in row)
+    assert not any(str(key).startswith("negative_min_") for key in row)
+
+
 def test_benchmark_eval_row_marks_empty_plasma_mask_invalid() -> None:
     pred = np.zeros((1, 1, 2, 2), dtype=np.float32)
     row = build_benchmark_eval_row(

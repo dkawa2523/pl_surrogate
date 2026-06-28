@@ -9,7 +9,7 @@ import numpy as np
 from plasma_surrogate.data.geometry_context import GeometryContext
 from plasma_surrogate.features.structure_feature_registry import validate_coord_feature_channels
 from plasma_surrogate.preprocessing.scalers import ScalerFactory
-from plasma_surrogate.train.spatial_features import (
+from plasma_surrogate.preprocessing.spatial_features import (
     apply_distance_transform,
     derive_geom_feature_maps,
     distance_to_mask,

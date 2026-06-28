@@ -276,9 +276,6 @@ def convert(
     manifest_path = src_root / "learning_manifest.csv"
     manifest_rows = _read_manifest(manifest_path)
     first_mask = _load_domain_mask(src_root / manifest_rows[0]["path_masks_domain_masks"])
-    rid = np.asarray(first_mask["rid"], dtype=np.int64)
-    zid = np.asarray(first_mask["zid"], dtype=np.int64)
-    plasma_vec = np.asarray(first_mask["plasma_vec"], dtype=bool)
     shape = tuple(int(v) for v in first_mask["shape"])
     mask_plasma = np.asarray(first_mask["mask_plasma"], dtype=np.float32)
 
@@ -373,6 +370,7 @@ def convert(
                     z_coords=np.asarray(mask_info["z_coords"], dtype=np.float32),
                 )
                 structure_payload.update(parts["sdf_maps"])
+                structure_payload["part_mask_stack"] = np.asarray(parts["mask_stack"], dtype=np.float32)
                 if reference_parts is None or int(parts["active_count"]) > int(reference_parts["active_count"]):
                     reference_parts = {
                         "case_id": case_id,
@@ -448,6 +446,8 @@ def convert(
         "structure_audit_columns": list(STRUCTURE_AUDIT_COLUMNS if structure_spatial_v1 else []),
         "structure_npz_column": "structure_npz" if structure_spatial_v1 else "",
         "part_sdf_channels": list(PART_SDF_KEYS if part_sdf_lite_v1 else []),
+        "part_mask_stack": bool(part_sdf_lite_v1),
+        "part_lite_v1_ready": bool(part_sdf_lite_v1),
         "parts_manifest": "geometry/parts_manifest.json" if part_sdf_lite_v1 else "",
         "parts_pack": "geometry/parts_pack.npz" if part_sdf_lite_v1 else "",
         "targets": {

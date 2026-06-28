@@ -9,6 +9,7 @@ import pytest
 from plasma_surrogate.data.geometry_provider import build_geometry_provider
 from plasma_surrogate.infer.cases import parse_batch_cases
 from plasma_surrogate.infer.engine import InferenceEngine
+from plasma_surrogate.infer.qoi import pick_uniformity_target, uniformity_values_for_region
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 
@@ -92,6 +93,7 @@ def _build_engine(tmp_path: Path, provider_mode: str, *, input_mode: str) -> Inf
         geometry_provider=provider,
         output_dir=tmp_path / f"infer_{provider_mode}_{input_mode}",
         input_mode=input_mode,
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
 
 
@@ -136,7 +138,7 @@ def test_inference_physics_inputs_resolve_from_target_roles(tmp_path: Path) -> N
     resolved = engine._resolve_boundary_operator_inputs(fields)
 
     assert resolved is not None
-    assert set(resolved) == {"log_density", "temperature", "potential"}
+    assert set(resolved) == {"density", "temperature", "potential"}
     assert resolved["potential"].shape == (1, 8, 8)
 
 
@@ -233,8 +235,8 @@ def test_icp_part_sdf_lite_runtime_features_change_with_geom_param(tmp_path: Pat
     ]
     base = provider.get({"geom_id": "default", "geom_param": {}})
     shifted = provider.get({"geom_id": "default", "geom_param": {"part.coil_01.tx": 0.2}})
-    rows_base = engine._build_grid_feature_rows(base, channels)
-    rows_shifted = engine._build_grid_feature_rows(shifted, channels)
+    rows_base = engine.feature_builder.build_grid_feature_rows(base, channels)
+    rows_shifted = engine.feature_builder.build_grid_feature_rows(shifted, channels)
     assert rows_base.shape == (64, 14)
     assert np.allclose(rows_base[:, channels.index("mask_plasma")], rows_shifted[:, channels.index("mask_plasma")])
     assert not np.allclose(rows_base[:, channels.index("mask_coil")], rows_shifted[:, channels.index("mask_coil")])
@@ -272,8 +274,8 @@ def test_part_lite_runtime_features_change_with_geom_param(tmp_path: Path) -> No
     ]
     base = provider.get({"geom_id": "default", "geom_param": {}})
     shifted = provider.get({"geom_id": "default", "geom_param": {"part.coil_01.tx": 0.2}})
-    rows_base = engine._build_grid_feature_rows(base, channels)
-    rows_shifted = engine._build_grid_feature_rows(shifted, channels)
+    rows_base = engine.feature_builder.build_grid_feature_rows(base, channels)
+    rows_shifted = engine.feature_builder.build_grid_feature_rows(shifted, channels)
     assert rows_base.shape == (64, 13)
     assert np.allclose(rows_base[:, channels.index("boundary_band")], rows_shifted[:, channels.index("boundary_band")])
     assert not np.allclose(rows_base[:, channels.index("part_sdf_nearest")], rows_shifted[:, channels.index("part_sdf_nearest")])
@@ -296,7 +298,7 @@ def test_uniformity_values_for_plasma_mid_height_region() -> None:
     mask[1:4, 1:5] = 1.0
     target = np.arange(30, dtype=np.float32).reshape(5, 6)
 
-    vals, meta = InferenceEngine._uniformity_values_for_region(
+    vals, meta = uniformity_values_for_region(
         target,
         mask_plasma=mask,
         wafer_mask=None,
@@ -316,7 +318,7 @@ def test_uniformity_values_for_plasma_mean_height_region() -> None:
     mask[4, 1:5] = 1.0
     target = np.arange(36, dtype=np.float32).reshape(6, 6)
 
-    vals, meta = InferenceEngine._uniformity_values_for_region(
+    vals, meta = uniformity_values_for_region(
         target,
         mask_plasma=mask,
         wafer_mask=None,
@@ -334,7 +336,7 @@ def test_uniformity_values_for_fixed_row_range_region() -> None:
     mask = np.ones((5, 6), dtype=np.float32)
     target = np.arange(30, dtype=np.float32).reshape(5, 6)
 
-    vals, meta = InferenceEngine._uniformity_values_for_region(
+    vals, meta = uniformity_values_for_region(
         target,
         mask_plasma=mask,
         wafer_mask=None,
@@ -352,20 +354,48 @@ def test_uniformity_values_for_fixed_row_range_region() -> None:
     np.testing.assert_allclose(vals, target[3, 1:5])
 
 
-def test_pick_uniformity_target_prefers_configured_order_and_skips_missing() -> None:
+def test_pick_uniformity_target_uses_configured_target() -> None:
     fields = {
         "ne": np.full((1, 2, 2), 1.0, dtype=np.float32),
         "Te": np.full((1, 2, 2), 2.0, dtype=np.float32),
         "rho_eff": np.full((1, 2, 2), 9.0, dtype=np.float32),
     }
 
-    key, target = InferenceEngine._pick_uniformity_target(
+    key, target = pick_uniformity_target(
         fields,
-        preferred_keys=["missing", "Te", "ne"],
+        preferred_keys=["Te"],
     )
 
     assert key == "Te"
     np.testing.assert_allclose(target, fields["Te"][0])
+
+
+def test_pick_uniformity_target_uses_single_positive_schema_target() -> None:
+    fields = {
+        "density": np.full((1, 2, 2), 1.0, dtype=np.float32),
+        "temperature": np.full((1, 2, 2), 2.0, dtype=np.float32),
+    }
+
+    key, target = pick_uniformity_target(
+        fields,
+        target_role_schema={"positive_targets": ["density"]},
+    )
+
+    assert key == "density"
+    np.testing.assert_allclose(target, fields["density"][0])
+
+
+def test_pick_uniformity_target_rejects_ambiguous_positive_schema_targets() -> None:
+    fields = {
+        "density": np.full((1, 2, 2), 1.0, dtype=np.float32),
+        "temperature": np.full((1, 2, 2), 2.0, dtype=np.float32),
+    }
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        pick_uniformity_target(
+            fields,
+            target_role_schema={"positive_targets": ["density", "temperature"]},
+        )
 
 
 def test_postprocess_positive_fields_clamps_only_configured_vars() -> None:

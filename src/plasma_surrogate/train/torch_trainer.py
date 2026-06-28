@@ -11,6 +11,7 @@ import numpy as np
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.deeponet_contract import allvars_plasma_balance_score
 from plasma_surrogate.core.physics_contract import resolve_epoch_scaled_physics
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.core.torch_backend import require_torch
 from plasma_surrogate.train.artifact_writers import (
     save_physics_terms,
@@ -300,6 +301,16 @@ class TorchTrainer:
         poisson_head = getattr(model, "poisson_head", None)
         boundary_operator = getattr(model, "boundary_operator", None)
         stage_audit: list[dict[str, Any]] = []
+        potential_key: str | None = None
+        if poisson_head is not None:
+            physics_base_cfg = dict(physics_cfg or {})
+            potential_key = resolve_physics_symbol_keys(
+                [str(v) for v in y_vars],
+                symbols=dict(physics_base_cfg.get("symbols", {}) or {}),
+                target_role_schema=dict(physics_base_cfg.get("target_role_schema", {}) or {}),
+                required=("potential",),
+                context="deeponet poisson head",
+            )["potential"]
 
         opt_contract = dict(optimizer_contract or {})
         selection_cfg = dict(selection_cfg or {})
@@ -410,6 +421,7 @@ class TorchTrainer:
                 train_data_num = 0.0
                 train_phys_num = 0.0
                 terms_acc = {"poisson": 0.0, "boundary": 0.0, "boundary_operator": 0.0, "rho": 0.0}
+                group_loss_acc: dict[str, float] = {}
                 grad_l2_by_var = {str(name): 0.0 for name in y_vars}
                 grad_norm_pre = 0.0
                 grad_norm_post = 0.0
@@ -418,13 +430,13 @@ class TorchTrainer:
                     y_tr_b = y_tr[batch_idx]
                     pred = model.predict_fields_torch(c_tr_b, geom_ctx=geom_ctx)
                     if poisson_head is not None and "rho_eff" in pred:
-                        pred["phi"] = poisson_head.predict_phi(
+                        pred[str(potential_key)] = poisson_head.predict_phi(
                             pred["rho_eff"],
                             c_tr_b,
                             geom_ctx=geom_ctx,
                             refine_iters=int(stage.get("refine_iters", 0)),
                         )
-                    data_loss, _ = compose_supervised_torch(
+                    data_loss, data_parts = compose_supervised_torch(
                         pred_fields=pred,
                         target_fields=y_tr_b,
                         y_order=y_vars,
@@ -448,6 +460,9 @@ class TorchTrainer:
                     train_loss_num += float(total.detach().cpu().item()) * float(bsz_case)
                     train_data_num += float(data_loss.detach().cpu().item()) * float(bsz_case)
                     train_phys_num += float(phys_loss.detach().cpu().item()) * float(bsz_case)
+                    for key, value in data_parts.items():
+                        if str(key).startswith("loss_supervised_group_"):
+                            group_loss_acc[str(key)] = group_loss_acc.get(str(key), 0.0) + float(value) * float(bsz_case)
                     for key in terms_acc:
                         terms_acc[key] += float(terms.get(key, 0.0)) * float(bsz_case)
                     out_bias = getattr(model, "out_bias", None)
@@ -490,6 +505,7 @@ class TorchTrainer:
                 train_data_loss = float(train_data_num / denom_tr)
                 train_phys_loss = float(train_phys_num / denom_tr)
                 terms_mean = {k: float(v / denom_tr) for k, v in terms_acc.items()}
+                group_loss_mean = {k: float(v / denom_tr) for k, v in group_loss_acc.items()}
 
                 should_eval_selection = (
                     selection_mode == "best_val_allvars_balance"
@@ -515,7 +531,7 @@ class TorchTrainer:
                         y_va_b = y_va[batch_idx]
                         pred_va_b = model.predict_fields_torch(c_va_b, geom_ctx=geom_ctx)
                         if poisson_head is not None and "rho_eff" in pred_va_b:
-                            pred_va_b["phi"] = poisson_head.predict_phi(
+                            pred_va_b[str(potential_key)] = poisson_head.predict_phi(
                                 pred_va_b["rho_eff"],
                                 c_va_b,
                                 geom_ctx=geom_ctx,
@@ -612,6 +628,7 @@ class TorchTrainer:
                         "selected_epoch_flag": 0.0,
                         "selected_epoch_score": 0.0,
                         **{f"selection_score_{name}": 0.0 for name in y_vars},
+                        **group_loss_mean,
                     }
                 )
                 diagnostics_rows.append(

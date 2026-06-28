@@ -18,6 +18,10 @@ def test_mainline_docs_scripts_and_templates_do_not_expose_removed_research_knob
         "positive_penalty",
         "relative_weighting",
         "external_operator",
+        "supervised.base",
+        "supervised.delta",
+        "delta_by_var",
+        "case_spatial_feature_pack",
         "docs/reports",
         "reports/",
     )

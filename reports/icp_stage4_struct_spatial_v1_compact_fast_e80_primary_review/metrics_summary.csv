@@ -1,4 +1,0 @@
-model,status,epochs,primary_metric,primary_value,test_r2_ne_plasma_extrap,test_r2_ni_plasma_extrap,test_r2_Te_plasma_extrap,test_r2_phi_plasma_extrap,test_r2_plasma_mean_extrap,note
-unet,completed,80,test_r2_plasma_mean_extrap,0.8548261803985165,0.837361175891015,0.837506654118695,0.8468374782834052,0.8975994133009507,0.8548261803985165,compact struct-spatial v1 baseline
-ffno,stopped,80,test_r2_plasma_mean_extrap,,,,,,,stopped after long full-resolution run with GPU 100 percent and no final metrics
-cno,not_started,80,test_r2_plasma_mean_extrap,,,,,,,held because ffno showed the full-resolution operator path is too costly

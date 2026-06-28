@@ -25,6 +25,28 @@ def test_benchmark_plan_builder_resolves_eval_protocol_and_diagnostics_cfg():
     assert builder.inference_ood_cfg()["diagnostics"] == {"maps": {"enabled": True}}
 
 
+def test_benchmark_plan_builder_preserves_derived_field_list_config():
+    builder = BenchmarkPlanBuilder(
+        {
+            "inference": {
+                "derived_fields": [
+                    {
+                        "id": "electric_field",
+                        "operator": "negative_gradient",
+                        "source": "plasma_potential",
+                    }
+                ],
+                "derived_fields_strict": True,
+            }
+        }
+    )
+
+    ood_cfg = builder.inference_ood_cfg()
+
+    assert ood_cfg["derived_fields"][0]["operator"] == "negative_gradient"
+    assert ood_cfg["derived_fields_strict"] is True
+
+
 def test_benchmark_plan_builder_rejects_unknown_eval_target():
     with pytest.raises(ValueError, match="target_vars_for_score"):
         BenchmarkPlanBuilder({"eval": {"target_vars_for_score": ["missing"]}}).eval_protocol_plan(

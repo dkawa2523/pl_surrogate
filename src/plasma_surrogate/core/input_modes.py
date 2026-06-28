@@ -128,7 +128,6 @@ def build_runtime_schema_hashes(schemas: dict[str, Any] | None) -> dict[str, str
         "channel_map": dict(raw.get("channel_map", {}) or {}),
         "coord_feature_pack_meta": dict(raw.get("coord_feature_pack_meta", {}) or {}),
         "static_spatial_feature_pack_meta": dict(raw.get("static_spatial_feature_pack_meta", {}) or {}),
-        "case_spatial_feature_pack_meta": dict(raw.get("case_spatial_feature_pack_meta", {}) or {}),
         "case_structure_feature_pack_meta": dict(raw.get("case_structure_feature_pack_meta", {}) or {}),
     }
     descriptor_meta = dict(raw.get("structure_descriptor_pack_meta", {}) or {})

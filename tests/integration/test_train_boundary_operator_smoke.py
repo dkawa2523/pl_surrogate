@@ -34,7 +34,7 @@ def test_train_with_boundary_operator_smoke(tmp_path: Path):
                 "boundary_operator": {
                     "enabled": True,
                     "delta_edge": 1.5,
-                    "target_coeffs": {"log_ne": 0.1, "Te": 0.05, "bias": 0.0},
+                    "target_coeffs": {"density": 0.1, "temperature": 0.05, "bias": 0.0},
                 },
             },
         },
@@ -92,7 +92,7 @@ def test_train_with_boundary_operator_external_stub_smoke(tmp_path: Path):
                     "delta_edge": 1.5,
                     "mode": "external_operator",
                     "external_operator": {
-                        "w_log_ne": 0.08,
+                        "w_density": 0.08,
                         "w_te": 0.06,
                         "w_en": 0.04,
                         "bias": 0.0,

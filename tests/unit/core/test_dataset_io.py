@@ -87,6 +87,53 @@ def test_load_csv_npz_dataset_missing_fields_key_fails_fast(tmp_path: Path):
         )
 
 
+@pytest.mark.parametrize("legacy_key", ["output_vars", "output_key_map", "output_value_transform"])
+def test_load_csv_npz_dataset_rejects_removed_legacy_target_keys(tmp_path: Path, legacy_key: str):
+    root = tmp_path / "csv_ds"
+    root.mkdir(parents=True)
+    _write_geometry(root)
+    _write_case_npz(root / "a.npz")
+    (root / "index.csv").write_text(
+        "case_id,axis,c0,c1,c2,fields_npz\n"
+        "case_a,0.0,0.1,0.2,0.3,a.npz\n",
+        encoding="utf-8",
+    )
+
+    cfg = _csv_npz_cfg(root)
+    cfg[legacy_key] = ["ne"]
+
+    with pytest.raises(ValueError, match=f"dataset.{legacy_key} is removed"):
+        load_csv_npz_dataset(cfg, run_dir=tmp_path)
+
+
+def test_load_csv_npz_dataset_rejects_non_identity_target_transform_in_mainline(tmp_path: Path):
+    root = tmp_path / "csv_ds"
+    root.mkdir(parents=True)
+    _write_geometry(root)
+    np.savez_compressed(
+        root / "a.npz",
+        log_ne=np.zeros((6, 6), dtype=np.float32),
+        ni=np.ones((6, 6), dtype=np.float32),
+        Te=np.ones((6, 6), dtype=np.float32),
+        phi=np.ones((6, 6), dtype=np.float32),
+    )
+    (root / "index.csv").write_text(
+        "case_id,axis,c0,c1,c2,fields_npz\n"
+        "case_a,0.0,0.1,0.2,0.3,a.npz\n",
+        encoding="utf-8",
+    )
+    cfg = _csv_npz_cfg(root)
+    cfg["targets"] = [
+        {"id": "ne", "source_key": "log_ne", "value_transform": "pow10"},
+        {"id": "ni", "source_key": "ni", "value_transform": "identity"},
+        {"id": "Te", "source_key": "Te", "value_transform": "identity"},
+        {"id": "phi", "source_key": "phi", "value_transform": "identity"},
+    ]
+
+    with pytest.raises(ValueError, match="value_transform='pow10' is removed"):
+        load_csv_npz_dataset(cfg, run_dir=tmp_path)
+
+
 def test_load_dataset_dispatches_csv_npz(tmp_path: Path):
     root = tmp_path / "csv_ds"
     root.mkdir(parents=True)

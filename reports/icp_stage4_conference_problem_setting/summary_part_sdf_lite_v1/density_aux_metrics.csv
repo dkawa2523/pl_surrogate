@@ -1,2 +1,0 @@
-dataset_size,model_id,eval_split,status,n_cases,var,target_value_transform,plasma_float64_rmse,plasma_float64_r2,full_float64_rmse,full_float64_r2,checkpoint,error
-full,ffno,single,missing_checkpoint,,,,,,,,runs\icp_stage4_conference_part_sdf_lite_v1_e80_baseline\full\ffno\models\ffno\checkpoints,

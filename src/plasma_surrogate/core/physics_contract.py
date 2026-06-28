@@ -11,6 +11,7 @@ from plasma_surrogate.data.geometry_context import GeometryContext
 
 
 REMOVED_PHYSICS_KEYS = ("lambda_poisson", "lambda_bc", "lambda_rho")
+REGISTERED_PHYSICS_TERMS = ("poisson", "boundary", "boundary_operator", "rho")
 
 
 def _reject_removed_physics_keys(cfg: dict[str, Any]) -> None:
@@ -28,19 +29,49 @@ def normalize_physics_terms(raw_cfg: dict[str, Any] | None) -> dict[str, dict[st
     cfg = dict(raw_cfg or {})
     _reject_removed_physics_keys(cfg)
     terms_raw = cfg.get("terms", {})
-    if isinstance(terms_raw, list):
-        terms_cfg = {
-            str(item.get("name")): {k: v for k, v in dict(item).items() if k != "name"}
-            for item in terms_raw
-            if isinstance(item, dict) and item.get("name") is not None
-        }
+    if terms_raw is None:
+        terms_cfg = {}
+    elif isinstance(terms_raw, list):
+        terms_cfg: dict[str, dict[str, Any]] = {}
+        for index, item in enumerate(terms_raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"physics.terms[{index}] must be a mapping with name, enabled, and weight")
+            if "name" not in item:
+                raise ValueError(f"physics.terms[{index}].name is required")
+            missing = [key for key in ("enabled", "weight") if key not in item]
+            if missing:
+                raise ValueError(f"physics.terms[{index}] is missing required keys: {missing}")
+            name = str(item.get("name", "")).strip().lower()
+            if name not in REGISTERED_PHYSICS_TERMS:
+                raise ValueError(f"unsupported physics term {name!r}; registered terms={list(REGISTERED_PHYSICS_TERMS)}")
+            if "symbols" in item:
+                raise ValueError(
+                    f"physics.terms[{index}].symbols is not supported; use top-level physics.symbols "
+                    "or target_role_schema role/family metadata"
+                )
+            terms_cfg[name] = {k: v for k, v in dict(item).items() if k != "name"}
+    elif isinstance(terms_raw, dict):
+        terms_cfg = {}
+        for raw_name, raw_payload in dict(terms_raw or {}).items():
+            name = str(raw_name).strip().lower()
+            if name not in REGISTERED_PHYSICS_TERMS:
+                raise ValueError(f"unsupported physics term {name!r}; registered terms={list(REGISTERED_PHYSICS_TERMS)}")
+            payload = dict(raw_payload or {})
+            if "symbols" in payload:
+                raise ValueError(
+                    f"physics.terms.{name}.symbols is not supported; use top-level physics.symbols "
+                    "or target_role_schema role/family metadata"
+                )
+            terms_cfg[name] = payload
     else:
-        terms_cfg = dict(terms_raw or {})
+        raise ValueError("physics.terms must be a mapping or a list of term objects")
 
     def _normalize(name: str) -> dict[str, Any]:
         term_cfg = dict(terms_cfg.get(name, {}))
         weight_raw = term_cfg.get("weight")
         weight = 0.0 if weight_raw is None else float(weight_raw)
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError(f"physics.terms.{name}.weight must be finite and >= 0")
         enabled_raw = term_cfg.get("enabled")
         enabled = bool((weight > 0.0) if enabled_raw is None else enabled_raw)
         return {"enabled": enabled, "weight": weight, "source_key": "terms"}
@@ -55,7 +86,7 @@ def normalize_physics_terms(raw_cfg: dict[str, Any] | None) -> dict[str, dict[st
 
 def _resolved_terms_payload(terms: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for name in ["poisson", "boundary", "boundary_operator", "rho"]:
+    for name in REGISTERED_PHYSICS_TERMS:
         row = dict(terms.get(name, {}))
         out.append(
             {
@@ -130,7 +161,7 @@ def build_physics_cfg(
                 bo_cfg.get("sample_idx_source", "deeponet_task:boundary_operator.query_indices")
             ),
             "supervised_targets_npz": bo_cfg.get("supervised_targets_npz"),
-            "target_coeffs": bo_cfg.get("target_coeffs", {"density": 0.10, "Te": 0.05, "bias": 0.0}),
+            "target_coeffs": bo_cfg.get("target_coeffs", {"density": 0.10, "temperature": 0.05, "bias": 0.0}),
             "prior_coeffs": bo_cfg.get("prior_coeffs"),
             "operator_handle": None,
             "target_clamp": bo_cfg.get("target_clamp"),

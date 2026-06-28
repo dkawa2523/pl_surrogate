@@ -25,7 +25,7 @@ def test_weighted_sum_uniformity_matches_single_term_objective():
     assert evaluation.objective_value == pytest.approx(0.4)
     assert evaluation.search_value == pytest.approx(0.4)
     assert evaluation.feasible is True
-    assert evaluation.objective_key == "uniformity"
+    assert evaluation.objective_mode == "weighted_sum"
     assert evaluation.parts["objective_term_uniformity"] == pytest.approx(0.4)
 
 
@@ -47,7 +47,7 @@ def test_weighted_sum_can_mix_qoi_and_diagnostics():
     )
 
     assert evaluation.objective_value == pytest.approx(0.52)
-    assert evaluation.objective_key == "weighted_sum"
+    assert evaluation.objective_mode == "weighted_sum"
     assert evaluation.parts["objective_term_poisson_residual_norm"] == pytest.approx(0.02)
 
 

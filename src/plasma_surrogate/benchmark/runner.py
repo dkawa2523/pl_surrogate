@@ -45,7 +45,8 @@ from plasma_surrogate.core.model_families import (
 from plasma_surrogate.core.model_input_policy import resolve_effective_input_mode_metadata_for_model
 from plasma_surrogate.core.model_specs import MODEL_SPECS, benchmark_scope_model_map
 from plasma_surrogate.core.physics_contract import build_physics_cfg
-from plasma_surrogate.eval.metrics import r2_masked, rmse_masked
+from plasma_surrogate.core.physics_numeric import poisson_residual_loss
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.eval.core_metrics import build_benchmark_eval_row
 from plasma_surrogate.infer.engine import InferenceEngine
 from plasma_surrogate.infer.engine_builder import build_inference_engine
@@ -54,8 +55,40 @@ from plasma_surrogate.models.checkpoint import save_checkpoint
 from plasma_surrogate.benchmark.model_dispatch import BenchmarkModelContext, run_model_train_eval
 from plasma_surrogate.preprocessing.split import build_group_kfold_splits
 from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
-from plasma_surrogate.train.losses import poisson_residual_loss
 from plasma_surrogate.viz.runner import VizRunner
+
+
+def _benchmark_physics_symbols(ood_cfg: dict[str, Any]) -> dict[str, Any]:
+    symbols: dict[str, Any] = {}
+    for section_name in ("physics", "boundary_operator"):
+        section = dict(dict(ood_cfg or {}).get(section_name, {}) or {})
+        raw = section.get("symbols")
+        if isinstance(raw, dict):
+            symbols.update({str(key): value for key, value in raw.items()})
+    return symbols
+
+
+def _resolve_benchmark_potential_key(
+    *,
+    field_keys: list[str],
+    target_role_schema: dict[str, Any] | None,
+    ood_cfg: dict[str, Any],
+    context: str,
+) -> str | None:
+    symbols = _benchmark_physics_symbols(ood_cfg)
+    try:
+        resolved = resolve_physics_symbol_keys(
+            [str(key) for key in field_keys],
+            symbols=symbols,
+            target_role_schema=dict(target_role_schema or {}),
+            required=("potential",),
+            context=context,
+        )
+    except ValueError:
+        if symbols.get("potential") is not None:
+            raise
+        return None
+    return resolved["potential"]
 
 
 @dataclass
@@ -375,23 +408,33 @@ class BenchmarkProbe:
         te_idx: np.ndarray,
         viz: VizRunner,
     ) -> BenchmarkProbeResult:
-        has_phi = "phi" in true_eval and "phi" in pred_eval
         if not self.enabled():
             return self.skipped("benchmark_probe_disabled")
-        if not has_phi:
-            return self.skipped("missing_phi_target")
-        case_spatial_inference_skip = bool(
-            context.case_spatial_feature_pack or context.case_structure_feature_pack
+        inference_ood_cfg = BenchmarkPlanBuilder(self.benchmark_cfg).inference_ood_cfg()
+        target_role_schema = dict(context.bundle.schemas.get("target_role_schema", {}) or {})
+        common_keys = sorted(set(str(key) for key in true_eval.keys()) & set(str(key) for key in pred_eval.keys()))
+        potential_key = _resolve_benchmark_potential_key(
+            field_keys=common_keys,
+            target_role_schema=target_role_schema,
+            ood_cfg=inference_ood_cfg,
+            context="benchmark probe",
         )
+        if potential_key is None:
+            return self.skipped("missing_potential_target")
+        case_spatial_inference_skip = bool(context.case_structure_feature_pack)
         if case_spatial_inference_skip:
             return self.skipped("case_varying_structure_inputs_not_supported_by_benchmark_inference")
 
         bundle = context.bundle
-        viz.plot_parity(true_eval["phi"].reshape(-1), pred_eval["phi"].reshape(-1), rel_path="plots/parity_phi.png")
+        viz.plot_parity(
+            true_eval[potential_key].reshape(-1),
+            pred_eval[potential_key].reshape(-1),
+            rel_path="plots/parity_potential.png",
+        )
         viz.plot_field_triplet(
-            true_eval["phi"][0, 0],
-            pred_eval["phi"][0, 0],
-            rel_path="plots/phi_triplet.png",
+            true_eval[potential_key][0, 0],
+            pred_eval[potential_key][0, 0],
+            rel_path="plots/potential_triplet.png",
             mask=metric_mask,
         )
 
@@ -407,7 +450,7 @@ class BenchmarkProbe:
             phi_mode=profile_lock["phi_mode"],
             phi_hybrid_steps=int(self.benchmark_cfg.get("phi_hybrid_steps", 1)),
             poisson_refine_iters=int(profile_lock["poisson_refine_iters"]),
-            ood_cfg=BenchmarkPlanBuilder(self.benchmark_cfg).inference_ood_cfg(),
+            ood_cfg=inference_ood_cfg,
             feature_store=context.feature_store,
             coord_scaler=bundle.transforms.get("coord_scaler", {}),
             coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
@@ -541,6 +584,7 @@ class BenchmarkRunner:
         y_scaled = context.y_scaled
         y_vars = [str(v) for v in list(bundle.schemas.get("output_layout", {}).get("vars", []))]
         eval_cfg = dict(self.benchmark_cfg.get("eval", {}))
+        eval_diagnostics_enabled = bool(resolve_eval_diagnostics_cfg(eval_cfg).get("enabled", False))
         eval_plan = plan_builder.eval_protocol_plan(y_vars=y_vars, scopes=_EVAL_PROTOCOL_SCOPES)
         eval_protocol_mode = eval_plan.mode
         eval_protocol_scope = eval_plan.scope
@@ -848,7 +892,6 @@ class BenchmarkRunner:
                             deeponet_boundary_meta=deeponet_boundary_meta,
                             coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
                             coord_feature_pack=coord_feature_pack,
-                            case_spatial_feature_pack=context.case_spatial_feature_pack,
                             static_spatial_feature_pack=context.static_spatial_feature_pack,
                             case_structure_feature_pack=context.case_structure_feature_pack,
                             coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
@@ -859,21 +902,47 @@ class BenchmarkRunner:
                     )
                     pred_eval = dispatch["pred_eval"]
                     true_eval = dispatch["true_eval"]
-                    r2_vals = dict(dispatch.get("r2_scores", {}))
-                    row = {}
-                    for name, value in dict(dispatch["metrics"]).items():
-                        row[f"test_rmse_{name}"] = float(value)
-                    for name, value in r2_vals.items():
-                        row[f"test_r2_{name}"] = float(value)
-                    if metric_mask is not None:
-                        for name in sorted(set(true_eval.keys()) & set(pred_eval.keys())):
-                            if name in true_eval and name in pred_eval:
-                                row[f"test_rmse_{name}_plasma"] = float(
-                                    rmse_masked(true_eval[name], pred_eval[name], metric_mask)
-                                )
-                                row[f"test_r2_{name}_plasma"] = float(
-                                    r2_masked(true_eval[name], pred_eval[name], metric_mask)
-                                )
+                    fold_eval_row = build_benchmark_eval_row(
+                        model_id=f"{model_name}_cv_fold_{fold_idx:02d}",
+                        metrics=dict(dispatch["metrics"]),
+                        r2_scores=dict(dispatch.get("r2_scores", {})),
+                        pred_eval=pred_eval,
+                        true_eval=true_eval,
+                        mask_plasma=metric_mask,
+                        region_mask_plasma=(
+                            np.asarray(geom_ctx.mask_plasma, dtype=np.float32) if geom_ctx is not None else None
+                        ),
+                        distance_any=geom_ctx.distance_any if geom_ctx is not None else None,
+                        distance_signed=geom_ctx.distance_signed if geom_ctx is not None else None,
+                        bc_dir_mask=geom_ctx.bc_dir_mask if geom_ctx is not None else None,
+                        wafer_mask=(
+                            np.asarray(geom_ctx.regions.get("wafer_mask"), dtype=np.float32)
+                            if (
+                                geom_ctx is not None
+                                and getattr(geom_ctx, "regions", {}).get("wafer_mask") is not None
+                            )
+                            else None
+                        ),
+                        target_vars_for_score=target_vars_for_score_effective,
+                        region_band_cfg=region_bands_effective,
+                        quality_score_cfg=quality_score_cfg,
+                        target_role_schema=bundle.schemas.get("target_role_schema", {}),
+                        target_scalers=bundle.transforms.get("y_scalers", {}),
+                        output_vars=y_vars,
+                        single_diagnostics={},
+                        extended_diagnostics_enabled=eval_diagnostics_enabled,
+                    )
+                    row = {
+                        str(key): float(value)
+                        for key, value in fold_eval_row.items()
+                        if isinstance(value, (int, float))
+                        and (
+                            str(key).startswith("test_rmse_")
+                            or str(key).startswith("test_r2_")
+                            or str(key).startswith("positive_violation_rate_")
+                            or str(key).startswith("negative_min_")
+                        )
+                    }
                     cv_rows[model_name].append(row)
             CvBenchmarkRunner.attach_summary(leaderboard=leaderboard, cv_rows=cv_rows)
             resolved["cv"] = {
@@ -1050,7 +1119,6 @@ class BenchmarkRunner:
                 deeponet_boundary_meta=context.deeponet_boundary_meta,
                 coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
                 coord_feature_pack=context.coord_feature_pack,
-                case_spatial_feature_pack=context.case_spatial_feature_pack,
                 static_spatial_feature_pack=context.static_spatial_feature_pack,
                 case_structure_feature_pack=context.case_structure_feature_pack,
                 coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
@@ -1074,7 +1142,13 @@ class BenchmarkRunner:
             effective_input_mode_meta=effective_input_mode_meta,
             extra_artifacts=extra_artifacts,
         )
-        has_phi = "phi" in true_eval and "phi" in pred_eval
+        inference_ood_cfg = BenchmarkPlanBuilder(self.benchmark_cfg).inference_ood_cfg()
+        potential_key = _resolve_benchmark_potential_key(
+            field_keys=sorted(set(str(key) for key in true_eval.keys()) & set(str(key) for key in pred_eval.keys())),
+            target_role_schema=bundle.schemas.get("target_role_schema", {}),
+            ood_cfg=inference_ood_cfg,
+            context="benchmark summary",
+        )
         probe = BenchmarkProbe(self.benchmark_cfg).run(
             model=model,
             model_name=model_name,
@@ -1095,7 +1169,9 @@ class BenchmarkRunner:
         summary = {
             "model_id": model_name,
             "rmse": metrics,
-            "poisson_phi_rmse": float(poisson_residual_loss(pred_eval["phi"][:, 0])) if has_phi else 0.0,
+            "poisson_potential_rmse": (
+                float(poisson_residual_loss(pred_eval[potential_key][:, 0])) if potential_key is not None else 0.0
+            ),
             "single_qoi": probe.qoi,
             "single_diagnostics": probe.diagnostics,
             "batch_count": len(probe.batch_rows),
@@ -1106,6 +1182,8 @@ class BenchmarkRunner:
         if summary["lock_hash"] != str(expected_lock_hash):
             raise ValueError("benchmark lock hash mismatch")
 
+        eval_cfg = dict(self.benchmark_cfg.get("eval", {}) or {})
+        eval_diagnostics_enabled = bool(resolve_eval_diagnostics_cfg(eval_cfg).get("enabled", False))
         row = build_benchmark_eval_row(
             model_id=model_name,
             metrics=metrics,
@@ -1113,6 +1191,7 @@ class BenchmarkRunner:
             pred_eval=pred_eval,
             true_eval=true_eval,
             mask_plasma=metric_mask,
+            region_mask_plasma=np.asarray(geom_ctx.mask_plasma, dtype=np.float32) if geom_ctx is not None else None,
             distance_any=geom_ctx.distance_any if geom_ctx is not None else None,
             distance_signed=geom_ctx.distance_signed if geom_ctx is not None else None,
             bc_dir_mask=geom_ctx.bc_dir_mask if geom_ctx is not None else None,
@@ -1126,16 +1205,17 @@ class BenchmarkRunner:
             quality_score_cfg=quality_score_cfg,
             target_role_schema=bundle.schemas.get("target_role_schema", {}),
             target_scalers=bundle.transforms.get("y_scalers", {}),
+            output_vars=y_vars,
             single_diagnostics=probe.diagnostics,
+            extended_diagnostics_enabled=eval_diagnostics_enabled,
         )
         _inject_input_mode_metadata_into_row(
             row=row,
             input_mode_meta=effective_input_mode_meta,
-            case_spatial_pack_used=bool(context.case_spatial_feature_pack or context.case_structure_feature_pack),
+            case_spatial_pack_used=bool(context.case_structure_feature_pack),
         )
         row["scaler_fit_split"] = str(preprocess_report.get("scaler_fit_split", "unknown"))
-        eval_cfg = dict(self.benchmark_cfg.get("eval", {}) or {})
-        if bool(resolve_eval_diagnostics_cfg(eval_cfg).get("enabled", False)):
+        if eval_diagnostics_enabled:
             write_eval_diagnostics(
                 eval_cfg=eval_cfg,
                 model_dir=model_dir,

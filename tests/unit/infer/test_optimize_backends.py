@@ -65,10 +65,10 @@ def test_optimize_runner_random_backend_reproducible():
     a = runner.run(**kwargs)
     b = runner.run(**kwargs)
     assert a.best_cond == b.best_cond
-    assert a.best_objective_value == b.best_objective_value
+    assert a.objective_value == b.objective_value
     assert len(a.trials) == 6
     assert a.backend == "random"
-    assert a.objective_key == "uniformity"
+    assert a.objective_mode == "weighted_sum"
 
 
 def test_optimize_runner_unknown_backend_raises():
@@ -110,7 +110,7 @@ def test_optimize_runner_two_stage_backend_runs_global_then_local():
     )
     assert out.backend == "two_stage"
     assert len(out.trials) == 6
-    assert out.best_objective_value == pytest.approx(min(t["objective_value"] for t in out.trials))
+    assert out.objective_value == pytest.approx(min(t["objective_value"] for t in out.trials))
 
 
 def test_optimize_runner_two_stage_backend_records_geom_space_trials():
@@ -207,6 +207,11 @@ def test_resolve_optimize_backend_uses_backend_key():
     assert _resolve_optimize_backend({"backend": "two_stage"}) == "two_stage"
 
 
+def test_resolve_optimize_backend_rejects_legacy_sampler():
+    with pytest.raises(ValueError, match="sampler is removed"):
+        _resolve_optimize_backend({"sampler": "random"})
+
+
 def test_optimize_runner_csv_backend(tmp_path: Path):
     csv_path = tmp_path / "candidates.csv"
     with csv_path.open("w", encoding="utf-8", newline="") as f:
@@ -250,15 +255,41 @@ def test_optimize_runner_prefers_feasible_trial_over_lower_infeasible_objective(
         constraints_cfg=[{"key": "poisson_residual_norm", "upper": 0.05}],
     )
 
-    assert out.best_feasible is True
-    assert out.best_objective_value == pytest.approx(0.5)
-    assert out.best_search_value == pytest.approx(0.5)
+    assert out.feasible is True
+    assert out.objective_value == pytest.approx(0.5)
+    assert out.search_value == pytest.approx(0.5)
+    assert out.constraint_violation_total == pytest.approx(0.0)
     assert out.trials[0]["feasible"] is False
     assert out.trials[0]["violated_constraints"] == ["poisson_residual_norm"]
     assert out.trials[0]["constraint_violation_total"] > 0.0
     assert out.trials[0]["search_value"] > out.trials[1]["search_value"]
     assert out.trials[1]["qoi_uniformity"] == pytest.approx(0.5)
     assert out.trials[1]["diagnostic_poisson_residual_norm"] == pytest.approx(0.0)
+
+
+def test_optimize_runner_all_infeasible_uses_lowest_search_value():
+    engine = _SequenceEngine(
+        [
+            _StaticResult({"uniformity": 0.1}, {"poisson_residual_norm": 1.0}),
+            _StaticResult({"uniformity": 0.5}, {"poisson_residual_norm": 0.2}),
+        ]
+    )
+    runner = OptimizeRunner(engine)
+
+    out = runner.run(
+        space={"c0": (0.0, 1.0)},
+        geom_space={},
+        n_trials=2,
+        geom_ref={"geom_id": "default"},
+        backend="random",
+        constraints_cfg=[{"key": "poisson_residual_norm", "upper": 0.05}],
+    )
+
+    assert out.feasible is False
+    assert out.objective_value == pytest.approx(0.5)
+    assert out.constraint_violation_total == pytest.approx(3.0)
+    assert out.search_value == pytest.approx(3_000_000.5)
+    assert out.search_value < out.trials[0]["search_value"]
 
 
 def test_optimize_runner_records_weighted_terms():
@@ -284,10 +315,10 @@ def test_optimize_runner_records_weighted_terms():
         },
     )
 
-    assert out.objective_key == "weighted_sum"
     assert out.objective_mode == "weighted_sum"
     assert out.trials[0]["objective_value"] == pytest.approx(0.52)
     assert out.trials[0]["search_value"] == pytest.approx(0.52)
+    assert "objective_key" not in out.trials[0]
     assert out.trials[0]["objective_term_uniformity"] == pytest.approx(0.5)
     assert out.trials[0]["objective_term_poisson_residual_norm"] == pytest.approx(0.02)
 

@@ -102,8 +102,8 @@ def test_normalize_physics_terms_supports_list_form_and_priority():
         "enabled": True,
         "terms": [
             {"name": "poisson", "weight": 0.51, "enabled": True},
-            {"name": "boundary", "weight": 0.52},
-            {"name": "boundary_operator", "weight": 0.53},
+            {"name": "boundary", "weight": 0.52, "enabled": True},
+            {"name": "boundary_operator", "weight": 0.53, "enabled": True},
         ],
     }
     terms = normalize_physics_terms(raw)
@@ -137,3 +137,34 @@ def test_removed_flat_physics_keys_fail_fast():
     raw = {"enabled": True, "lambda_poisson": 0.1}
     with pytest.raises(ValueError, match="removed physics keys"):
         build_physics_cfg(raw, _geom_ctx())
+
+
+@pytest.mark.parametrize("bad_weight", [-1.0, float("inf"), float("nan")])
+def test_normalize_physics_terms_rejects_invalid_weight(bad_weight):
+    with pytest.raises(ValueError, match="weight"):
+        normalize_physics_terms({"terms": {"poisson": {"enabled": True, "weight": bad_weight}}})
+
+
+def test_normalize_physics_terms_rejects_unknown_term():
+    with pytest.raises(ValueError, match="unsupported physics term"):
+        normalize_physics_terms({"terms": {"continuity": {"enabled": True, "weight": 0.1}}})
+
+
+def test_normalize_physics_terms_rejects_list_item_missing_required_keys():
+    with pytest.raises(ValueError, match="missing required keys"):
+        normalize_physics_terms({"terms": [{"name": "poisson", "weight": 0.1}]})
+
+
+def test_normalize_physics_terms_rejects_term_local_symbols():
+    with pytest.raises(ValueError, match="top-level physics.symbols"):
+        normalize_physics_terms(
+            {
+                "terms": {
+                    "poisson": {
+                        "enabled": True,
+                        "weight": 0.1,
+                        "symbols": {"potential": "plasma_potential"},
+                    }
+                }
+            }
+        )

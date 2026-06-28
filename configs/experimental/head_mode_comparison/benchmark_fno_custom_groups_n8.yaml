@@ -1,0 +1,111 @@
+runtime:
+  input_mode: table_plus_structure
+  structure:
+    feature_profile: geom_v1_mainline
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: auto
+    provider_mode: fixed
+
+benchmark:
+  output_dir: runs/head_mode_comparison/fno_custom_groups_n8
+  runtime:
+    input_mode: table_plus_structure
+    structure:
+      feature_profile: geom_v1_mainline
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: auto
+      provider_mode: fixed
+  dataset:
+    type: synthetic
+    n_cases: 8
+    height: 8
+    width: 8
+    cond_dim: 3
+    seed: 21
+  profile: m7_fno_isolated
+  seed: 21
+  phi_mode: direct
+  eval:
+    mask_metrics: plasma_only
+    target_family_for_score: allvars
+    target_vars_for_score: [ne, ni, Te, phi]
+    primary_metric: surrogate_quality_score
+    objective_mode: min
+    region_bands:
+      mode: fixed_px
+      boundary_in_px: 1.0
+      deep_plasma_px: 2.0
+  eval_protocol:
+    mode: single
+    scope: fno_isolated
+    primary_split: interp
+  split:
+    seed: 21
+    ratios: [0.6, 0.2, 0.2]
+  preprocessing:
+    axis_schema:
+      mode: steady
+      harmonics: 1
+    coord_features:
+      enabled: true
+      channels_from_profile: geom_v1_mainline
+      distance_transform_stats:
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+    scalers:
+      target_transforms:
+        ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        phi: {value_transform: identity, scaler: zscore, fit_scope: all, clip: {mode: none}}
+  train:
+    unet_like:
+      batch_size_cases: 4
+      shuffle_cases: true
+    fno:
+      epochs: 1
+      lr: 0.001
+      target_family: allvars
+      target_vars: [ne, ni, Te, phi]
+      input_features:
+        mode: geom_feature_pack
+        features: [x, y, mask_plasma, distance_signed, distance_any]
+        distance_transform:
+          mode: raw
+      selection:
+        mode: best_val_allvars_balance
+        weights: {ne: 0.25, ni: 0.25, Te: 0.25, phi: 0.25}
+      model_cfg:
+        backend: torch
+        n_modes: 2
+        spectral_cfg:
+          width: 8
+          n_layers: 1
+          dropout: 0.0
+        output_heads:
+          mode: custom_groups
+          strict: true
+          groups:
+            density:
+              targets: [ne, ni]
+            thermal:
+              targets: [Te]
+            electrostatic:
+              targets: [phi]
+    loss:
+      supervised:
+        type: mse
+        mask: plasma_only
+  physics:
+    enabled: false
+  inference:
+    ood:
+      physics:
+        enabled: true
+        symbols:
+          density: ne
+          temperature: Te
+          potential: phi

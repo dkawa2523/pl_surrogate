@@ -31,20 +31,21 @@ def test_compare_selected_models_supports_auto_primary_and_dynamic_headers(tmp_p
         "target_family_effective",
         "test_rmse_electron_density",
         "test_rmse_electron_temperature",
+        "test_rmse_group_density",
         "surrogate_quality_score",
     ]
     _write_csv(
         global_csv,
         header,
         [
-            ["global_mlp", "table_plus_structure", "surrogate_quality_score", 0.42, "allvars", 0.11, 0.22, 0.42],
+            ["global_mlp", "table_plus_structure", "surrogate_quality_score", 0.42, "allvars", 0.11, 0.22, 0.165, 0.42],
         ],
     )
     _write_csv(
         ffno_csv,
         header,
         [
-            ["ffno", "table_plus_structure", "surrogate_quality_score", 0.31, "allvars", 0.09, 0.18, 0.31],
+            ["ffno", "table_plus_structure", "surrogate_quality_score", 0.31, "allvars", 0.09, 0.18, 0.135, 0.31],
         ],
     )
     cfg = {
@@ -74,6 +75,7 @@ def test_compare_selected_models_supports_auto_primary_and_dynamic_headers(tmp_p
     assert [row["model_id"] for row in rows] == ["ffno", "global_mlp"]
     assert "test_rmse_electron_density" in rows[0]
     assert "test_rmse_electron_temperature" in rows[0]
+    assert "test_rmse_group_density" in rows[0]
     assert rows[0]["primary_metric"] == "surrogate_quality_score"
     assert rows[1]["reference_type"] == "frozen"
 

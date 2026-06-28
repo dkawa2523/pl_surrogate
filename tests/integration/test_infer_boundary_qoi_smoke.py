@@ -18,6 +18,7 @@ def test_infer_boundary_qoi_and_diagnostics_smoke(tmp_path: Path, geometry_root:
         output_dir=tmp_path / "infer",
         ood_cfg={
             "poisson_residual_limit": 1e3,
+            "physics": {"symbols": {"density": "ne", "temperature": "Te", "potential": "phi"}},
             "qoi": {
                 "uniformity": {
                     "target": "Te",
@@ -27,10 +28,11 @@ def test_infer_boundary_qoi_and_diagnostics_smoke(tmp_path: Path, geometry_root:
             },
             "postprocess": {"positive_vars": ["Te"], "positive_floor": 0.0},
             "boundary_operator": {
+                "enabled": True,
                 "delta_edge": 1.5,
                 "wafer_only": False,
                 "mode": "operator_prior",
-                "prior_coeffs": {"log_ne": 0.08, "Te": 0.06, "E_n": 0.04, "bias": 0.0},
+                "prior_coeffs": {"density": 0.08, "temperature": 0.06, "E_n": 0.04, "bias": 0.0},
                 "loss_limit": 1e9,
             },
         },
@@ -88,6 +90,7 @@ def test_infer_null_qoi_and_postprocess_configs_use_defaults(tmp_path: Path, geo
         geometry_provider=FixedGeometryProvider(geometry_root),
         output_dir=tmp_path / "infer_null_cfg",
         ood_cfg={"qoi": None, "postprocess": None},
+        target_role_schema={"positive_targets": ["ne"]},
     )
 
     cond = {"c0": 0.2, "c1": 0.4, "c2": 0.6}
@@ -112,10 +115,11 @@ def test_infer_null_nested_ood_configs_use_defaults(tmp_path: Path, geometry_roo
             "physics": None,
             "boundary_operator": None,
         },
+        target_role_schema={"positive_targets": ["ne"]},
     )
 
     cond = {"c0": 0.2, "c1": 0.4, "c2": 0.6}
     res = engine.single_run(cond=cond, geom={"geom_id": "default"}, axis={"mode": "steady", "value": 0.0})
 
     assert res.qoi["uniformity_score_mode"] == "relative"
-    assert "boundary_gamma_uniformity" in res.qoi
+    assert "boundary_gamma_uniformity" not in res.qoi

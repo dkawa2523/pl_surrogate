@@ -1,48 +1,56 @@
 # 03 Preprocess And Features
 
-`preprocess` は train / infer / benchmark が共有する正本 artifact を作る stage である。
+`preprocess` creates the artifacts shared by train, infer, evaluation, and
+benchmark. Later stages should read these artifacts instead of rebuilding local
+contracts.
 
 ## Canonical Artifacts
 
-- target order: `preprocessing/schema/output_layout.json`
-- target role metadata: `preprocessing/schema/target_role_schema.json`
-- condition schema: `preprocessing/schema/cond_schema.json`
-- channel order: `preprocessing/schema/channel_map.json`
-- coordinate feature metadata: `preprocessing/features/coord_feature_pack_meta.json`
-- target scaler / inverse transform: `preprocessing/scalers/y_scalers.json`
-- runtime schema hash: `preprocessing/validation/runtime_schema_hashes.json`
+- `schema/output_layout.json`: target order.
+- `schema/field_layout.json`: grid2d field metadata copied from the current
+  output layout for future readers; it is not the runtime target-order source.
+- `schema/target_role_schema.json`: role, positivity, and region metadata.
+- `schema/cond_schema.json`: condition and axis inputs.
+- `schema/channel_map.json`: model input channels.
+- `features/*_meta.json`: feature pack channel order and shape.
+- `scalers/y_scalers.json`: fitted target scaler artifacts.
+- `validation/runtime_schema_hashes.json`: target and feature schema hashes.
 
-`runtime_schema_hashes.json` は次を保存する。
+## Target Transforms
 
-- `target_schema_hash`
-- `feature_schema_hash`
+`preprocessing.scalers.target_transforms.<target>` is the source of truth for
+runtime target value transforms, scaler type, fit scope, and clipping. The
+resolved contract is written to scaler artifacts and loaded through
+`TransformBundle`.
 
-checkpoint / inference request / benchmark row はこの 2 つの hash を同じ metadata contract として持つ。不一致は fail-fast とする。
+`dataset.targets[]` describes how to read raw fields and attach metadata. It
+does not replace preprocessing target transform config.
 
-## Runtime Structure Contract
+## Field Layout
 
-runtime input mode は 2 種類だけである。
+`field_layout.json` is a small metadata artifact for the current fixed 2D grid
+lane. It records `layout_type: grid2d`, `vars`, `[C,H,W]` shape, storage order,
+and axes. Train, infer, and benchmark still use `output_layout.json` as the
+canonical target order.
+
+Graph, time-series, and variable-mesh layouts are not implemented product
+layouts yet.
+
+## Runtime Structure
+
+Runtime input mode is one of:
 
 - `table_only`
 - `table_plus_structure`
 
-`runtime.structure` の第一級 key は次の 3 つだけである。
+The structure contract has three main knobs: `feature_profile`, `adapter_mode`,
+and `provider_mode`. `table_only` uses no structure profile. `table_plus_structure`
+requires a concrete feature profile.
 
-- `feature_profile`
-- `adapter_mode`
-- `provider_mode`
+## Feature Rules
 
-`table_only` は structure profile を使わない。`table_plus_structure` は `feature_profile` を必須にする。
-
-## Feature Contract
-
-feature list は train / infer / benchmark で再定義しない。必ず preprocessing artifact を読む。
-
-- `coord_feature_pack_meta.json`: coordinate feature 名、順序、shape
-- `channel_map.json`: model input channel 名、順序、role
-
-descriptor / latent profile は必要なモデルだけの optional metadata であり、runtime input-mode の必須 contract にはしない。
-
-## Transform Contract
-
-target transform は `y_scalers.json` と `TransformBundle` が担当する。model、loss、metric、inference は target 名を見て transform を推定しない。
+- Feature order is an artifact contract.
+- Train, infer, and benchmark must not rewrite feature lists independently.
+- Descriptor and latent profiles are optional lane metadata, not required
+  product runtime keys.
+- Missing required feature artifacts should fail before model construction.

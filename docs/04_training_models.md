@@ -1,48 +1,26 @@
 # 04 Training And Models
 
-training は preprocessing artifact と `src/plasma_surrogate/core/model_specs.py` の capability に従う。新モデル追加は必ず `model_specs.py` から始める。
+Training reads preprocessing artifacts and model capabilities. The first
+question for a new model is what its product capability is, not where to add a
+special branch.
 
 ## Training Contract
 
-- target 定義: `dataset.targets[]`
-- target 順序: `preprocessing/schema/output_layout.json` の `output_layout.vars`
-- target role: `preprocessing/schema/target_role_schema.json`
-- feature 順序: `coord_feature_pack_meta.json` / `channel_map.json`
-- model capability: `src/plasma_surrogate/core/model_specs.py`
-- runtime metadata: checkpoint / inference / benchmark で同じ required keys を検証する
+- Targets come from `dataset.targets[]` and `output_layout.vars`.
+- Roles come from `target_role_schema.json`.
+- Features come from feature pack metadata and `channel_map.json`.
+- Runtime metadata must include concrete target and feature schema hashes.
+- Checkpoints must preserve the effective runtime metadata used for training.
 
-checkpoint と runtime request の schema hash または input mode が一致しない場合は fail-fast とする。
+## First-Class Model Registry
 
-## First-Class Models
-
-`model_specs.py` の `product_status` と `product_category` がこの分類の正本である。
-
-| category | models |
-| --- | --- |
-| baseline | `global_mlp` |
-| grid local | `unet`, `unetpp`, `unetpp_attn` |
-| spectral / operator | `fno`, `ffno`, `u_no`, `cno` |
-| coordinate / operator | `deeponet_plasma`, `coord_mlp_siren`, `geom_deeponet_siren` |
-
-Factory は `get_model_spec(model_name)` から family builder に dispatch する。train / infer / benchmark に model capability の重複定義を増やさない。
-
-## Experimental / Archive
-
-次の model は実装が残るが product first-class ではない。
-
-- `deeponet_pod`
-- `deeponet_plasma_pod`
-- `geom_deeponet_pod`
-- `coord_mlp_fourier`
-- `coord_mlp_pod_residual`
-- `unet_operator_v2`
-- `cno_operator_unet`
-
-使う場合は local experiment として扱い、製品 docs の推奨 path にはしない。
+`src/plasma_surrogate/core/model_specs.py` is the source of truth for model
+status, category, input modes, adapter modes, and feature needs. Train, infer,
+and benchmark dispatch should use these specs and local adapters.
 
 ## Loss Protocol
 
-製品向けの第一選択は protocol 指定だけにする。
+The implemented product protocol is intentionally small:
 
 ```yaml
 train:
@@ -50,12 +28,59 @@ train:
     protocol: plasma_surrogate_v2
 ```
 
-この protocol は `huber`, `plasma_only`, `region_balance`, multiscale `spatial_consistency` を標準化する。`target_role_schema.json` に `positive: true` がある target には role-aware positive penalty を付ける。role schema がない場合は target 名を推定せず、全 target 共通 default に留める。
+It resolves to supervised `type: mse` and `mask: plasma_only` unless the user
+overrides `supervised.type` or `supervised.mask`. `supervised.type: huber` is an
+opt-in alternative with a finite positive `huber_delta`; it is supported by the
+NumPy and Torch supervised loss composers. Research loss knobs outside that
+minimal supervised contract are rejected by the current implementation.
 
-## Output Heads
+`train.loss.group_weighting` is optional and observationally narrow:
 
-first-class model の product examples は `output_heads.mode: shared` を使う。target group 別 head が必要になった場合は、target role を使って別途設計する。
+- `none` is the default and preserves the existing summed per-target loss.
+- `uniform_by_target` averages target losses uniformly.
+- `uniform_by_group` resolves target groups from `target_role_schema.json` and
+  gives each non-empty group equal weight. It also reports
+  `loss_supervised_group_<group>` in training history. Missing or incomplete
+  target role metadata fails fast for this mode.
+
+Positive target metadata is used by evaluation/benchmark sign diagnostics. It
+does not currently add a separate positive training loss.
 
 ## Physics Training
 
-physics-aware training は `physics.symbols` または `target_role_schema.json` の一意な role / field_family で target を解決する。解決できない場合は fail-fast とする。
+Physics residual training follows the `physics.terms` flow. `train.loss`
+selects and combines supervised data loss, while `physics.terms` is the source
+of truth for physics residual names, enable flags, and weights.
+
+Registered physics terms are currently `poisson`, `boundary`,
+`boundary_operator`, and `rho`. Unknown term names fail fast; names for planned
+or experimental residuals are not registered until they have code and tests.
+
+Target symbols are resolved from explicit top-level `physics.symbols` first,
+then unique role/family metadata from `target_role_schema.json`. Term-local
+`symbols` are not supported. Missing or ambiguous symbols fail fast.
+
+## Output Heads
+
+The default and shared allvars baseline is `output_heads.mode: shared`.
+Grid/operator models can opt in to grouped heads:
+
+- `role_grouped`: groups targets from `target_role_schema.json` field-family metadata.
+- `custom_groups`: uses explicit `output_heads.groups.<name>.targets`.
+
+Grouped heads are limited to grid/operator families (`fno`, `ffno`, `unet`,
+`unetpp`, `unetpp_attn`, `u_no`, `cno`). The trunk remains shared and only the
+lightweight final heads are split. `custom_groups` is strict by default: every
+`output_layout.vars` target must appear in exactly one configured group.
+
+`output_heads.group_options` is reserved for optional experiment lanes on
+resolved groups. The only implemented group head is `head: default`; configured
+`head: poisson_hybrid` currently fails fast and is left for benchmark-backed
+follow-up work. Potential/electrostatic groups must be resolved from roles or
+field-family metadata, not from a fixed target name.
+
+## Archive Boundary
+
+Experimental model variants and one-off studies belong in `configs/experimental/`
+or `experiments/`. They should not add product contracts until train, infer, and
+benchmark behavior is stable.

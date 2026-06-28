@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from plasma_surrogate.infer.engine import InferenceEngine
+from plasma_surrogate.infer.features import InferenceFeatureBuilder
 
 
 class _DummyModel:
@@ -14,10 +14,10 @@ class _BadDummyModel:
 
 
 def test_infer_resolve_coord_feature_channels_uses_registry_validator() -> None:
-    channels = InferenceEngine._resolve_coord_feature_channels(_DummyModel())  # noqa: SLF001
+    channels = InferenceFeatureBuilder.resolve_coord_feature_channels(_DummyModel())
     assert channels == ["x", "y", "distance_signed"]
 
 
 def test_infer_resolve_coord_feature_channels_rejects_unknown_channels() -> None:
     with pytest.raises(ValueError, match="Unsupported coord feature channels"):
-        InferenceEngine._resolve_coord_feature_channels(_BadDummyModel())  # noqa: SLF001
+        InferenceFeatureBuilder.resolve_coord_feature_channels(_BadDummyModel())

@@ -1,5 +1,9 @@
 # Improvement Cycle 2026-04-01
 
+This is an archived experimental matrix, not a mainline product route. Keep
+generated configs and reports out of the standard docs/tests path unless a test
+explicitly exercises archive regeneration.
+
 This directory defines the 12-experiment improvement cycle for:
 
 - `deeponet_plasma` (D1-D6)
@@ -10,14 +14,16 @@ This directory defines the 12-experiment improvement cycle for:
 
 ```powershell
 .\.venv-test\Scripts\python.exe -m pip install -e ".[dev]"
-.\.venv-test\Scripts\python.exe scripts\materialize_improvement_cycle_20260401.py
+.\.venv-test\Scripts\python.exe experiments\improvement_cycle_20260401\scripts\materialize_improvement_cycle_20260401.py
 ```
 
-Generated fixtures are written to:
+Legacy materializers may write generated fixtures to:
 
 - `tests/fixtures/generated/improvement_cycle_20260401/*.yaml`
 
-## Run Example
+Treat those files as reproducible artifacts, not maintained mainline fixtures.
+
+## Legacy Run Example
 
 ```powershell
 .\.venv-test\Scripts\plasma-surrogate.exe benchmark run --config tests/fixtures/generated/improvement_cycle_20260401/d1_deeponet_epochs240.yaml
@@ -32,7 +38,7 @@ Generated fixtures are written to:
 ## Evaluate Gates
 
 ```powershell
-.venv-test\Scripts\python.exe scripts\evaluate_improvement_cycle_20260401.py `
+.venv-test\Scripts\python.exe experiments\improvement_cycle_20260401\scripts\evaluate_improvement_cycle_20260401.py `
   --baseline runs/periodic_real_tuned_v83/benchmark_m7_deeponet_isolated_mainline/leaderboard.csv `
   --candidate runs/improvement_cycle_20260401/d6_deeponet_film_fused_residual/leaderboard.csv `
   --track deeponet

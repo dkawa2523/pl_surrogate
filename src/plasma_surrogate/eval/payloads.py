@@ -15,7 +15,7 @@ from plasma_surrogate.eval.metrics import (
     rmse_masked,
 )
 from plasma_surrogate.eval.sanity_checks import build_metric_validity_flags
-from plasma_surrogate.train.losses import poisson_residual_loss
+from plasma_surrogate.core.physics_numeric import poisson_residual_loss
 
 
 def build_eval_metrics_payload(
@@ -24,6 +24,7 @@ def build_eval_metrics_payload(
     pred_eval: dict[str, np.ndarray],
     eps: np.ndarray | None = None,
     mask_plasma: np.ndarray | None = None,
+    potential_key: str | None = None,
 ) -> dict[str, Any]:
     keys = [k for k in true_eval.keys() if k in pred_eval]
     rmse = rmse_by_var({k: true_eval[k] for k in keys}, {k: pred_eval[k] for k in keys})
@@ -50,9 +51,10 @@ def build_eval_metrics_payload(
             mask_plasma=mask_plasma,
             quality_components={"surrogate_quality_score": 0.0},
         )
-    if "phi" in pred_eval:
-        rmse["phi_poisson_residual"] = float(poisson_residual_loss(pred_eval["phi"][:, 0]))
-        rmse["phi_poisson_residual_norm"] = float(poisson_residual_norm(pred_eval["phi"][:, 0], eps=eps))
+    if potential_key is not None and potential_key in pred_eval:
+        key = str(potential_key)
+        rmse[f"{key}_poisson_residual"] = float(poisson_residual_loss(pred_eval[key][:, 0]))
+        rmse[f"{key}_poisson_residual_norm"] = float(poisson_residual_norm(pred_eval[key][:, 0], eps=eps))
     return {
         "rmse": rmse,
         "r2": r2,

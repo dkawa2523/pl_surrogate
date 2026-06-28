@@ -73,11 +73,6 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
         if source_key == "":
             raise ValueError(f"dataset.targets[{i}].source_key must not be empty")
         value_transform = str(entry.get("value_transform", "identity")).strip().lower()
-        if target_id in {"log_ne", "log_ni"} or source_key in {"log_ne", "log_ni"}:
-            raise ValueError(
-                f"dataset.targets[{i}] uses removed log-density key {source_key!r}. "
-                "Mainline density targets must use linear ne/ni with value_transform=identity."
-            )
         if value_transform != "identity":
             raise ValueError(
                 f"dataset.targets[{i}].value_transform={value_transform!r} is removed from mainline. "

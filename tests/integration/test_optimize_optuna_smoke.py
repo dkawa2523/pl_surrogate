@@ -32,12 +32,17 @@ def test_optimize_runner_optuna_smoke(tmp_path: Path, geometry_root: Path):
         backend="optuna",
         backend_cfg={"sampler": "tpe", "n_startup_trials": 2},
     )
-    assert "best_objective_value" in result
+    assert "objective_value" in result
+    assert "best_objective_value" not in result
+    assert "objective_key" not in result
     assert (tmp_path / "infer_optuna" / "optimize" / "best.json").exists()
     with (tmp_path / "infer_optuna" / "optimize" / "summary.json").open("r", encoding="utf-8") as f:
         summary = json.load(f)
     assert summary["backend"] == "optuna"
     assert summary["objective_mode"] == "weighted_sum"
-    assert "best_objective_value" in summary
-    assert "best_search_value" in summary
-    assert "best_feasible" in summary
+    assert "objective_value" in summary
+    assert "search_value" in summary
+    assert "feasible" in summary
+    assert "best_objective_value" not in summary
+    assert "best_search_value" not in summary
+    assert "objective_key" not in summary

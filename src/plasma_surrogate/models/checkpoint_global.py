@@ -56,23 +56,8 @@ def load_global_mlp_checkpoint_model(meta: dict[str, Any]) -> GlobalMLP | None:
 
 
 def load_global_mlp_checkpoint_weights(model: GlobalMLP, weights: Any) -> None:
-    if not hasattr(model, "load_state_dict_numpy"):
-        model.W = np.asarray(weights["W"], dtype=np.float32)
-        model.b = np.asarray(weights["b"], dtype=np.float32)
-        return
-
     if "W" in weights and "b" in weights:
-        legacy_w = np.asarray(weights["W"], dtype=np.float32)
-        legacy_b = np.asarray(weights["b"], dtype=np.float32)
-        if legacy_w.ndim != 2 or legacy_b.ndim != 1:
-            raise ValueError(f"legacy checkpoint has invalid shapes: W={legacy_w.shape} b={legacy_b.shape}")
-        model.weights = [legacy_w]
-        model.biases = [legacy_b]
-        if hasattr(model, "hidden"):
-            model.hidden = []
-        if hasattr(model, "arch_version"):
-            model.arch_version = "linear_v1_legacy_loaded"
-        return
+        raise ValueError("legacy global_mlp checkpoint format is not supported; expected layer*.W/layer*.b")
 
     state = {k: np.asarray(weights[k], dtype=np.float32) for k in weights.files}
     model.load_state_dict_numpy(state)

@@ -8,7 +8,11 @@ import numpy as np
 
 from plasma_surrogate.data.geometry_context import GeometryContext
 from plasma_surrogate.eval.metrics import bc_mae, poisson_residual_norm
-from plasma_surrogate.train.losses import boundary_operator_loss, boundary_operator_target, poisson_residual
+from plasma_surrogate.core.physics_numeric import (
+    boundary_operator_loss,
+    boundary_operator_target,
+    poisson_residual,
+)
 
 
 def collect_inference_diagnostics(

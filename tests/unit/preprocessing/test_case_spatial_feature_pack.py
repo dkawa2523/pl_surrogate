@@ -141,7 +141,6 @@ def test_preprocess_writes_case_spatial_pack_and_process_only_cond(tmp_path: Pat
     assert report["static_spatial_feature_shape"] == [5, *shape]
     assert report["case_structure_feature_shape"] == [4, 3, *shape]
     assert report["coord_feature_pack_path"] == ""
-    assert report["case_spatial_feature_pack_path"] == ""
 
     cond_schema = json.loads((out / "schema" / "cond_schema.json").read_text(encoding="utf-8"))
     assert cond_schema["order"] == ["pp", "pp0"]

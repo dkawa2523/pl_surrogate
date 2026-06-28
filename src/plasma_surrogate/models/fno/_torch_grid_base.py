@@ -6,6 +6,11 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.models.heads.role_grouped import (
+    configure_output_head_metadata,
+    is_grouped_output_head_mode,
+)
+
 
 class _TorchGridFieldBaseline:
     """Shared wrapper for torch-based grid field models with spatial features."""
@@ -26,6 +31,8 @@ class _TorchGridFieldBaseline:
         default_output_keys: list[str],
         impl_version: str,
         head_arch_version: str,
+        output_heads: dict[str, Any] | None = None,
+        target_role_schema: dict[str, Any] | None = None,
     ) -> None:
         self.input_dim = int(input_dim)
         self.grid_shape = tuple(grid_shape)
@@ -41,6 +48,14 @@ class _TorchGridFieldBaseline:
         self.backend = str(backend).strip().lower()
         if self.backend != "torch":
             raise ValueError(f"{type(self).__name__} supports only backend='torch'")
+        self._config_prefix = str(cfg_prefix)
+        configure_output_head_metadata(
+            self,
+            output_heads=dict(output_heads or {}),
+            output_keys=list(self.output_keys),
+            target_role_schema=dict(target_role_schema or {}),
+            cfg_prefix=self._config_prefix,
+        )
 
         channels = list(input_feature_channels or ["x", "y"])
         if len(channels) == 0:
@@ -52,7 +67,11 @@ class _TorchGridFieldBaseline:
         self.feature_dim = int(self.input_dim + self.spatial_feature_dim)
         self.head_mlp_cfg = dict(head_mlp or {})
         self.fno_impl_version = str(impl_version)
-        self.head_arch_version = str(head_arch_version)
+        self.head_arch_version = (
+            f"{head_arch_version}_{self.output_heads_mode}_v1"
+            if is_grouped_output_head_mode(self.output_heads_mode)
+            else str(head_arch_version)
+        )
 
         h, w = self.grid_shape
         yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
@@ -182,6 +201,8 @@ class _TorchGridFieldBaseline:
         return self.forward_features(cond, spatial_features=spatial_features)
 
     def _torch_step_reference(self):
+        if getattr(self.net, "head", None) is not None:
+            return self.net.in_proj.weight, self.net.head.step_reference()
         return self.net.in_proj.weight, self.net.post[-1].weight
 
     def backward_raw(

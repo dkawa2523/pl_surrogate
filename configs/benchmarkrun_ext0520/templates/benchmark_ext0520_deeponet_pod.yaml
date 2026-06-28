@@ -1,12 +1,12 @@
 benchmark:
-  output_dir: runs/benchmarkrun_ext0520/n54/deeponet_pod
+  output_dir: runs/gec_ccp_trustworthy_v1/n54/deeponet_pod
   profile: m7_deeponet_pod_experimental
   seed: 511
   phi_mode: direct
   eval:
     mask_metrics: plasma_only
     interp_mode: overlap
-    protocol_variant: deeponet_pod_benchmarkrun_ext0520_n54
+    protocol_variant: deeponet_pod_gec_ccp_trustworthy_v1_n54
     target_family_for_score: allvars
     target_vars_for_score:
     - ne
@@ -19,8 +19,6 @@ benchmark:
       mode: fixed_px
       boundary_in_px: 2.0
       deep_plasma_px: 10.0
-      boundary_q: 0.15
-      deep_q: 0.7
   eval_protocol:
     mode: dual_axis
     scope: common
@@ -28,31 +26,48 @@ benchmark:
     interp_weight: 0.5
     extrap_weight: 0.5
     frozen_ref_tag: periodic_global_frozen_v2
+    interp_mode: overlap
   dataset:
     type: csv_npz
     root: data/outputs_merged_td_csv_periodic_ext0520
     index_csv: index_54.csv
     targets:
     - id: ne
-      source_key: log_ne
-      value_transform: pow10
+      source_key: ne
+      value_transform: identity
       units: m^-3
       dtype: float32
+      role: density_electron
+      positive: true
+      field_family: density
+      default_region: plasma_only
     - id: ni
-      source_key: log_ni
-      value_transform: pow10
+      source_key: ni
+      value_transform: identity
       units: m^-3
       dtype: float32
+      role: density_ion
+      positive: true
+      field_family: density
+      default_region: plasma_only
     - id: Te
       source_key: Te
       value_transform: identity
       units: eV
       dtype: float32
+      role: temperature_electron
+      positive: true
+      field_family: temperature
+      default_region: plasma_only
     - id: phi
       source_key: phi
       value_transform: identity
       units: V
       dtype: float32
+      role: potential
+      positive: false
+      field_family: electrostatic
+      default_region: plasma_only
     cond_columns:
     - PP0
     - Td
@@ -101,7 +116,7 @@ benchmark:
     distance_contract:
       require_negative_outside: error
     coord_grid_contract:
-      require_requested_source: warn
+      require_requested_source: off
     coord_grid_source: coord_grid
     coord_features:
       enabled: true
@@ -153,6 +168,13 @@ benchmark:
     axis:
       mode: steady
       value: 0.0
+    ood:
+      physics:
+        enabled: true
+        symbols:
+          density: ne
+          temperature: Te
+          potential: phi
   runtime:
     input_mode: table_only
     structure:

@@ -41,11 +41,8 @@ def normalize_unet_operator_v2_cfg(raw_cfg: dict[str, Any] | None) -> dict[str, 
         raise ValueError("train.unet_operator_v2.model_cfg.unet_operator_v2_cfg.upsample must be one of: bilinear, nearest")
     if activation not in {"gelu", "silu"}:
         raise ValueError("train.unet_operator_v2.model_cfg.unet_operator_v2_cfg.activation must be one of: gelu, silu")
-    if head_mode not in {"shared", "split_density_field"}:
-        raise ValueError(
-            "train.unet_operator_v2.model_cfg.unet_operator_v2_cfg.head_mode must be one of: "
-            "shared, split_density_field"
-        )
+    if head_mode != "shared":
+        raise ValueError("train.unet_operator_v2.model_cfg.unet_operator_v2_cfg.head_mode must be shared")
 
     return {
         "width": width,
@@ -75,7 +72,7 @@ class UNetOperatorV2(_TorchGridFieldBaseline):
     This model is intentionally separate from ``unet`` and ``unetpp``.  The
     older models remain small comparison baselines; this model is the
     production-facing UNet-family candidate with condition injection at every
-    scale, anti-aliased downsampling, and density/field split heads.
+    scale and anti-aliased downsampling.
     """
 
     model_type = "unet_operator_v2"
@@ -104,7 +101,7 @@ class UNetOperatorV2(_TorchGridFieldBaseline):
             input_feature_channels=input_feature_channels,
             backend=backend,
             cfg_prefix="train.unet_operator_v2",
-            default_output_keys=["ne", "ni", "Te", "phi"],
+            default_output_keys=[],
             impl_version="unet_operator_v2_v1",
             head_arch_version="unet_operator_v2_v1",
         )
@@ -125,11 +122,7 @@ class UNetOperatorV2(_TorchGridFieldBaseline):
         upsample_mode = str(cfg["upsample"])
         downsample_mode = str(cfg["downsample"])
         activation_name = str(cfg["activation"])
-        head_mode = str(cfg["head_mode"])
         widths = [min(width * (2**level), max_width) for level in range(depth)]
-        density_names = {"ne", "ni"}
-        density_indices = [i for i, name in enumerate(self.output_keys) if str(name) in density_names]
-        field_indices = [i for i in range(len(self.output_keys)) if i not in set(density_indices)]
 
         def activate(x):
             if activation_name == "gelu":
@@ -208,48 +201,13 @@ class UNetOperatorV2(_TorchGridFieldBaseline):
         class _OutputHead(nn.Module):
             def __init__(self, in_ch: int) -> None:
                 super().__init__()
-                self.mode = head_mode
-                if self.mode == "shared":
-                    self.shared = nn.Conv2d(in_ch, int(self_raw_out_channels), kernel_size=1)
-                    self.density = None
-                    self.field = None
-                    self.rho = None
-                else:
-                    self.shared = None
-                    self.density = (
-                        nn.Conv2d(in_ch, len(density_indices), kernel_size=1)
-                        if len(density_indices) > 0
-                        else None
-                    )
-                    self.field = nn.Conv2d(in_ch, len(field_indices), kernel_size=1) if len(field_indices) > 0 else None
-                    self.rho = nn.Conv2d(in_ch, 1, kernel_size=1) if bool(with_rho_eff_head) else None
+                self.shared = nn.Conv2d(in_ch, int(self_raw_out_channels), kernel_size=1)
 
             def forward(self, feat):
-                if self.shared is not None:
-                    return self.shared(feat)
-                out = feat.new_empty((feat.shape[0], int(self_raw_out_channels), feat.shape[-2], feat.shape[-1]))
-                if self.density is not None:
-                    density = self.density(feat)
-                    for src_idx, dst_idx in enumerate(density_indices):
-                        out[:, dst_idx : dst_idx + 1] = density[:, src_idx : src_idx + 1]
-                if self.field is not None:
-                    field = self.field(feat)
-                    for src_idx, dst_idx in enumerate(field_indices):
-                        out[:, dst_idx : dst_idx + 1] = field[:, src_idx : src_idx + 1]
-                if self.rho is not None:
-                    out[:, int(self_out_channels) : int(self_out_channels) + 1] = self.rho(feat)
-                return out
+                return self.shared(feat)
 
             def step_reference(self):
-                if self.shared is not None:
-                    return self.shared.weight
-                if self.field is not None:
-                    return self.field.weight
-                if self.density is not None:
-                    return self.density.weight
-                if self.rho is not None:
-                    return self.rho.weight
-                return None
+                return self.shared.weight
 
         class _OperatorUNet(nn.Module):
             def __init__(self) -> None:
@@ -296,7 +254,6 @@ class UNetOperatorV2(_TorchGridFieldBaseline):
                 return self.in_proj.weight, self.head[-1].step_reference()
 
         self_feature_dim = int(self.feature_dim)
-        self_out_channels = int(self.out_channels)
         self_raw_out_channels = int(self.raw_out_channels)
         self.net = _OperatorUNet()
         self._ensure_net_device()
@@ -308,7 +265,7 @@ class UNetOperatorV2(_TorchGridFieldBaseline):
         self._torch_upsample = str(upsample_mode)
         self._torch_use_film = bool(use_film)
         self._torch_activation = str(activation_name)
-        self._torch_head_mode = str(head_mode)
+        self._torch_head_mode = str(cfg["head_mode"])
 
     def _torch_step_reference(self):
         return self.net.step_reference()

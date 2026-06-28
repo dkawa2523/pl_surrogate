@@ -78,10 +78,9 @@ class PreprocessReportBuilder:
             "coord_scaler_status": "ok",
             "scaler_fit_split": scaler_fit_split,
             "scaler_fit_train_case_count": int(len(train_indices)),
-            "density_value_transform_effective": {
+            "target_value_transform_effective": {
                 name: str(dict(target_transforms_cfg.get(name, {})).get("value_transform", "identity"))
-                for name in ("ne", "ni")
-                if name in set(y_vars)
+                for name in [str(var_name) for var_name in y_vars]
             },
             "coord_features_enabled": bool(coord_features_enabled),
             "coord_feature_channels": list(coord_feature_channels),
@@ -92,8 +91,6 @@ class PreprocessReportBuilder:
             "coord_feature_scaling_mode": str(coord_features_scaling_mode),
             "case_spatial_pack_used": bool(case_spatial_feature_enabled),
             "case_spatial_feature_storage": "split_static_case" if case_spatial_feature_enabled else "",
-            "case_spatial_feature_pack_path": "",
-            "case_spatial_feature_pack_meta_path": case_spatial_feature_meta_rel,
             "case_spatial_feature_shape": list(case_spatial_feature_shape),
             "static_spatial_feature_pack_path": static_spatial_feature_rel_path if case_spatial_feature_enabled else "",
             "static_spatial_feature_pack_meta_path": static_spatial_feature_meta_rel,

@@ -7,6 +7,12 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.models._torch_spatial_common import _build_unit_coord_grid
+from plasma_surrogate.models.heads.role_grouped import (
+    GROUPED_OUTPUT_HEAD_MODES,
+    build_role_grouped_conv2d_head,
+    configure_output_head_metadata,
+    is_grouped_output_head_mode,
+)
 from plasma_surrogate.models.unet._torch_spatial_base import (
     _TorchSpatialFieldMixin,
 )
@@ -14,7 +20,7 @@ from plasma_surrogate.models.unet._torch_spatial_base import (
 class UNetBaseline(_TorchSpatialFieldMixin):
     """
     UNet baseline with two backends:
-    - numpy: legacy per-pixel head on [cond + spatial features]
+    - numpy: per-pixel head on [cond + spatial features]
     - torch: real 2D conv encoder-decoder with skip connection
     """
 
@@ -33,14 +39,13 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         input_feature_channels: list[str] | None = None,
         conv_cfg: dict[str, Any] | None = None,
         output_heads: dict[str, Any] | None = None,
+        target_role_schema: dict[str, Any] | None = None,
     ):
         self.input_dim = int(input_dim)
         self.grid_shape = tuple(grid_shape)
         self.out_channels = int(out_channels)
         if output_keys is None:
-            base = ["ne", "Te", "phi"]
-            extra = [f"out_{i}" for i in range(max(0, self.out_channels - len(base)))]
-            self.output_keys = (base + extra)[: self.out_channels]
+            self.output_keys = [f"target_{i}" for i in range(self.out_channels)]
         else:
             self.output_keys = list(output_keys)[: self.out_channels]
         self.with_rho_eff_head = bool(with_rho_eff_head)
@@ -57,10 +62,13 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         self.input_feature_channels = [str(v) for v in channels]
         self.spatial_feature_dim = int(len(self.input_feature_channels))
         self.feature_dim = int(self.input_dim + self.spatial_feature_dim)
-        self.output_heads = dict(output_heads or {})
-        self.output_heads_mode = str(self.output_heads.get("mode", "shared")).strip().lower()
-        if self.output_heads_mode not in {"shared", "split_density_field"}:
-            raise ValueError("train.unet.model_cfg.output_heads.mode must be one of: shared, split_density_field")
+        configure_output_head_metadata(
+            self,
+            output_heads=dict(output_heads or {}),
+            output_keys=list(self.output_keys),
+            target_role_schema=dict(target_role_schema or {}),
+            cfg_prefix="train.unet",
+        )
 
         self._cache: dict[str, object] = {}
         self._static_spatial_features: np.ndarray | None = None
@@ -69,7 +77,7 @@ class UNetBaseline(_TorchSpatialFieldMixin):
 
         if self.backend == "numpy":
             if self.output_heads_mode != "shared":
-                raise ValueError("train.unet.model_cfg.output_heads.mode=split_density_field requires backend=torch")
+                raise ValueError("train.unet.model_cfg.output_heads non-shared modes require backend=torch")
             self._init_numpy(seed=seed, head_mlp=head_mlp)
         else:
             self._init_torch(seed=seed, conv_cfg=conv_cfg, output_heads=self.output_heads)
@@ -122,16 +130,11 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         in_channels = int(self.input_dim + self.spatial_feature_dim)
         head_cfg = dict(output_heads or {})
         output_heads_mode = str(head_cfg.get("mode", "shared")).strip().lower()
-        if output_heads_mode not in {"shared", "split_density_field"}:
-            raise ValueError("train.unet.model_cfg.output_heads.mode must be one of: shared, split_density_field")
-        if output_heads_mode == "split_density_field":
-            allowed = {"ne", "ni", "Te", "phi"}
-            missing = [name for name in self.output_keys if name not in allowed]
-            if missing:
-                raise ValueError(
-                    "train.unet.model_cfg.output_heads.mode=split_density_field supports "
-                    f"only [ne, ni, Te, phi], got unsupported keys: {missing}"
-                )
+        if output_heads_mode not in {"shared", *GROUPED_OUTPUT_HEAD_MODES}:
+            raise ValueError(
+                "train.unet.model_cfg.output_heads.mode must be one of: "
+                "custom_groups, role_grouped, shared"
+            )
 
         class _ConvUNetDepth1Backbone(nn.Module):
             def __init__(self, in_ch: int, base_ch: int, mid_ch: int, upsample_mode: str):
@@ -246,34 +249,34 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                 self.with_rho_eff_head = bool(with_rho_eff_head)
                 if self.mode == "shared":
                     self.out = nn.Conv2d(base_ch, out_ch + (1 if self.with_rho_eff_head else 0), kernel_size=1)
+                    self.role_grouped = None
                 else:
-                    self.out_density = nn.Conv2d(base_ch, 2, kernel_size=1)
-                    self.out_field = nn.Conv2d(base_ch, 2, kernel_size=1)
-                    self.out_rho = nn.Conv2d(base_ch, 1, kernel_size=1) if self.with_rho_eff_head else None
+                    self.out = None
+                    if not is_grouped_output_head_mode(self.mode):
+                        raise ValueError(
+                            "train.unet.model_cfg.output_heads.mode must be one of: "
+                            "custom_groups, role_grouped, shared"
+                        )
+                    self.role_grouped = build_role_grouped_conv2d_head(
+                        torch=torch,
+                        in_channels=base_ch,
+                        output_keys=list(self_output_keys),
+                        target_groups=dict(self_target_groups),
+                        with_rho_eff_head=self.with_rho_eff_head,
+                    )
 
             def forward(self, feat, *, output_keys: list[str]):
+                del output_keys
                 if self.mode == "shared":
                     return self.out(feat)
-                density = self.out_density(feat)
-                field = self.out_field(feat)
-                name_to_tensor = {
-                    "ne": density[:, 0:1],
-                    "ni": density[:, 1:2],
-                    "Te": field[:, 0:1],
-                    "phi": field[:, 1:2],
-                }
-                ordered = []
-                for name in output_keys:
-                    if name not in name_to_tensor:
-                        raise ValueError(
-                            "split_density_field head requires output_keys among "
-                            f"[ne, ni, Te, phi], got {output_keys}"
-                        )
-                    ordered.append(name_to_tensor[name])
-                out = torch.cat(ordered, dim=1)
-                if self.with_rho_eff_head and self.out_rho is not None:
-                    out = torch.cat([out, self.out_rho(feat)], dim=1)
-                return out
+                return self.role_grouped(feat)
+
+            def step_reference(self):
+                if self.out is not None:
+                    return self.out.weight
+                if self.role_grouped is not None:
+                    return self.role_grouped.step_reference()
+                return None
 
         class _ConvUNetModel(nn.Module):
             def __init__(
@@ -304,6 +307,8 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         self.torch = torch
         self._init_torch_device()
         self.output_heads_mode = output_heads_mode
+        self_output_keys = list(self.output_keys)
+        self_target_groups = dict(getattr(self, "target_groups", {}) or {})
         self.net = _ConvUNetModel(
             in_ch=in_channels,
             base_ch=base_channels,
@@ -446,10 +451,7 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         if self.backend != "torch":
             return None, None
         hidden = self.net.backbone.enc1[0].weight
-        if getattr(self.net, "head_mode", "shared") == "shared":
-            out = self.net.head.out.weight
-        else:
-            out = self.net.head.out_field.weight
+        out = self.net.head.step_reference()
         return hidden, out
 
     def _backward_raw_torch(self, grad_raw: np.ndarray, *, lr: float, apply_step: bool = True) -> dict[str, float]:

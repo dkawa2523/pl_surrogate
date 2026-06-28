@@ -1,8 +1,9 @@
 # 06 YAML Reference
 
-製品 docs では最小 YAML fragment だけを示す。詳細な実験設定や dataset-specific note は product contract にしない。
+This file shows minimal product YAML fragments. Dataset-specific experiments
+should live in `configs/experimental/`.
 
-## table_only
+## Table Only
 
 ```yaml
 runtime:
@@ -27,11 +28,21 @@ dataset:
       default_region: plasma_only
       value_transform: identity
 
+preprocessing:
+  scalers:
+    target_transforms:
+      electron_density:
+        value_transform: identity
+        scaler: zscore
+        fit_scope: plasma_only
+        clip:
+          mode: none
+
 model:
   name: global_mlp
 ```
 
-## table_plus_structure
+## Table Plus Structure
 
 ```yaml
 runtime:
@@ -41,149 +52,122 @@ runtime:
     adapter_mode: grid_pack
     provider_mode: fixed
 
-dataset:
-  type: csv_npz
-  root: data/product_dataset
-  index_csv: index.csv
-  cond_columns: [pressure, power, gap]
-  fields_npz_column: fields_npz
-  case_id_column: case_id
-  geometry_root: geometry
-  targets:
-    - id: electron_density
-      source_key: electron_density_field
-      role: density_electron
-      positive: true
-      field_family: density
-      default_region: plasma_only
-      value_transform: identity
-    - id: plasma_potential
-      source_key: plasma_potential_field
-      role: potential
-      positive: false
-      field_family: electrostatic
-      value_transform: identity
-
-preprocessing:
-  coord_features:
-    enabled: true
-    channels_from_profile: geom_v1_mainline
-
-model:
-  name: fno
+benchmark:
+  eval_protocol:
+    mode: dual_axis
+    primary_split: interp
+    interp_weight: 0.5
+    extrap_weight: 0.5
+  eval:
+    primary_metric: surrogate_quality_score
+    objective_mode: min
+    target_vars_for_score: auto
 ```
 
-## First-Class Model Fragments
-
-`model.name` の capability は `src/plasma_surrogate/core/model_specs.py` が正本である。
-全 first-class model の分類は `docs/04_training_models.md` を参照する。
-
-```yaml
-model:
-  name: global_mlp
-```
-
-```yaml
-model:
-  name: unetpp_attn
-train:
-  unetpp_attn:
-    input_features:
-      mode: geom_feature_pack
-    model_cfg:
-      backend: torch
-      output_heads:
-        mode: shared
-```
-
-```yaml
-model:
-  name: geom_deeponet_siren
-runtime:
-  input_mode: table_plus_structure
-  structure:
-    feature_profile: geom_v1_mainline
-    adapter_mode: hybrid_pack_descriptor
-    provider_mode: fixed
-```
-
-## Loss Protocol
-
-```yaml
-train:
-  loss:
-    protocol: plasma_surrogate_v2
-```
-
-Override は必要な key だけを書く。
+## Training
 
 ```yaml
 train:
   loss:
     protocol: plasma_surrogate_v2
     supervised:
-      spatial_consistency:
-        lambda: 0.03
-      positive_penalty:
-        lambda: 0.005
+      type: mse
+      mask: plasma_only
+    group_weighting:
+      mode: none
+  unetpp_attn:
+    model_cfg:
+      backend: torch
+      output_heads:
+        mode: shared
+```
+
+Opt-in loss balancing by target group:
+
+```yaml
+train:
+  loss:
+    protocol: plasma_surrogate_v2
+    group_weighting:
+      mode: uniform_by_group
+```
+
+Opt-in Huber supervised loss. MSE remains the default.
+
+```yaml
+train:
+  loss:
+    protocol: plasma_surrogate_v2
+    supervised:
+      type: huber
+      huber_delta: 1.0
+      mask: plasma_only
+```
+
+Opt-in custom grouped heads for supported grid/operator models:
+
+```yaml
+train:
+  fno:
+    model_cfg:
+      backend: torch
+      output_heads:
+        mode: custom_groups
+        strict: true
+        groups:
+          density:
+            targets: [electron_density, ion_density]
+          thermal:
+            targets: [electron_temperature]
+          electrostatic:
+            targets: [plasma_potential]
+```
+
+Physics residuals are configured separately from the supervised loss protocol:
+
+```yaml
+physics:
+  enabled: true
+  symbols:
+    density: electron_density
+    temperature: electron_temperature
+    potential: plasma_potential
+  terms:
+    poisson:
+      enabled: true
+      weight: 0.1
+    boundary_operator:
+      enabled: false
+      weight: 0.0
 ```
 
 ## Optimization
 
+Optional inference-time derived fields:
+
 ```yaml
 inference:
-  ood:
-    physics:
-      enabled: true
-      symbols:
-        density: electron_density
-        temperature: electron_temperature
-        potential: plasma_potential
+  derived_fields_strict: false
+  derived_fields:
+    - id: electric_field
+      operator: negative_gradient
+      source: plasma_potential
+    - id: electric_field_magnitude
+      operator: vector_magnitude
+      sources: [electric_field_x, electric_field_y]
+```
+
+```yaml
+inference:
   optimize:
-    enabled: true
-    backend: optuna
-    n_trials: 16
-    space:
-      pressure: [0.1, 1.0]
-      power: [0.1, 1.0]
-      gap: [0.1, 1.0]
+    backend: random
     objective:
       mode: weighted_sum
       terms:
         - key: uniformity
           direction: min
           weight: 1.0
-        - key: boundary_gamma_uniformity
-          direction: min
-          weight: 0.3
-        - key: poisson_residual_norm
-          direction: min
-          weight: 0.2
-          transform: log1p_abs
-          scale: 1.0
     constraints:
       - key: poisson_residual_norm
-        upper: 0.05
-    output:
-      save_fields: top_k
-      top_k: 3
+        upper: 100.0
 ```
-
-## Benchmark Quality Selection
-
-```yaml
-benchmark:
-  eval:
-    primary_metric: surrogate_quality_score
-    objective_mode: min
-    quality_score:
-      enabled: true
-      weights:
-        nrmse: 0.45
-        boundary: 0.20
-        continuity: 0.15
-        physics: 0.15
-        sign: 0.05
-```
-
-R2 / RMSE は補助指標である。benchmark selection は lower-better の `surrogate_quality_score` を既定にする。

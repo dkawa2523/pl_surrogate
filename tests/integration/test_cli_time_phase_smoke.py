@@ -31,6 +31,7 @@ def test_cli_time_phase_pipeline_smoke(tmp_path: Path):
         "model": {"name": "global_mlp"},
         "train": {"epochs": 3, "lr": 0.01},
         "inference": {
+            "qoi": {"uniformity": {"target": "ne"}},
             "single": {
                 "enabled": True,
                 "cond": {"c0": 0.2, "c1": 0.5, "c2": 0.8},

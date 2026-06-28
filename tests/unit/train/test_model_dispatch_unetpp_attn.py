@@ -101,6 +101,16 @@ def _valid_cfg(target_vars: list[str]) -> dict[str, Any]:
     }
 
 
+def _role_schema(target_vars: list[str]) -> dict[str, Any]:
+    families = ["density", "temperature"]
+    return {
+        "targets": [
+            {"id": str(name), "field_family": families[idx % len(families)]}
+            for idx, name in enumerate(target_vars)
+        ]
+    }
+
+
 def test_unetpp_attn_mainline_accepts_valid_dynamic_allvars(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -121,6 +131,34 @@ def test_unetpp_attn_mainline_accepts_valid_dynamic_allvars(
     contract = out.extra_artifacts.get("model_contracts", {}).get("unet", {})
     assert contract.get("target_family_effective") == "allvars"
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}
+
+
+def test_unetpp_attn_mainline_accepts_role_grouped_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    require_torch_runtime()
+    custom_vars = ["density", "temperature"]
+    ctx = _ctx(tmp_path, y_vars=custom_vars)
+    ctx.physics_cfg = {**dict(ctx.physics_cfg), "target_role_schema": _role_schema(custom_vars)}
+    cfg = _valid_cfg(custom_vars)
+    cfg["model_cfg"]["output_heads"] = {"mode": "role_grouped"}
+    ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
+    monkeypatch.setattr(
+        Trainer,
+        "run_unet",
+        lambda self, model, cond_train, y_train, cond_val, y_val, **kwargs: TrainOutput(
+            history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}],
+            model=model,
+        ),
+    )
+
+    out = run_model_train_predict(ctx)
+
+    assert set(out.metrics.keys()) == set(custom_vars)
+    contract = out.extra_artifacts.get("model_contracts", {}).get("unet", {})
+    assert contract.get("unet_output_heads_mode_effective") == "role_grouped"
+    assert [group["name"] for group in contract.get("target_groups", [])] == ["density", "temperature"]
+    assert "target_groups_hash" not in contract
 
 
 def test_unetpp_attn_rejects_non_shared_head(tmp_path: Path) -> None:

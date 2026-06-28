@@ -36,6 +36,16 @@ def test_preprocess_saves_output_layout_and_train_only_cond_stats(tmp_path: Path
     with (run_dir / "preprocessing" / "schema" / "output_layout.json").open("r", encoding="utf-8") as f:
         layout = json.load(f)
     assert layout == {"order": "C", "shape": [4, 8, 8], "vars": ["ne", "ni", "Te", "phi"]}
+    with (run_dir / "preprocessing" / "schema" / "field_layout.json").open("r", encoding="utf-8") as f:
+        field_layout = json.load(f)
+    assert field_layout == {
+        "version": 1,
+        "layout_type": "grid2d",
+        "vars": layout["vars"],
+        "shape": layout["shape"],
+        "order": layout["order"],
+        "axes": ["channel", "y", "x"],
+    }
     with (run_dir / "preprocessing" / "schema" / "target_role_schema.json").open("r", encoding="utf-8") as f:
         role_schema = json.load(f)
     assert role_schema["vars"] == ["ne", "ni", "Te", "phi"]

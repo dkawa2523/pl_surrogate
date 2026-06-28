@@ -26,6 +26,10 @@ from plasma_surrogate.models.mlp.coord_mlp_pod_residual import (
 )
 from plasma_surrogate.models.mlp.coord_mlp_torch import CoordMLPTorch, _normalize_coord_mlp_model_cfg
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
+from plasma_surrogate.models.heads.role_grouped import (
+    ROLE_GROUPED_OUTPUT_HEAD_MODELS,
+    is_grouped_output_head_mode,
+)
 from plasma_surrogate.models.unet.operator_v2 import UNetOperatorV2, normalize_unet_operator_v2_cfg
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
 from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
@@ -86,6 +90,7 @@ def _build_unet_family_model(
         input_feature_channels=list(unet_feature_channels or ["x", "y"]),
         conv_cfg=conv_cfg,
         output_heads=dict(cfg.get("output_heads", {})),
+        target_role_schema=dict(cfg.get("target_role_schema", {})),
         seed=int(seed),
     )
 
@@ -125,6 +130,7 @@ def _build_unetpp_family_model(
         input_feature_channels=list(unet_feature_channels or ["x", "y"]),
         conv_cfg=conv_cfg,
         output_heads=dict(cfg.get("output_heads", {})),
+        target_role_schema=dict(cfg.get("target_role_schema", {})),
         seed=int(seed),
     )
 
@@ -191,6 +197,8 @@ def _build_spectral_family_model(
         head_mlp=dict(cfg.get("head_mlp", {})),
         input_feature_channels=list(unet_feature_channels or ["x", "y"]),
         spectral_cfg=dict(cfg.get("spectral_cfg", {})),
+        output_heads=dict(cfg.get("output_heads", {})),
+        target_role_schema=dict(cfg.get("target_role_schema", {})),
         seed=int(seed),
         backend=str(cfg.get("backend", "torch")),
     )
@@ -269,6 +277,8 @@ def _build_uno_family_model(
         head_mlp=dict(cfg.get("head_mlp", {})),
         input_feature_channels=list(unet_feature_channels or ["x", "y"]),
         uno_cfg=normalize_uno_cfg(dict(cfg.get("uno_cfg", {}))),
+        output_heads=dict(cfg.get("output_heads", {})),
+        target_role_schema=dict(cfg.get("target_role_schema", {})),
         seed=int(seed),
         backend=backend,
     )
@@ -314,6 +324,8 @@ def _build_cno_family_model(
         head_mlp=dict(cfg.get("head_mlp", {})),
         input_feature_channels=list(unet_feature_channels or ["x", "y"]),
         cno_cfg=normalize_cno_cfg(dict(cfg.get("cno_cfg", {}))),
+        output_heads=dict(cfg.get("output_heads", {})),
+        target_role_schema=dict(cfg.get("target_role_schema", {})),
         seed=int(seed),
         backend=backend,
     )
@@ -459,6 +471,12 @@ def build_model_from_name(
     cfg = dict(model_cfg or {})
     with_rho = bool(cfg.get("rho_eff_head", str(phi_mode) == "poisson_hybrid"))
     spec = get_model_spec(model_name)
+    output_heads_mode = str(dict(cfg.get("output_heads", {}) or {}).get("mode", "shared")).strip().lower()
+    if is_grouped_output_head_mode(output_heads_mode) and spec.name not in ROLE_GROUPED_OUTPUT_HEAD_MODELS:
+        raise ValueError(
+            f"output_heads.mode={output_heads_mode} is supported only for "
+            f"{sorted(ROLE_GROUPED_OUTPUT_HEAD_MODELS)}; got model={spec.name!r}"
+        )
     builder = _FAMILY_BUILDERS.get(spec.family)
     if builder is None:
         raise ValueError(f"Unsupported model family: model={spec.name}, family={spec.family}")

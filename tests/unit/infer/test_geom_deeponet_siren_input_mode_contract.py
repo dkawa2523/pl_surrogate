@@ -123,6 +123,7 @@ def test_geom_deeponet_siren_table_plus_descriptor_lane_passes_when_dim_matches(
         input_mode_meta=input_mode_meta,
         checkpoint_input_mode_meta=dict(input_mode_meta),
         checkpoint_meta=checkpoint_meta,
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     out = engine.single_run(
         cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
@@ -151,6 +152,7 @@ def test_geom_deeponet_siren_descriptor_dim_mismatch_is_rejected(tmp_path: Path)
             GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY: descriptor_dim + 1,
             GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: descriptor_profile,
         },
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     with pytest.raises(ValueError, match="descriptor dim mismatch"):
         engine.single_run(
@@ -178,6 +180,7 @@ def test_geom_deeponet_siren_descriptor_is_cached_per_geom_ref(tmp_path: Path, m
             GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY: descriptor_dim,
             GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: descriptor_profile,
         },
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     call_count = 0
     original_builder = engine_mod.build_structure_descriptor

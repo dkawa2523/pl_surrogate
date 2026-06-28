@@ -85,13 +85,16 @@ def load_deeponet_plasma_checkpoint_model(meta: dict[str, Any]) -> Any | None:
         return None
 
     from plasma_surrogate.models.deeponet.boundary_operator_torch import BoundaryOperatorTorch
-    from plasma_surrogate.models.deeponet.poisson_head_torch import DeepONetPoissonHeadTorch
+    from plasma_surrogate.models.deeponet.poisson_head_torch import (
+        POISSON_POTENTIAL_OUTPUT_KEY,
+        DeepONetPoissonHeadTorch,
+    )
 
     model = _build_plasma_operator_from_meta(meta)
 
     ph_meta = meta.get("poisson_head")
     if isinstance(ph_meta, dict):
-        ph_net = _build_plasma_operator_from_meta(ph_meta, parent=meta, output_keys=["phi"])
+        ph_net = _build_plasma_operator_from_meta(ph_meta, parent=meta, output_keys=[POISSON_POTENTIAL_OUTPUT_KEY])
         ph = DeepONetPoissonHeadTorch.from_cache(
             deeponet_poisson=ph_net,
             sensor_idx=np.asarray(ph_meta.get("sensor_indices", []), dtype=np.int64),

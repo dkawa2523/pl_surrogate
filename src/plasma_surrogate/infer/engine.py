@@ -21,18 +21,12 @@ from plasma_surrogate.core.input_modes import (
     DESCRIPTOR_PROFILE_KEY,
     GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY,
     GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
-    HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY,
     INPUT_MODE_EFFECTIVE_KEY,
     INPUT_MODES,
     LATENT_PROFILE_KEY,
     STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
     TABLE_ONLY,
     TABLE_PLUS_STRUCTURE,
-    runtime_metadata_keys,
-    validate_runtime_metadata_contract,
-)
-from plasma_surrogate.core.model_input_policy import (
-    validate_model_input_mode,
 )
 from plasma_surrogate.core.model_families import POD_DEEPONET_FAMILY_MODELS
 from plasma_surrogate.core.vector_pack import load_vector_from_pack
@@ -41,6 +35,17 @@ from plasma_surrogate.data.geometry_context import GeometryContext
 from plasma_surrogate.data.geometry_provider import GeometryProviderLike
 from plasma_surrogate.features.structure_descriptors import build_structure_descriptor
 from plasma_surrogate.infer.batch import aggregate_inference_results
+from plasma_surrogate.infer.contracts import (
+    normalize_effective_meta_dict,
+    resolve_model_type_name,
+    validate_inference_runtime_metadata,
+    validate_model_input_mode_contract,
+    validate_output_head_metadata_contract,
+)
+from plasma_surrogate.infer.derived_fields import (
+    compute_configured_derived_fields,
+    compute_default_derived_fields,
+)
 from plasma_surrogate.infer.diagnostics import collect_inference_diagnostics
 from plasma_surrogate.infer.features import InferenceFeatureBuilder
 from plasma_surrogate.infer.optimize import OptimizeRunner, validate_optimize_geom_contract
@@ -78,6 +83,47 @@ def _config_string_list(raw: Any) -> list[str]:
     return out
 
 
+def _config_bool(raw: Any, *, default: bool = False) -> bool:
+    if raw is None:
+        return bool(default)
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower()
+    if text in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "f", "no", "n", "off"}:
+        return False
+    raise ValueError(f"invalid boolean config value: {raw!r}")
+
+
+def _normalize_derived_fields_config(raw: Any) -> tuple[list[dict[str, Any]] | None, bool | None]:
+    if raw is None:
+        return None, None
+    strict: bool | None = None
+    items = raw
+    if isinstance(raw, dict):
+        if "strict" in raw:
+            strict = _config_bool(raw.get("strict"))
+        for key in ("items", "fields", "definitions"):
+            if key in raw:
+                items = raw.get(key)
+                break
+        else:
+            raise ValueError("inference.derived_fields dict must contain items, fields, or definitions")
+    if isinstance(items, (str, bytes)):
+        raise ValueError("inference.derived_fields must be a list of field configs")
+    try:
+        values = list(items)
+    except TypeError as exc:
+        raise ValueError("inference.derived_fields must be a list of field configs") from exc
+    out: list[dict[str, Any]] = []
+    for item in values:
+        if not isinstance(item, dict):
+            raise ValueError("each inference.derived_fields item must be a mapping")
+        out.append(dict(item))
+    return out, strict
+
+
 @dataclass
 class InferenceResult:
     fields_model: dict[str, np.ndarray]
@@ -89,31 +135,6 @@ class InferenceResult:
 
 
 class InferenceEngine:
-    @staticmethod
-    def _normalize_effective_meta_value(*, key: str, value: Any) -> Any:
-        if key == HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY:
-            if isinstance(value, bool):
-                return value
-            text = str(value).strip().lower()
-            if text in {"1", "true", "t", "yes", "y", "on"}:
-                return True
-            if text in {"0", "false", "f", "no", "n", "off"}:
-                return False
-            raise ValueError(f"invalid boolean value for {key}: {value!r}")
-        text = str(value).strip().lower()
-        if not text:
-            raise ValueError(f"empty value for {key} is not allowed")
-        return text
-
-    @classmethod
-    def _normalize_effective_meta_dict(cls, raw: dict[str, Any] | None) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for key in runtime_metadata_keys():
-            if raw is None or key not in raw:
-                continue
-            out[key] = cls._normalize_effective_meta_value(key=key, value=raw[key])
-        return out
-
     @staticmethod
     def _postprocess_positive_fields(
         fields: dict[str, np.ndarray],
@@ -135,27 +156,6 @@ class InferenceEngine:
                 arr = np.maximum(arr, floor_value).astype(np.float32)
             out[key] = arr
         return out
-
-    @staticmethod
-    def _resolve_symbol_key(
-        fields_phys: dict[str, np.ndarray],
-        *,
-        configured: Any,
-        aliases: tuple[str, ...],
-    ) -> str | None:
-        if isinstance(configured, str):
-            cand = str(configured).strip()
-            if cand and cand in fields_phys:
-                return cand
-        if isinstance(configured, list):
-            for item in configured:
-                cand = str(item).strip()
-                if cand and cand in fields_phys:
-                    return cand
-        for name in aliases:
-            if name in fields_phys:
-                return name
-        return None
 
     def _combined_physics_symbols(self) -> dict[str, Any]:
         bo_cfg = _dict_or_empty(self.ood_cfg.get("boundary_operator"))
@@ -252,6 +252,12 @@ class InferenceEngine:
         self.plasma_head = PlasmaHead(mode=self.phi_mode, jacobi_iters=int(phi_hybrid_steps))
         self.poisson_refine_iters = int(poisson_refine_iters)
         self.ood_cfg = ood_cfg or {}
+        self.derived_fields_cfg, derived_fields_strict = _normalize_derived_fields_config(
+            self.ood_cfg.get("derived_fields")
+        )
+        if derived_fields_strict is None:
+            derived_fields_strict = _config_bool(self.ood_cfg.get("derived_fields_strict"), default=False)
+        self.derived_fields_strict = bool(derived_fields_strict)
         self.feature_store = feature_store
         self.deeponet_head = deeponet_head
         self.coord_scaler = dict(coord_scaler or {})
@@ -276,9 +282,9 @@ class InferenceEngine:
         self.input_mode = str(input_mode or TABLE_PLUS_STRUCTURE).strip().lower()
         if self.input_mode not in set(INPUT_MODES):
             raise ValueError(f"inference input_mode must be one of {list(INPUT_MODES)}; got={self.input_mode!r}")
-        self.input_mode_meta = self._normalize_effective_meta_dict(input_mode_meta)
+        self.input_mode_meta = normalize_effective_meta_dict(input_mode_meta)
         self._checkpoint_input_mode_meta_provided = checkpoint_input_mode_meta is not None
-        self.checkpoint_input_mode_meta = self._normalize_effective_meta_dict(checkpoint_input_mode_meta)
+        self.checkpoint_input_mode_meta = normalize_effective_meta_dict(checkpoint_input_mode_meta)
         self.checkpoint_meta = dict(checkpoint_meta or {})
         self.target_role_schema = dict(target_role_schema or {})
         self.structure_descriptor_pack = dict(structure_descriptor_pack or {})
@@ -327,66 +333,30 @@ class InferenceEngine:
         self.pod_descriptor_dim_effective = int(self.checkpoint_meta.get(DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY, 0) or 0)
         self.pod_latent_hook_effective = bool(self.checkpoint_meta.get(DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY, False))
         self._validate_model_input_mode_contract()
+        validate_output_head_metadata_contract(
+            model=self.model,
+            checkpoint_meta=self.checkpoint_meta,
+            target_role_schema=self.target_role_schema,
+        )
         self._validate_pod_descriptor_and_latent_contract()
         self._validate_geom_deeponet_siren_descriptor_contract()
 
     def _validate_input_mode_metadata_contract(self) -> None:
         if not self._checkpoint_input_mode_meta_provided:
             return
-        resolved_meta = validate_runtime_metadata_contract(
+        self.input_mode_meta = validate_inference_runtime_metadata(
             request_meta=self.input_mode_meta,
             checkpoint_meta=self.checkpoint_input_mode_meta,
             context="inference runtime_metadata",
         )
-        self.input_mode_meta = self._normalize_effective_meta_dict(resolved_meta)
-
-    @staticmethod
-    def _resolve_model_type_name(model: Any) -> str:
-        if hasattr(model, "to_meta"):
-            meta = model.to_meta()
-            if not isinstance(meta, dict):
-                raise TypeError(f"{type(model).__name__}.to_meta() must return a dict")
-            name = str(meta.get("model_type", "")).strip().lower()
-            if name:
-                return name
-        model_type_attr = str(getattr(model, "model_type", "")).strip().lower()
-        if model_type_attr:
-            return model_type_attr
-        class_name = str(type(model).__name__).strip().lower()
-        aliases = {
-            "globalmlp": "global_mlp",
-            "unetbaseline": "unet",
-            "unetppbaseline": "unetpp",
-            "fnobaseline": "fno",
-            "ffnobaseline": "ffno",
-            "unobaseline": "u_no",
-            "cnobaseline": "cno",
-            "cnooperatorunet": "cno_operator_unet",
-            "coordmlptorch": "coord_mlp_fourier",
-            "poddeeponettorch": "deeponet_pod",
-            "geomdeeponetsiren": "geom_deeponet_siren",
-        }
-        return aliases.get(class_name, class_name)
 
     def _validate_model_input_mode_contract(self) -> None:
-        if self.input_mode != TABLE_ONLY:
-            return
-        model_type = self._resolve_model_type_name(self.model)
-        try:
-            validate_model_input_mode(model_type, TABLE_ONLY)
-        except ValueError as exc:
-            msg = str(exc)
-            if "Unsupported model for input-mode policy" in msg:
-                return
-            raise ValueError(
-                "inference model/input_mode contract violation: "
-                f"model_type={model_type!r}, input_mode={TABLE_ONLY!r}; detail={msg}"
-            ) from exc
+        validate_model_input_mode_contract(model=self.model, input_mode=self.input_mode)
 
     def _is_pod_model(self) -> bool:
         if isinstance(self.model, PODDeepONetTorch):
             return True
-        model_type = self._resolve_model_type_name(self.model)
+        model_type = resolve_model_type_name(self.model)
         return model_type in POD_DEEPONET_FAMILY_MODELS
 
     def _validate_pod_descriptor_and_latent_contract(self) -> None:
@@ -412,7 +382,7 @@ class InferenceEngine:
     def _is_geom_deeponet_siren_model(self) -> bool:
         if isinstance(self.model, GeomDeepONetSIREN):
             return True
-        model_type = self._resolve_model_type_name(self.model)
+        model_type = resolve_model_type_name(self.model)
         return model_type == "geom_deeponet_siren"
 
     def _validate_geom_deeponet_siren_descriptor_contract(self) -> None:
@@ -547,11 +517,21 @@ class InferenceEngine:
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
         return hashlib.sha1(canonical.encode("utf-8")).hexdigest()
 
-    @staticmethod
-    def _compute_derived(phi: np.ndarray) -> dict[str, np.ndarray]:
-        gy, gx = np.gradient(phi[0], edge_order=1)
-        e_mag = np.sqrt(gx**2 + gy**2).astype(np.float32)
-        return {"E_mag": e_mag[None, ...]}
+    def _compute_derived_fields(self, fields_phys: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        if self.derived_fields_cfg is not None:
+            return compute_configured_derived_fields(
+                fields_phys,
+                self.derived_fields_cfg,
+                symbols=self._combined_physics_symbols(),
+                target_role_schema=self.target_role_schema,
+                strict=self.derived_fields_strict,
+            )
+        return compute_default_derived_fields(
+            fields_phys,
+            symbols=self._combined_physics_symbols(),
+            target_role_schema=self.target_role_schema,
+            strict=False,
+        )
 
     def _get_geom_ctx(self, geom_ref: dict[str, Any], axis: dict[str, Any]) -> GeometryContext:
         if self.feature_store is not None:
@@ -643,13 +623,33 @@ class InferenceEngine:
             if arr.ndim == 3:
                 arr = arr[None, ...]
             head_in[key] = arr
-        head_out, head_aux = self.plasma_head.apply(
-            head_in,
-            geom_ctx=geom_ctx,
-            refine_iters=self.poisson_refine_iters,
-            deeponet_head=self.deeponet_head,
-            cond_vec=cond_vec,
-        )
+        potential_key: str | None = None
+        if self.phi_mode == "direct":
+            try:
+                potential_key = self._resolve_physics_keys(
+                    fields_phys,
+                    required=("potential",),
+                    context="inference potential postprocess",
+                )["potential"]
+            except ValueError:
+                potential_key = None
+        else:
+            potential_key = self._resolve_physics_keys(
+                fields_phys,
+                required=("potential",),
+                context="inference potential postprocess",
+            )["potential"]
+        if potential_key is None:
+            head_out, head_aux = head_in, {}
+        else:
+            head_out, head_aux = self.plasma_head.apply(
+                head_in,
+                geom_ctx=geom_ctx,
+                refine_iters=self.poisson_refine_iters,
+                deeponet_head=self.deeponet_head,
+                cond_vec=cond_vec,
+                potential_key=potential_key,
+            )
         fields_phys = {}
         for key, value in head_out.items():
             arr = np.asarray(value, dtype=np.float32)
@@ -678,7 +678,7 @@ class InferenceEngine:
             potential_field = self._resolve_potential_field(fields_phys)
         except ValueError:
             potential_field = None
-        derived = self._compute_derived(potential_field) if potential_field is not None else {}
+        derived = self._compute_derived_fields(fields_phys)
         return fields_model, fields_phys, potential_field, derived
 
     def single_run(

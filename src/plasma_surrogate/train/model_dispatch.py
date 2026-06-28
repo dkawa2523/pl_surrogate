@@ -9,34 +9,21 @@ from typing import Any, Callable
 
 import numpy as np
 
-from plasma_surrogate.core.contracts import validate_pod_descriptor_latent_contract
 from plasma_surrogate.core.input_modes import (
     DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY,
     DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
     DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY,
     DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY,
     INPUT_MODES,
-    TABLE_ONLY,
-    TABLE_PLUS_STRUCTURE,
 )
-from plasma_surrogate.core.vector_pack import load_vector_from_pack
 from plasma_surrogate.core.model_input_policy import (
     ADAPTER_AUTO,
     resolve_effective_adapter_mode,
     validate_model_input_mode,
 )
 from plasma_surrogate.core.model_specs import normalize_model_name
-from plasma_surrogate.core.model_families import POD_DEEPONET_FAMILY_MODELS
-from plasma_surrogate.core.deeponet_contract import (
-    load_supervised_boundary_targets,
-    resolve_sample_idx_source,
-    validate_deeponet_task_meta,
-)
 from plasma_surrogate.eval.metrics import r2_by_var, rmse_by_var
-from plasma_surrogate.models.deeponet.boundary_operator_torch import BoundaryOperatorTorch
-from plasma_surrogate.models.deeponet.plasma_operator_torch import DeepONetPlasmaOperatorTorch
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import fit_pod_basis_from_targets, normalize_pod_deeponet_model_cfg
-from plasma_surrogate.models.deeponet.poisson_head_torch import DeepONetPoissonHeadTorch
 from plasma_surrogate.models.checkpoint import build_model_from_name
 from plasma_surrogate.train.grid_training import run_grid_torch_train_predict
 from plasma_surrogate.train.model_adapters import (
@@ -47,8 +34,17 @@ from plasma_surrogate.train.model_adapters import (
     resolve_train_model_adapter,
 )
 from plasma_surrogate.train.deeponet_stages import resolve_deeponet_stages
+from plasma_surrogate.train.deeponet_contracts import (
+    build_deeponet_contract_effective as _build_deeponet_contract_effective,
+    resolve_family_train_cfg as _resolve_family_train_cfg,
+    resolve_pod_descriptor_and_latent_contract as _resolve_pod_descriptor_and_latent_contract,
+    validate_deeponet_mainline_contract as _validate_deeponet_mainline_contract,
+    validate_pod_deeponet_experimental_contract as _validate_pod_deeponet_experimental_contract,
+)
+from plasma_surrogate.train.deeponet_runtime import DeeponetRuntime, resolve_deeponet_runtime
 from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
-from plasma_surrogate.train.spatial_features import (
+from plasma_surrogate.train.model_artifacts import record_model_contract
+from plasma_surrogate.preprocessing.spatial_features import (
     apply_coord_feature_scaling as _apply_coord_feature_scaling,
     apply_distance_transform as _apply_distance_transform,
     build_coord_feature_rows as _build_coord_feature_rows,
@@ -101,7 +97,6 @@ class TrainDispatchContext:
     supervised_distance: np.ndarray | None = None
     coord_scaler: dict[str, Any] | None = None
     coord_feature_pack: dict[str, Any] | None = None
-    case_spatial_feature_pack: dict[str, Any] | None = None
     static_spatial_feature_pack: dict[str, Any] | None = None
     case_structure_feature_pack: dict[str, Any] | None = None
     coord_feature_scaler: dict[str, Any] | None = None
@@ -161,18 +156,6 @@ class TrainLaneResult:
 TrainLaneHandler = Callable[[TrainLaneRuntime], TrainLaneResult]
 
 
-def _record_model_contract(extra_artifacts: dict[str, Any], model_name: str, contract: dict[str, Any]) -> None:
-    model_contracts = dict(extra_artifacts.get("model_contracts", {}) or {})
-    model_contracts[str(model_name)] = dict(contract)
-    extra_artifacts["model_contracts"] = model_contracts
-
-
-@dataclass
-class DeeponetRuntime:
-    model: DeepONetPlasmaOperatorTorch
-    supervised_targets: dict[str, np.ndarray] | None
-
-
 def _resolve_runtime_input_mode_for_model(*, input_mode_effective: Any) -> str:
     mode = str(input_mode_effective).strip().lower()
     if mode in set(INPUT_MODES):
@@ -213,498 +196,6 @@ def resolve_runtime_model_adapter_policy(
         adapter_mode=requested_adapter_mode,
     )
     return name, mode, effective_adapter_mode
-
-
-def _normalize_profile_name(value: Any, *, default: str = "none") -> str:
-    text = str(value if value is not None else default).strip().lower()
-    return text if text else default
-
-
-def _resolve_pod_descriptor_and_latent_contract(
-    *,
-    input_mode: str,
-    adapter_mode: str,
-    descriptor_profile: str,
-    latent_profile: str,
-    descriptor_pack: dict[str, Any] | None,
-    latent_pack: dict[str, Any] | None,
-) -> tuple[np.ndarray | None, dict[str, Any]]:
-    meta = validate_pod_descriptor_latent_contract(
-        input_mode=input_mode,
-        adapter_mode=adapter_mode,
-        descriptor_profile=descriptor_profile,
-        latent_profile=latent_profile,
-    )
-    desc_profile = str(meta[DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY])
-    lat_profile = str(meta[DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY])
-    mode = _normalize_profile_name(input_mode, default=TABLE_PLUS_STRUCTURE)
-
-    if mode == TABLE_ONLY:
-        return None, meta
-
-    descriptor_vector: np.ndarray | None = None
-    descriptor_dim = 0
-    if desc_profile != "none":
-        descriptor_vector, _ = load_vector_from_pack(
-            pack=descriptor_pack,
-            pack_name="structure_descriptor_pack",
-        )
-        descriptor_dim = int(descriptor_vector.shape[0])
-
-    latent_hook = False
-    if lat_profile != "none":
-        load_vector_from_pack(
-            pack=latent_pack,
-            pack_name="latent_feature_pack",
-        )
-        latent_hook = True
-
-    return descriptor_vector, {
-        DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(descriptor_dim),
-        DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: str(desc_profile),
-        DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY: str(lat_profile),
-        DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: bool(latent_hook),
-    }
-
-
-def _validate_pod_deeponet_experimental_contract(
-    *,
-    model_name: str,
-    y_vars: list[str],
-    target_family: str,
-    target_vars: list[str],
-    model_cfg: dict[str, Any],
-    selection_cfg: dict[str, Any],
-) -> dict[str, Any]:
-    model_type = str(model_name).strip().lower()
-    cfg_prefix = f"train.{model_type}"
-    family = str(target_family).strip().lower()
-    if family != "allvars":
-        raise ValueError(f"{cfg_prefix}.target_family must be allvars for pod_deeponet family")
-    expected = list(y_vars)
-    if list(target_vars) != expected:
-        raise ValueError(f"{cfg_prefix}.target_vars must match output_layout.vars order: expected={expected}, got={target_vars}")
-    normalized_cfg = normalize_pod_deeponet_model_cfg(model_cfg, model_type=model_type)
-    basis_cfg = dict(normalized_cfg.get("basis", {}))
-    rank = int(basis_cfg.get("rank", 32))
-    if rank < 1:
-        raise ValueError(f"{cfg_prefix}.model_cfg.basis.rank must be >= 1")
-    fit_scope = str(basis_cfg.get("fit_scope", "train_only")).strip().lower()
-    if fit_scope != "train_only":
-        raise ValueError(f"{cfg_prefix}.model_cfg.basis.fit_scope must be train_only")
-    per_var = bool(basis_cfg.get("per_var", True))
-    if not per_var:
-        raise ValueError(f"{cfg_prefix}.model_cfg.basis.per_var must be true")
-    center = bool(basis_cfg.get("center", True))
-    selection_mode = str(dict(selection_cfg or {}).get("mode", "best_val_allvars_balance")).strip().lower()
-    if selection_mode not in {"best_val_allvars_balance", "best_val_loss"}:
-        raise ValueError(f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, best_val_loss")
-    return {
-        "rank": int(rank),
-        "fit_scope": fit_scope,
-        "per_var": per_var,
-        "center": center,
-    }
-
-
-def resolve_deeponet_pod_training_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
-    out = dict(cfg or {})
-    optimizer_cfg = dict(out.get("optimizer", {}))
-    optimizer_cfg.setdefault("type", "adamw")
-    optimizer_cfg.setdefault("schedule", "cosine")
-    optimizer_cfg.setdefault("warmup_epochs", 10)
-    out["optimizer"] = optimizer_cfg
-    selection_cfg = dict(out.get("selection", {}))
-    selection_cfg.setdefault("mode", "best_val_allvars_balance")
-    out["selection"] = selection_cfg
-    return out
-
-
-def _resolve_coord_mlp_siren_training_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
-    out = dict(cfg or {})
-    out.setdefault("epochs", 160)
-    out.setdefault("lr", 3e-4)
-    optimizer_cfg = dict(out.get("optimizer", {}))
-    optimizer_cfg.setdefault("schedule", "cosine")
-    optimizer_cfg.setdefault("warmup_epochs", 20)
-    out["optimizer"] = optimizer_cfg
-    selection_cfg = dict(out.get("selection", {}))
-    selection_cfg.setdefault("mode", "best_val_allvars_balance")
-    out["selection"] = selection_cfg
-    return out
-
-
-def _resolve_coord_mlp_pod_residual_training_defaults(cfg: dict[str, Any]) -> dict[str, Any]:
-    out = dict(cfg or {})
-    out.setdefault("epochs", 100)
-    out.setdefault("lr", 6e-4)
-    optimizer_cfg = dict(out.get("optimizer", {}))
-    optimizer_cfg.setdefault("type", "adamw")
-    optimizer_cfg.setdefault("schedule", "cosine")
-    optimizer_cfg.setdefault("warmup_epochs", 10)
-    out["optimizer"] = optimizer_cfg
-    selection_cfg = dict(out.get("selection", {}))
-    selection_cfg.setdefault("mode", "best_val_allvars_balance")
-    out["selection"] = selection_cfg
-    return out
-
-
-def _resolve_family_train_cfg(train_cfg: dict[str, Any], *, model_name: str) -> dict[str, Any]:
-    cfg = dict(train_cfg.get(model_name, {}))
-    if model_name in POD_DEEPONET_FAMILY_MODELS:
-        cfg = resolve_deeponet_pod_training_defaults(cfg)
-    if model_name == "coord_mlp_siren":
-        cfg = _resolve_coord_mlp_siren_training_defaults(cfg)
-    if model_name == "coord_mlp_pod_residual":
-        cfg = _resolve_coord_mlp_pod_residual_training_defaults(cfg)
-    return cfg
-
-
-def _validate_deeponet_mainline_contract(
-    *,
-    deeponet_cfg: dict[str, Any],
-    selection_cfg: dict[str, Any],
-    loss_cfg: dict[str, Any],
-    y_vars: list[str],
-    target_family: str,
-    target_vars: list[str],
-    input_features_mode: str,
-    input_feature_channels: list[str],
-) -> None:
-    cfg_prefix = "train.deeponet_plasma"
-    family = str(target_family).strip().lower()
-    if family != "allvars":
-        raise ValueError(f"{cfg_prefix}.target_family must be allvars for mainline")
-    expected = list(y_vars)
-    if list(target_vars) != list(expected):
-        raise ValueError(f"{cfg_prefix}.target_vars must match allvars order: expected={expected}, got={target_vars}")
-    if str(input_features_mode).strip().lower() != "geom_feature_pack":
-        raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack for mainline")
-    required_channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
-    if [str(v) for v in list(input_feature_channels)] != required_channels:
-        raise ValueError(
-            f"{cfg_prefix}.input_features.features must be {required_channels} for mainline; got={input_feature_channels}"
-        )
-    input_features_cfg = dict(deeponet_cfg.get("input_features", {}))
-    distance_transform_cfg = dict(input_features_cfg.get("distance_transform", {}))
-    dt_mode = str(distance_transform_cfg.get("mode", "raw")).strip().lower()
-    if dt_mode not in {"raw", "bounded_auto"}:
-        raise ValueError(
-            f"{cfg_prefix}.input_features.distance_transform.mode must be one of: raw, bounded_auto for mainline"
-        )
-    operator_mode = str(deeponet_cfg.get("operator_mode", "plain")).strip().lower()
-    if operator_mode != "plain":
-        raise ValueError(f"{cfg_prefix}.operator_mode must be plain for mainline")
-    model_cfg = dict(deeponet_cfg.get("model_cfg", {}))
-    trunk_mode = str(model_cfg.get("trunk_input_mode", "geom_feature_pack")).strip().lower()
-    if trunk_mode != "geom_feature_pack":
-        raise ValueError(f"{cfg_prefix}.model_cfg.trunk_input_mode must be geom_feature_pack for mainline")
-    branch_mode = str(model_cfg.get("branch_mode", "moments")).strip().lower()
-    if branch_mode != "cond_only":
-        raise ValueError(f"{cfg_prefix}.model_cfg.branch_mode must be cond_only for mainline")
-    sensor_pool_mode = str(model_cfg.get("sensor_pool_mode", "moments")).strip().lower()
-    if sensor_pool_mode != "moments":
-        raise ValueError(f"{cfg_prefix}.model_cfg.sensor_pool_mode must be moments for cond_only mainline")
-    output_path_cfg = dict(model_cfg.get("output_path", {}))
-    output_path_mode = str(output_path_cfg.get("mode", "dot")).strip().lower()
-    if output_path_mode not in {"dot", "fused"}:
-        raise ValueError(f"{cfg_prefix}.model_cfg.output_path.mode must be one of: dot, fused")
-    output_path_dot_skip = float(output_path_cfg.get("dot_skip", 0.25))
-    if not np.isfinite(output_path_dot_skip):
-        raise ValueError(f"{cfg_prefix}.model_cfg.output_path.dot_skip must be finite")
-    output_path_dot_skip_mode = str(output_path_cfg.get("dot_skip_mode", "fixed")).strip().lower()
-    if output_path_dot_skip_mode not in {"fixed", "learned_per_var"}:
-        raise ValueError(f"{cfg_prefix}.model_cfg.output_path.dot_skip_mode must be one of: fixed, learned_per_var")
-    output_path_global_hidden = int(output_path_cfg.get("global_hidden_dim", 64))
-    if output_path_global_hidden < 1:
-        raise ValueError(f"{cfg_prefix}.model_cfg.output_path.global_hidden_dim must be >= 1")
-    residual_cfg = dict(model_cfg.get("residual_head", {}))
-    if bool(residual_cfg.get("enabled", False)):
-        raise ValueError(f"{cfg_prefix}.model_cfg.residual_head.enabled is removed from deeponet mainline")
-    if bool(model_cfg.get("latent_layer_norm", False)):
-        raise ValueError(f"{cfg_prefix}.model_cfg.latent_layer_norm is removed from deeponet mainline")
-    trunk_fourier_n_freq = int(model_cfg.get("trunk_fourier_n_freq", 1))
-    if trunk_fourier_n_freq < 1:
-        raise ValueError(f"{cfg_prefix}.model_cfg.trunk_fourier_n_freq must be >= 1")
-    trunk_fourier_mode = str(model_cfg.get("trunk_fourier_mode", "symmetric")).strip().lower()
-    if trunk_fourier_mode != "symmetric":
-        raise ValueError(f"{cfg_prefix}.model_cfg.trunk_fourier_mode must be symmetric")
-    trunk_cond_modulation = str(model_cfg.get("trunk_cond_modulation", "none")).strip().lower()
-    if trunk_cond_modulation not in {"none", "film"}:
-        raise ValueError(f"{cfg_prefix}.model_cfg.trunk_cond_modulation must be one of: none, film")
-    missing_geom_feature_policy = str(model_cfg.get("missing_geom_feature_policy", "error")).strip().lower()
-    if missing_geom_feature_policy != "error":
-        raise ValueError(f"{cfg_prefix}.model_cfg.missing_geom_feature_policy must be error")
-    sel_mode = str(selection_cfg.get("mode", "last")).strip().lower()
-    if sel_mode not in {"best_val_allvars_balance", "best_val_loss"}:
-        raise ValueError(f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, best_val_loss for mainline")
-    if "boundary_bonus_weight" in selection_cfg and float(selection_cfg.get("boundary_bonus_weight", 0.0)) != 0.0:
-        raise ValueError(f"{cfg_prefix}.selection.boundary_bonus_weight must be 0.0 for mainline")
-    if "density_guard" in selection_cfg:
-        raise ValueError(f"{cfg_prefix}.selection.density_guard is removed from deeponet mainline")
-    _resolve_mainline_selection_weights(
-        selection_cfg=selection_cfg,
-        target_vars=target_vars,
-        cfg_prefix=cfg_prefix,
-    )
-
-def _build_deeponet_contract_effective(
-    *,
-    cfg: dict[str, Any],
-    train_cfg: dict[str, Any],
-    deeponet_target_family: str,
-    deeponet_target_vars: list[str],
-    deeponet_input_mode: str,
-    deeponet_feature_channels: list[str],
-    deeponet_feature_source: str,
-    deeponet_selection_cfg: dict[str, Any],
-    deeponet_optimizer_cfg: dict[str, Any],
-    operator_mode: str,
-    deeponet_distance_transform_effective: dict[str, Any],
-    strict_mainline: bool,
-) -> dict[str, Any]:
-    model_cfg = dict(cfg.get("model_cfg", {}))
-    residual_cfg = dict(model_cfg.get("residual_head", {}))
-    output_path_cfg = dict(model_cfg.get("output_path", {}))
-    output_path_global_local_cfg = dict(output_path_cfg.get("global_local", {}))
-    return {
-        "target_family_effective": str(deeponet_target_family),
-        "target_vars_effective": list(deeponet_target_vars),
-        "feature": {
-            "input_features_mode": str(deeponet_input_mode),
-            "input_feature_channels": list(deeponet_feature_channels),
-            "feature_source_effective": str(deeponet_feature_source),
-        },
-        "selection_mode_effective": str(deeponet_selection_cfg.get("mode", "last")).strip().lower(),
-        "selection_weights_effective": dict(deeponet_selection_cfg.get("weights", {})),
-        "optimizer_effective": {
-            "type": str(deeponet_optimizer_cfg.get("type", "adamw")).strip().lower(),
-            "lr": float(deeponet_optimizer_cfg.get("lr", cfg.get("lr", train_cfg.get("lr", 1e-3)))),
-            "weight_decay": float(deeponet_optimizer_cfg.get("weight_decay", 0.0)),
-            "schedule": str(deeponet_optimizer_cfg.get("schedule", "none")).strip().lower(),
-            "warmup_epochs": int(max(int(deeponet_optimizer_cfg.get("warmup_epochs", 0)), 0)),
-        },
-        "operator_mode_effective": str(operator_mode),
-        "trunk_input_mode_effective": str(model_cfg.get("trunk_input_mode", "geom_feature_pack")),
-        "trunk_fourier_n_freq_effective": int(model_cfg.get("trunk_fourier_n_freq", 1)),
-        "trunk_fourier_mode_effective": str(model_cfg.get("trunk_fourier_mode", "symmetric")),
-        "trunk_cond_modulation_effective": str(model_cfg.get("trunk_cond_modulation", "none")),
-        "trunk_cond_mod_hidden_effective": int(model_cfg.get("trunk_cond_mod_hidden", 64)),
-        "residual_head_enabled_effective": bool(residual_cfg.get("enabled", False)),
-        "residual_head_hidden_dim_effective": int(residual_cfg.get("hidden_dim", 64)),
-        "residual_head_scale_init_effective": float(residual_cfg.get("scale_init", 0.0)),
-        "residual_head_gain_mode_effective": str(residual_cfg.get("gain_mode", "learned")),
-        "residual_head_gain_value_effective": float(residual_cfg.get("gain_value", 1.0)),
-        "output_path_mode_effective": str(output_path_cfg.get("mode", "dot")),
-        "output_path_dot_skip_effective": float(output_path_cfg.get("dot_skip", 0.25)),
-        "output_path_dot_skip_mode_effective": str(output_path_cfg.get("dot_skip_mode", "fixed")).strip().lower(),
-        "output_path_fused_hidden_dim_effective": int(output_path_cfg.get("fused_hidden_dim", 96)),
-        "output_path_global_local_enabled_effective": bool(output_path_global_local_cfg.get("enabled", False)),
-        "output_path_global_hidden_dim_effective": int(output_path_cfg.get("global_hidden_dim", 64)),
-        "sensor_pool_mode_effective": str(model_cfg.get("sensor_pool_mode", "moments")),
-        "branch_mode_effective": str(model_cfg.get("branch_mode", "moments")),
-        "missing_geom_feature_policy_effective": str(model_cfg.get("missing_geom_feature_policy", "error")).strip().lower(),
-        "latent_layer_norm_effective": bool(model_cfg.get("latent_layer_norm", False)),
-        "distance_transform_effective": dict(deeponet_distance_transform_effective),
-        "strict_mainline_effective": bool(strict_mainline),
-    }
-
-
-def resolve_deeponet_runtime(
-    ctx: TrainDispatchContext,
-    deeponet_plasma_cfg: dict[str, Any],
-    *,
-    output_keys: list[str] | None = None,
-    sensor_feature_names: list[str] | None = None,
-    operator_mode: str = "pde_coupled",
-) -> DeeponetRuntime:
-    h, w = ctx.h, ctx.w
-    model_cfg = dict(deeponet_plasma_cfg.get("model_cfg", deeponet_plasma_cfg))
-    branch_mode = str(model_cfg.get("branch_mode", "moments")).strip().lower()
-    missing_geom_feature_policy = str(model_cfg.get("missing_geom_feature_policy", "error")).strip().lower()
-    residual_head_cfg = dict(model_cfg.get("residual_head", {}))
-    output_path_cfg = dict(model_cfg.get("output_path", {}))
-    mode = str(operator_mode).strip().lower()
-    if mode not in {"plain", "pde_coupled"}:
-        raise ValueError("train.deeponet_plasma.operator_mode must be one of: plain, pde_coupled")
-    plain_output_keys = list(output_keys or ctx.y_vars)
-    if mode == "plain":
-        sensor_idx = None
-        query_idx = None
-        flatten_order = "C"
-        if branch_mode != "cond_only" and isinstance(ctx.deeponet_index, dict) and ctx.deeponet_index:
-            sensor_idx_arr = np.asarray(ctx.deeponet_index.get("sensor_indices", []), dtype=np.int64).reshape(-1)
-            query_idx_arr = np.asarray(ctx.deeponet_index.get("query_indices", []), dtype=np.int64).reshape(-1)
-            sensor_idx = sensor_idx_arr if sensor_idx_arr.size > 0 else None
-            query_idx = query_idx_arr if query_idx_arr.size > 0 else None
-            flatten_order = str(dict(ctx.deeponet_index_meta or {}).get("flatten_order", "C"))
-        model = DeepONetPlasmaOperatorTorch(
-            cond_dim=ctx.cond_scaled.shape[1],
-            grid_shape=(h, w),
-            output_keys=plain_output_keys,
-            latent_dim=int(model_cfg.get("latent_dim", 32)),
-            hidden_dim=int(model_cfg.get("hidden_dim", 64)),
-            sensor_indices=sensor_idx,
-            query_indices=query_idx,
-            flatten_order=flatten_order,
-            sensor_feature_names=list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]),
-            trunk_input_mode=str(model_cfg.get("trunk_input_mode", "geom_feature_pack")),
-            sensor_pool_mode=str(model_cfg.get("sensor_pool_mode", "moments")),
-            sensor_embed_dim=int(model_cfg.get("sensor_embed_dim", 32)),
-            branch_mode=branch_mode,
-            trunk_fourier_n_freq=int(model_cfg.get("trunk_fourier_n_freq", 1)),
-            trunk_fourier_mode=str(model_cfg.get("trunk_fourier_mode", "symmetric")),
-            trunk_cond_modulation=str(model_cfg.get("trunk_cond_modulation", "none")),
-            trunk_cond_mod_hidden=int(model_cfg.get("trunk_cond_mod_hidden", 64)),
-            residual_head_enabled=bool(residual_head_cfg.get("enabled", False)),
-            residual_head_hidden_dim=int(residual_head_cfg.get("hidden_dim", 64)),
-            residual_head_scale_init=float(residual_head_cfg.get("scale_init", 0.0)),
-            residual_head_gain_mode=str(residual_head_cfg.get("gain_mode", "learned")),
-            residual_head_gain_value=float(residual_head_cfg.get("gain_value", 1.0)),
-            latent_layer_norm=bool(model_cfg.get("latent_layer_norm", False)),
-            output_path_mode=str(output_path_cfg.get("mode", "dot")),
-            output_path_dot_skip=float(output_path_cfg.get("dot_skip", 0.25)),
-            output_path_dot_skip_mode=str(output_path_cfg.get("dot_skip_mode", "fixed")),
-            output_path_fused_hidden_dim=int(output_path_cfg.get("fused_hidden_dim", 96)),
-            output_path_global_local_enabled=bool(output_path_cfg.get("global_local", {}).get("enabled", False)),
-            output_path_global_hidden_dim=int(output_path_cfg.get("global_hidden_dim", 64)),
-            missing_geom_feature_policy=missing_geom_feature_policy,
-            seed=ctx.global_seed + ctx.model_idx,
-        )
-        return DeeponetRuntime(model=model, supervised_targets=None)
-
-    if not ctx.deeponet_poisson_index or not ctx.deeponet_boundary_index:
-        raise ValueError("deeponet_plasma requires task artifacts for poisson_head and boundary_operator")
-    validate_deeponet_task_meta("poisson_head", ctx.deeponet_poisson_meta, expected_shape=(h, w))
-    validate_deeponet_task_meta(
-        "boundary_operator",
-        ctx.deeponet_boundary_meta,
-        expected_shape=(h, w),
-        expected_order=str(ctx.deeponet_poisson_meta.get("flatten_order", "C")),
-    )
-    model = DeepONetPlasmaOperatorTorch(
-        cond_dim=ctx.cond_scaled.shape[1],
-        grid_shape=(h, w),
-        output_keys=plain_output_keys + ["rho_eff"],
-        latent_dim=int(model_cfg.get("latent_dim", 32)),
-        hidden_dim=int(model_cfg.get("hidden_dim", 64)),
-        sensor_indices=np.asarray(ctx.deeponet_poisson_index["sensor_indices"], dtype=np.int64),
-        query_indices=np.asarray(ctx.deeponet_poisson_index["query_indices"], dtype=np.int64),
-        flatten_order=str(ctx.deeponet_poisson_meta.get("flatten_order", "C")),
-        sensor_feature_names=list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]),
-        trunk_input_mode=str(model_cfg.get("trunk_input_mode", "geom_feature_pack")),
-        sensor_pool_mode=str(model_cfg.get("sensor_pool_mode", "moments")),
-        sensor_embed_dim=int(model_cfg.get("sensor_embed_dim", 32)),
-        branch_mode=branch_mode,
-        trunk_fourier_n_freq=int(model_cfg.get("trunk_fourier_n_freq", 1)),
-        trunk_fourier_mode=str(model_cfg.get("trunk_fourier_mode", "symmetric")),
-        trunk_cond_modulation=str(model_cfg.get("trunk_cond_modulation", "none")),
-        trunk_cond_mod_hidden=int(model_cfg.get("trunk_cond_mod_hidden", 64)),
-        residual_head_enabled=bool(residual_head_cfg.get("enabled", False)),
-        residual_head_hidden_dim=int(residual_head_cfg.get("hidden_dim", 64)),
-        residual_head_scale_init=float(residual_head_cfg.get("scale_init", 0.0)),
-        residual_head_gain_mode=str(residual_head_cfg.get("gain_mode", "learned")),
-        residual_head_gain_value=float(residual_head_cfg.get("gain_value", 1.0)),
-        latent_layer_norm=bool(model_cfg.get("latent_layer_norm", False)),
-        output_path_mode=str(output_path_cfg.get("mode", "dot")),
-        output_path_dot_skip=float(output_path_cfg.get("dot_skip", 0.25)),
-        output_path_dot_skip_mode=str(output_path_cfg.get("dot_skip_mode", "fixed")),
-        output_path_fused_hidden_dim=int(output_path_cfg.get("fused_hidden_dim", 96)),
-        output_path_global_local_enabled=bool(output_path_cfg.get("global_local", {}).get("enabled", False)),
-        output_path_global_hidden_dim=int(output_path_cfg.get("global_hidden_dim", 64)),
-        missing_geom_feature_policy=missing_geom_feature_policy,
-        seed=ctx.global_seed + ctx.model_idx,
-    )
-    poisson_cfg = dict(model_cfg.get("poisson_head", {}))
-    poisson_residual_cfg = dict(poisson_cfg.get("residual_head", residual_head_cfg) or {})
-    poisson_net = DeepONetPlasmaOperatorTorch(
-        cond_dim=ctx.cond_scaled.shape[1],
-        grid_shape=(h, w),
-        output_keys=["phi"],
-        latent_dim=int(poisson_cfg.get("latent_dim", model_cfg.get("latent_dim", 32))),
-        hidden_dim=int(poisson_cfg.get("hidden_dim", model_cfg.get("hidden_dim", 64))),
-        sensor_indices=np.asarray(ctx.deeponet_poisson_index["sensor_indices"], dtype=np.int64),
-        query_indices=np.asarray(ctx.deeponet_poisson_index["query_indices"], dtype=np.int64),
-        flatten_order=str(ctx.deeponet_poisson_meta.get("flatten_order", "C")),
-        sensor_feature_names=list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]),
-        trunk_input_mode=str(poisson_cfg.get("trunk_input_mode", model_cfg.get("trunk_input_mode", "geom_feature_pack"))),
-        sensor_pool_mode=str(poisson_cfg.get("sensor_pool_mode", model_cfg.get("sensor_pool_mode", "moments"))),
-        sensor_embed_dim=int(poisson_cfg.get("sensor_embed_dim", model_cfg.get("sensor_embed_dim", 32))),
-        branch_mode=str(poisson_cfg.get("branch_mode", model_cfg.get("branch_mode", "moments"))),
-        trunk_fourier_n_freq=int(poisson_cfg.get("trunk_fourier_n_freq", model_cfg.get("trunk_fourier_n_freq", 1))),
-        trunk_fourier_mode=str(poisson_cfg.get("trunk_fourier_mode", model_cfg.get("trunk_fourier_mode", "symmetric"))),
-        trunk_cond_modulation=str(poisson_cfg.get("trunk_cond_modulation", model_cfg.get("trunk_cond_modulation", "none"))),
-        trunk_cond_mod_hidden=int(poisson_cfg.get("trunk_cond_mod_hidden", model_cfg.get("trunk_cond_mod_hidden", 64))),
-        residual_head_enabled=bool(poisson_residual_cfg.get("enabled", False)),
-        residual_head_hidden_dim=int(poisson_residual_cfg.get("hidden_dim", 64)),
-        residual_head_scale_init=float(poisson_residual_cfg.get("scale_init", 0.0)),
-        residual_head_gain_mode=str(poisson_residual_cfg.get("gain_mode", residual_head_cfg.get("gain_mode", "learned"))),
-        residual_head_gain_value=float(poisson_residual_cfg.get("gain_value", residual_head_cfg.get("gain_value", 1.0))),
-        latent_layer_norm=bool(poisson_cfg.get("latent_layer_norm", model_cfg.get("latent_layer_norm", False))),
-        output_path_mode=str(poisson_cfg.get("output_path_mode", output_path_cfg.get("mode", "dot"))),
-        output_path_dot_skip=float(poisson_cfg.get("output_path_dot_skip", output_path_cfg.get("dot_skip", 0.25))),
-        output_path_dot_skip_mode=str(
-            poisson_cfg.get(
-                "output_path_dot_skip_mode",
-                output_path_cfg.get("dot_skip_mode", "fixed"),
-            )
-        ),
-        output_path_fused_hidden_dim=int(poisson_cfg.get("output_path_fused_hidden_dim", output_path_cfg.get("fused_hidden_dim", 96))),
-        output_path_global_local_enabled=bool(
-            poisson_cfg.get(
-                "output_path_global_local_enabled",
-                output_path_cfg.get("global_local", {}).get("enabled", False),
-            )
-        ),
-        output_path_global_hidden_dim=int(
-            poisson_cfg.get(
-                "output_path_global_hidden_dim",
-                output_path_cfg.get("global_hidden_dim", 64),
-            )
-        ),
-        missing_geom_feature_policy=str(
-            poisson_cfg.get(
-                "missing_geom_feature_policy",
-                missing_geom_feature_policy,
-            )
-        ),
-        seed=int(poisson_cfg.get("seed", ctx.global_seed + 1000 + ctx.model_idx)),
-    )
-    poisson_head = DeepONetPoissonHeadTorch.from_cache(
-        deeponet_poisson=poisson_net,
-        sensor_idx=np.asarray(ctx.deeponet_poisson_index["sensor_indices"], dtype=np.int64),
-        query_idx=np.asarray(ctx.deeponet_poisson_index["query_indices"], dtype=np.int64),
-        flatten_order=str(ctx.deeponet_poisson_meta.get("flatten_order", "C")),
-        grid_shape=(h, w),
-        freeze=bool(poisson_cfg.get("freeze", True)),
-    )
-    bo_cfg = dict(model_cfg.get("boundary_operator", {}))
-    boundary_operator = BoundaryOperatorTorch(
-        primary_qoi_key=str(ctx.profile_lock.get("primary_qoi_key", bo_cfg.get("primary_qoi_key", "Gamma_i"))),
-        freeze=bool(bo_cfg.get("freeze", True)),
-    )
-    model.attach_poisson_head(poisson_head)
-    model.attach_boundary_operator(boundary_operator)
-
-    bo_phys_cfg = ctx.physics_cfg.get("boundary_operator", {})
-    supervised_targets = None
-    if bool(bo_phys_cfg.get("enabled", False)):
-        sample_idx = resolve_sample_idx_source(
-            bo_phys_cfg.get("sample_idx_source"),
-            boundary_sensor_idx=np.asarray(ctx.deeponet_boundary_index["sensor_indices"], dtype=np.int64),
-            boundary_query_idx=np.asarray(ctx.deeponet_boundary_index["query_indices"], dtype=np.int64),
-            poisson_sensor_idx=np.asarray(ctx.deeponet_poisson_index["sensor_indices"], dtype=np.int64),
-            poisson_query_idx=np.asarray(ctx.deeponet_poisson_index["query_indices"], dtype=np.int64),
-        )
-        bo_phys_cfg["sample_idx"] = sample_idx
-        if str(bo_phys_cfg.get("mode", "operator_prior")) == "supervised":
-            supervised_targets = load_supervised_boundary_targets(
-                bo_phys_cfg.get("supervised_targets_npz"),
-                primary_qoi_key=str(bo_phys_cfg.get("primary_qoi_key", ctx.profile_lock.get("primary_qoi_key", "Gamma_i"))),
-                expected_grid_shape=(h, w),
-                base_dir=ctx.config_base_dir,
-            )
-    return DeeponetRuntime(model=model, supervised_targets=supervised_targets)
 
 
 def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
@@ -765,6 +256,8 @@ def _build_train_lane_runtime(
     raw_loss_cfg = ctx.loss_cfg if ctx.loss_cfg is not None else train_cfg.get("loss", {})
     role_schema = dict(dict(ctx.physics_cfg or {}).get("target_role_schema", {}) or {})
     loss_cfg = resolve_loss_protocol(copy.deepcopy(raw_loss_cfg or {}), target_role_schema=role_schema)
+    if role_schema:
+        loss_cfg["target_role_schema"] = role_schema
     supervised_mask = ctx.supervised_mask
     supervised_distance = ctx.supervised_distance
     if (
@@ -1009,7 +502,7 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     history = out.history
     steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
     rt.extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
-    _record_model_contract(
+    record_model_contract(
         rt.extra_artifacts,
         "deeponet_pod",
         {
@@ -1217,7 +710,7 @@ def _run_deeponet_plasma_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     if "rho_eff" in pred:
         pred_eval["rho_eff"] = np.asarray(pred["rho_eff"], dtype=np.float32)
     rt.extra_artifacts["supervised_targets_enabled"] = bool(runtime.supervised_targets is not None)
-    _record_model_contract(
+    record_model_contract(
         rt.extra_artifacts,
         "deeponet",
         _build_deeponet_contract_effective(

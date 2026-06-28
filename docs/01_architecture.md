@@ -1,53 +1,50 @@
 # 01 Architecture
 
-この repo は、dataset、preprocessing artifact、model capability、inference result を接続する pipeline 基盤である。設計の正本は `docs/00_product_foundation_policy.md` とする。
+The product architecture is an artifact pipeline. Each stage reads the previous
+stage's declared artifacts instead of rediscovering target order, feature order,
+or runtime mode from local assumptions.
 
 ## Pipeline
 
-- `cleanse`: raw table / field / structure data を検証する。
-- `feature`: geometry / coordinate feature pack を作る。
-- `preprocess`: split、schema、scaler、target 順序、feature 順序を固定する。
-- `train`: preprocessing artifact と model capability に従って学習する。
-- `infer`: checkpoint と preprocessing artifact から field、QoI、diagnostics を作る。
-- `evaluate`: active target に応じた metric を作る。
-- `benchmark`: 複数 run の resolved config、leaderboard、selection metric を残す。
+- `preprocess`: builds splits, schemas, scalers, feature packs, target role
+  metadata, and runtime schema hashes.
+- `train`: reads preprocessing artifacts, builds a model from `model_specs.py`,
+  trains it, and writes a checkpoint with runtime metadata.
+- `infer`: reads checkpoint and preprocessing artifacts, generates fields, QoI,
+  diagnostics, and optional optimization outputs.
+- `evaluate`: computes target-aware metrics and validity flags.
+- `benchmark`: compares model runs with an explicit evaluation protocol and
+  selection metric.
 
-CLI は実行入口であり、contract の正本ではない。意味は dataset / preprocessing / train / infer / benchmark 側で解決する。
+The CLI is only an execution entrypoint. The contracts live in dataset config,
+preprocessing artifacts, model specs, runtime metadata, and evaluation protocol.
 
 ## Artifact Flow
 
-下流 stage は前段が生成した artifact を読む。train / infer / benchmark が同じ artifact を読めない構成は製品 contract として扱わない。
+- Target order: `preprocessing/schema/output_layout.json`.
+- Field layout metadata: `preprocessing/schema/field_layout.json` for current
+  grid2d fields; not a replacement for target order.
+- Target roles: `preprocessing/schema/target_role_schema.json`.
+- Condition schema: `preprocessing/schema/cond_schema.json`.
+- Feature metadata: `preprocessing/features/*_meta.json`.
+- Channel map: `preprocessing/schema/channel_map.json`.
+- Target transforms: `preprocessing/scalers/y_scalers.json`.
+- Runtime hashes: `preprocessing/validation/runtime_schema_hashes.json`.
 
-- target order: `preprocessing/schema/output_layout.json`
-- target role metadata: `preprocessing/schema/target_role_schema.json`
-- condition schema: `preprocessing/schema/cond_schema.json`
-- feature metadata: `preprocessing/features/coord_feature_pack_meta.json`
-- channel map: `preprocessing/schema/channel_map.json`
-- target transform: `preprocessing/scalers/y_scalers.json`
-- runtime schema hash: `preprocessing/validation/runtime_schema_hashes.json`
+## Runtime Contracts
 
-## Truth Sources
+`RuntimeContract` is the compact internal boundary for input mode, structure
+feature profile, adapter mode, provider mode, and schema hashes. Pending hashes
+are allowed only while building metadata, not while executing train, infer, or
+benchmark.
 
-- target 定義: `dataset.targets[]`
-- target 順序: `output_layout.vars`
-- target role: `target_role_schema.json`
-- feature 順序: `coord_feature_pack_meta.json` / `channel_map.json`
-- model capability: `src/plasma_surrogate/core/model_specs.py`
-- benchmark primary metric: `surrogate_quality_score`
-- inference objective: `inference.optimize.objective`
-
-Benchmark profile、plot script、生成 report は target 名や出力順序の正本ではない。
+`EvaluationProtocol` records mode, primary split, primary metric, objective
+mode, target variables, region bands, and dual-axis weights. Benchmark resolved
+config writes this protocol so third-party readers can see how a leaderboard was
+selected.
 
 ## Model Lane
 
-モデルの違いは `model_specs.py` の capability と最小 adapter で表す。新モデル追加時は `model_specs.py` から始め、train / infer / benchmark に同じ model-specific 分岐を並列に増やさない。
-
-- `table_only`: 条件テーブルだけを入力にする。
-- `table_plus_structure`: 条件テーブルに structure / grid / coordinate feature を加える。
-
-## Out Of Scope For Architecture Docs
-
-- dataset-specific benchmark 説明。
-- generated report の inventory。
-- 実験履歴や引き継ぎメモ。
-- 未実装機能の利用手順。
+Model capability belongs in `src/plasma_surrogate/core/model_specs.py`. Train,
+infer, and benchmark should dispatch from capabilities and adapters, not from
+parallel hard-coded model policies.

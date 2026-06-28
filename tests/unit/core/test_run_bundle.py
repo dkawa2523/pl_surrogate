@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from plasma_surrogate.core.data_cleaning_audit import run_synthetic_data_audit
+from plasma_surrogate.core.data_cleaning_audit import run_data_audit
 from plasma_surrogate.core.run_bundle import (
     RunBundleLoader,
     ensure_preprocess_contract,
@@ -21,7 +21,7 @@ def test_run_bundle_loader_loads_assets(run_dir):
 
 
 def test_run_bundle_loader_loads_optional_deeponet_schema(run_dir):
-    dpath = run_dir / "preprocessing" / "sampling" / "deeponet"
+    dpath = run_dir / "preprocessing" / "sampling" / "deeponet" / "default"
     dpath.mkdir(parents=True)
     payload = {
         "sensor_indices": [0, 1, 2],
@@ -49,7 +49,7 @@ def test_run_bundle_loader_requires_task_spec_yaml(tmp_path):
     with (run_dir / "preprocessing" / "scalers" / "y_scalers.json").open("w", encoding="utf-8") as f:
         json.dump(
             {
-                "log_ne": {"type": "zscore", "mean": [0.0], "std": [1.0]},
+                "ne": {"type": "zscore", "mean": [0.0], "std": [1.0]},
                 "Te": {"type": "zscore", "mean": [0.0], "std": [1.0]},
                 "phi": {"type": "zscore", "mean": [0.0], "std": [1.0]},
             },
@@ -60,7 +60,7 @@ def test_run_bundle_loader_requires_task_spec_yaml(tmp_path):
     with (run_dir / "preprocessing" / "schema" / "axis_schema.json").open("w", encoding="utf-8") as f:
         json.dump({"mode": "steady", "harmonics": 1}, f)
     with (run_dir / "preprocessing" / "schema" / "output_layout.json").open("w", encoding="utf-8") as f:
-        json.dump({"order": "C", "shape": [3, 8, 8], "vars": ["log_ne", "Te", "phi"]}, f)
+        json.dump({"order": "C", "shape": [3, 8, 8], "vars": ["ne", "Te", "phi"]}, f)
 
 
     with pytest.raises(FileNotFoundError, match="task_spec.yaml"):
@@ -87,13 +87,13 @@ def test_required_preprocess_artifacts_contains_split_and_scalers():
     assert "preprocessing/scalers/cond_scaler.json" in required
 
 
-def test_run_synthetic_data_audit_counts_and_hist():
+def test_run_data_audit_counts_and_hist():
     cases = [
-        {"case_id": "a", "cond": {"c0": 0.1, "c1": 0.2}, "axis": 0.0, "y": {"log_ne": [[0.0]], "Te": [[0.0]], "phi": [[0.0]]}},
-        {"case_id": "b", "cond": {"c0": 1.2, "c1": 0.5}, "axis": 1.2, "y": {"log_ne": [[0.0]], "Te": [[0.0]], "phi": [[0.0]]}},
-        {"case_id": "c", "cond": {"c0": 0.3}, "y": {"log_ne": [[0.0]], "Te": [[0.0]]}},
+        {"case_id": "a", "cond": {"c0": 0.1, "c1": 0.2}, "axis": 0.0, "y": {"ne": [[0.0]], "Te": [[0.0]], "phi": [[0.0]]}},
+        {"case_id": "b", "cond": {"c0": 1.2, "c1": 0.5}, "axis": 1.2, "y": {"ne": [[0.0]], "Te": [[0.0]], "phi": [[0.0]]}},
+        {"case_id": "c", "cond": {"c0": 0.3}, "y": {"ne": [[0.0]], "Te": [[0.0]]}},
     ]
-    out = run_synthetic_data_audit(cases, cond_order=["c0", "c1"], axis_mode="time")
+    out = run_data_audit(cases, cond_order=["c0", "c1"], axis_mode="time")
     assert out["n_cases"] == 3
     assert out["missing_counts"]["cond"] >= 1
     assert out["missing_counts"]["axis"] >= 1

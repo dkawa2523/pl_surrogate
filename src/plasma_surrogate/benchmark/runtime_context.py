@@ -128,7 +128,6 @@ class BenchmarkDataContext:
     deeponet_boundary_meta: dict[str, Any]
     coord_feature_scaler: dict[str, Any] | None
     coord_feature_pack: dict[str, Any] | None
-    case_spatial_feature_pack: dict[str, Any] | None
     static_spatial_feature_pack: dict[str, Any] | None
     case_structure_feature_pack: dict[str, Any] | None
     coord_distance_transform_stats: dict[str, Any] | None
@@ -401,7 +400,6 @@ def build_benchmark_data_context(
         deeponet_boundary_meta=deeponet_boundary_meta,
         coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
         coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
-        case_spatial_feature_pack=bundle.schemas.get("case_spatial_feature_pack"),
         static_spatial_feature_pack=bundle.schemas.get("static_spatial_feature_pack"),
         case_structure_feature_pack=bundle.schemas.get("case_structure_feature_pack"),
         coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),

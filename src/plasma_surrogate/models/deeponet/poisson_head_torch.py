@@ -9,6 +9,8 @@ import numpy as np
 from plasma_surrogate.core.torch_backend import require_torch
 from plasma_surrogate.models._torch_spatial_common import _resolve_torch_device
 
+POISSON_POTENTIAL_OUTPUT_KEY = "phi"
+
 
 class DeepONetPoissonHeadTorch:
     def __init__(
@@ -139,11 +141,11 @@ class DeepONetPoissonHeadTorch:
         v_s = rho_flat[:, s_idx, :]
         x_q = coord_flat[q_idx][None, ...].expand(bsz, -1, -1)
         pred = self.net.forward(sensors={"x": x_s, "v": v_s}, query={"x": x_q}, cond=cond_t)
-        if "phi" not in pred:
+        if POISSON_POTENTIAL_OUTPUT_KEY not in pred:
             first_key = next(iter(pred.keys()))
             phi_q = pred[first_key]
         else:
-            phi_q = pred["phi"]
+            phi_q = pred[POISSON_POTENTIAL_OUTPUT_KEY]
 
         phi_full = torch.zeros((bsz, h * w, 1), dtype=torch.float32, device=self.device)
         phi_full[:, q_idx, :] = phi_q

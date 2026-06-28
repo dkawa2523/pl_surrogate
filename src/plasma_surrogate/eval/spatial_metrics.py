@@ -15,6 +15,17 @@ from plasma_surrogate.core.spatial_regions import (
 from plasma_surrogate.eval.metrics import r2_masked, rmse_masked
 
 
+def _resolve_summary_targets(
+    *,
+    vars_for_summary: list[str] | None,
+    true_eval: dict[str, np.ndarray],
+    pred_eval: dict[str, np.ndarray],
+) -> list[str]:
+    if vars_for_summary is not None:
+        return [str(v) for v in vars_for_summary]
+    return [str(key) for key in true_eval.keys() if str(key) in pred_eval][:2]
+
+
 def build_spatial_error_summary_rows(
     *,
     pred_eval: dict[str, np.ndarray],
@@ -28,7 +39,11 @@ def build_spatial_error_summary_rows(
     vars_for_summary: list[str] | None = None,
     region_band_cfg: dict[str, Any] | None = None,
 ) -> list[dict[str, float | str]]:
-    target_vars = [str(v) for v in (vars_for_summary or ["Te", "phi"])]
+    target_vars = _resolve_summary_targets(
+        vars_for_summary=vars_for_summary,
+        true_eval=true_eval,
+        pred_eval=pred_eval,
+    )
     rows: list[dict[str, float | str]] = []
     if distance_signed is None and (mask_plasma is None or distance_any is None):
         return rows
@@ -111,7 +126,11 @@ def build_spatial_error_by_case_rows(
     case_ids: list[str] | None = None,
     region_band_cfg: dict[str, Any] | None = None,
 ) -> list[dict[str, float | str]]:
-    target_vars = [str(v) for v in (vars_for_summary or ["Te", "phi"])]
+    target_vars = _resolve_summary_targets(
+        vars_for_summary=vars_for_summary,
+        true_eval=true_eval,
+        pred_eval=pred_eval,
+    )
     rows: list[dict[str, float | str]] = []
     if distance_signed is None and (mask_plasma is None or distance_any is None):
         return rows

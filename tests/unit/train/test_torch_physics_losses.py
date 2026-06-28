@@ -39,8 +39,8 @@ def test_physics_terms_torch_with_boundary_operator():
     torch = require_torch()
     pred = {
         "density": torch.ones((2, 1, 8, 8), dtype=torch.float32),
-        "Te": torch.ones((2, 1, 8, 8), dtype=torch.float32),
-        "phi": torch.zeros((2, 1, 8, 8), dtype=torch.float32),
+        "temperature": torch.ones((2, 1, 8, 8), dtype=torch.float32),
+        "potential": torch.zeros((2, 1, 8, 8), dtype=torch.float32),
     }
     bo = BoundaryOperatorTorch(primary_qoi_key="Gamma_i", freeze=False)
     total, terms = physics_terms_torch(
@@ -67,17 +67,17 @@ def test_physics_terms_torch_with_boundary_operator():
 def test_physics_terms_torch_uses_pred_rho_eff_when_present():
     require_torch_runtime()
     torch = require_torch()
-    phi = torch.zeros((1, 1, 8, 8), dtype=torch.float32)
+    potential = torch.zeros((1, 1, 8, 8), dtype=torch.float32)
     pred_zero = {
-        "ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
-        "Te": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
-        "phi": phi,
+        "density": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        "temperature": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        "potential": potential,
         "rho_eff": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
     }
     pred_nonzero = {
-        "ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
-        "Te": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
-        "phi": phi,
+        "density": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        "temperature": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        "potential": potential,
         "rho_eff": torch.ones((1, 1, 8, 8), dtype=torch.float32),
     }
     cfg = {"enabled": True, "poisson_weight": 1.0, "scale_rho": 1.0}

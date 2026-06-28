@@ -109,9 +109,10 @@ def _build_inference_engine_from_bundle(
     model_cfg = cfg.get("model", {})
     inf_cfg = cfg.get("inference", {})
     ood_cfg = dict(inf_cfg.get("ood", {"poisson_residual_limit": 1e2}) or {})
-    for key in ("qoi", "postprocess", "diagnostics"):
+    for key in ("qoi", "postprocess", "diagnostics", "derived_fields", "derived_fields_strict"):
         if key in inf_cfg:
-            ood_cfg[key] = dict(inf_cfg.get(key, {}) or {})
+            value = inf_cfg.get(key)
+            ood_cfg[key] = dict(value or {}) if isinstance(value, dict) else value
     resolved_model_name = str(model_name or model_cfg.get("name", "unet"))
     provider_mode = str(effective_input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")).strip().lower() or "fixed"
     geometry_provider = build_geometry_provider(dataset_root, provider_mode=provider_mode)
@@ -266,6 +267,28 @@ def _resolve_viz_density_key(
             raise
         return None
     return resolved["density"]
+
+
+def _resolve_train_workflow_potential_key(
+    *,
+    field_keys: list[str],
+    physics_cfg: dict[str, Any],
+    context: str,
+) -> str | None:
+    symbols = dict(dict(physics_cfg or {}).get("symbols", {}) or {})
+    try:
+        resolved = resolve_physics_symbol_keys(
+            [str(key) for key in field_keys],
+            symbols=symbols,
+            target_role_schema=dict(dict(physics_cfg or {}).get("target_role_schema", {}) or {}),
+            required=("potential",),
+            context=context,
+        )
+    except ValueError:
+        if symbols.get("potential") is not None:
+            raise
+        return None
+    return resolved["potential"]
 
 
 def _parse_box_space(raw_space: dict[str, Any], *, cfg_key: str) -> dict[str, tuple[float, float]]:
@@ -629,7 +652,12 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     history_len = len(dispatch.history)
     pred_eval = dict(dispatch.pred_eval)
 
-    if geom_ctx is not None and plasma_head is not None and "phi" in pred_eval:
+    potential_key = _resolve_train_workflow_potential_key(
+        field_keys=[str(key) for key in pred_eval.keys()],
+        physics_cfg=physics_cfg,
+        context="train workflow potential postprocess",
+    )
+    if geom_ctx is not None and plasma_head is not None and potential_key is not None:
         deeponet_head = None
         if phi_mode == "deeponet_poisson":
             deeponet_head = getattr(model, "poisson_head", None)
@@ -637,14 +665,21 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
                 deeponet_head = model
             elif deeponet_head is None and hasattr(model, "predict_fields"):
                 deeponet_head = model
-        pred_eval, head_aux = plasma_head.apply(
-            pred_eval,
+        head_out, head_aux = plasma_head.apply(
+            dict(pred_eval),
             geom_ctx=geom_ctx,
             refine_iters=0,
             deeponet_head=deeponet_head,
             cond_vec=cond[te],
+            potential_key=potential_key,
         )
+        pred_eval.update(head_out)
         pred_eval.update({k: v for k, v in head_aux.items() if k not in pred_eval})
+    elif geom_ctx is not None and plasma_head is not None and phi_mode != "direct":
+        raise ValueError(
+            "train workflow potential postprocess requires a unique potential target. "
+            "Set physics.symbols.potential or dataset.targets[].role."
+        )
 
     true_eval = dispatch.true_eval
     eval_payload = build_eval_metrics_payload(
@@ -652,6 +687,7 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
         pred_eval={k: pred_eval[k] for k in y_vars if k in pred_eval},
         eps=geom_ctx.eps if geom_ctx is not None else None,
         mask_plasma=np.asarray(geom_ctx.mask_plasma, dtype=np.float32) if geom_ctx is not None else None,
+        potential_key=potential_key,
     )
     metrics = dict(eval_payload["rmse"])
     r2 = dict(eval_payload.get("r2", {}))

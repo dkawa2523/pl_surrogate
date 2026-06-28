@@ -87,10 +87,31 @@ def resolve_mainline_selection_weights(
     return out
 
 
+def validate_mainline_selection_contract(
+    *,
+    selection_cfg: dict[str, Any],
+    target_vars: list[str],
+    cfg_prefix: str,
+) -> dict[str, float]:
+    sel_mode = str(selection_cfg.get("mode", "last")).strip().lower()
+    if sel_mode not in {"best_val_allvars_balance", "best_val_loss"}:
+        raise ValueError(f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, best_val_loss for mainline")
+    if "density_guard" in selection_cfg:
+        raise ValueError(f"{cfg_prefix}.selection.density_guard is removed from mainline")
+    if "boundary_bonus_weight" in selection_cfg and float(selection_cfg.get("boundary_bonus_weight", 0.0)) != 0.0:
+        raise ValueError(f"{cfg_prefix}.selection.boundary_bonus_weight must be 0.0 for mainline")
+    return resolve_mainline_selection_weights(
+        selection_cfg=selection_cfg,
+        target_vars=target_vars,
+        cfg_prefix=cfg_prefix,
+    )
+
+
 __all__ = [
     "resolve_allvars_target_family",
     "resolve_allvars_target_vars_for_family",
     "resolve_mainline_selection_weights",
     "resolve_target_vars",
     "to_true_eval",
+    "validate_mainline_selection_contract",
 ]

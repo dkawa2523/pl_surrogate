@@ -127,13 +127,13 @@ commands:
     --source-root data\outputs_icp_stage4_enriched_360
     --out reports\icp_stage4_conference_problem_setting\dataset_audit_part_lite_ready.json
   run_primary_smoke: >
-    .venv-torch\Scripts\python.exe scripts\run_icp_stage4_core4_benchmarks.py
+    .venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_stage4_core4_benchmarks.py
     --sizes smoke --models ffno
     --config-root configs\experimental\icp_stage4\generated_conference_part_sdf_lite_v1_e80_baseline
     --run-root runs\icp_stage4_conference_part_sdf_lite_v1_e80_baseline
     --status-csv runs\icp_stage4_conference_part_sdf_lite_v1_e80_baseline\run_status.csv
   run_spatial_baseline_smoke: >
-    .venv-torch\Scripts\python.exe scripts\run_icp_stage4_core4_benchmarks.py
+    .venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_stage4_core4_benchmarks.py
     --sizes smoke --models ffno
     --config-root configs\experimental\icp_stage4\generated_conference_struct_spatial_v1_e80_baseline
     --run-root runs\icp_stage4_conference_struct_spatial_v1_e80_baseline

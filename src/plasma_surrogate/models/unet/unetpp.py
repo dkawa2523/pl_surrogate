@@ -7,6 +7,11 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.models._torch_spatial_common import _build_unit_coord_grid
+from plasma_surrogate.models.heads.role_grouped import (
+    build_role_grouped_conv2d_head,
+    configure_output_head_metadata,
+    is_grouped_output_head_mode,
+)
 from plasma_surrogate.models.unet._torch_spatial_base import (
     _TorchSpatialFieldMixin,
 )
@@ -33,6 +38,9 @@ def _build_unetpp_modules(
     upsample_mode: str,
     attention_enabled: bool,
     attention_reduction: int,
+    head_mode: str,
+    output_keys: list[str],
+    target_groups: dict[str, Any],
 ):
     class _DoubleConv(nn.Module):
         def __init__(self, in_channels: int, out_channels: int):
@@ -95,12 +103,28 @@ def _build_unetpp_modules(
     class _UNetPPHead(nn.Module):
         def __init__(self):
             super().__init__()
-            self.out = nn.Conv2d(base_ch, out_ch + (1 if with_rho_eff_head else 0), kernel_size=1)
+            self.mode = str(head_mode)
+            if is_grouped_output_head_mode(self.mode):
+                self.out = None
+                self.role_grouped = build_role_grouped_conv2d_head(
+                    torch=torch,
+                    in_channels=base_ch,
+                    output_keys=list(output_keys),
+                    target_groups=dict(target_groups),
+                    with_rho_eff_head=bool(with_rho_eff_head),
+                )
+            else:
+                self.out = nn.Conv2d(base_ch, out_ch + (1 if with_rho_eff_head else 0), kernel_size=1)
+                self.role_grouped = None
 
         def forward(self, feat):
+            if self.role_grouped is not None:
+                return self.role_grouped(feat)
             return self.out(feat)
 
         def step_reference(self):
+            if self.role_grouped is not None:
+                return self.role_grouped.step_reference()
             return self.out.weight
 
     class _UNetPPModel(nn.Module):
@@ -173,6 +197,7 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
         input_feature_channels: list[str] | None = None,
         conv_cfg: dict[str, Any] | None = None,
         output_heads: dict[str, Any] | None = None,
+        target_role_schema: dict[str, Any] | None = None,
     ) -> None:
         self.model_type, self._config_prefix = _resolve_unetpp_identity(conv_cfg)
         self._spatial_label = self.model_type
@@ -180,9 +205,7 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
         self.grid_shape = tuple(grid_shape)
         self.out_channels = int(out_channels)
         if output_keys is None:
-            base = ["ne", "Te", "phi"]
-            extra = [f"out_{i}" for i in range(max(0, self.out_channels - len(base)))]
-            self.output_keys = (base + extra)[: self.out_channels]
+            self.output_keys = [f"target_{i}" for i in range(self.out_channels)]
         else:
             self.output_keys = list(output_keys)[: self.out_channels]
         self.with_rho_eff_head = bool(with_rho_eff_head)
@@ -199,10 +222,13 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
         self.input_feature_channels = [str(v) for v in channels]
         self.spatial_feature_dim = int(len(self.input_feature_channels))
         self.feature_dim = int(self.input_dim + self.spatial_feature_dim)
-        self.output_heads = dict(output_heads or {})
-        self.output_heads_mode = str(self.output_heads.get("mode", "shared")).strip().lower()
-        if self.output_heads_mode != "shared":
-            raise ValueError(f"{self._config_prefix}.model_cfg.output_heads.mode must be shared")
+        configure_output_head_metadata(
+            self,
+            output_heads=dict(output_heads or {}),
+            output_keys=list(self.output_keys),
+            target_role_schema=dict(target_role_schema or {}),
+            cfg_prefix=self._config_prefix,
+        )
         self.head_mlp = dict(head_mlp or {})
         self._static_spatial_features: np.ndarray | None = None
         self._cache: dict[str, object] = {}
@@ -263,6 +289,9 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
             upsample_mode=mode_effective,
             attention_enabled=attention_enabled,
             attention_reduction=attention_reduction,
+            head_mode=str(self.output_heads_mode),
+            output_keys=list(self.output_keys),
+            target_groups=dict(self.target_groups),
         )
         self._ensure_net_device()
         self.net.train()

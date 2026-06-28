@@ -45,6 +45,7 @@ def test_single_run_aggregated_window_mean(tmp_path: Path, geometry_root: Path):
         axis_schema=AxisSchema(mode="time"),
         geometry_provider=FixedGeometryProvider(geometry_root),
         output_dir=tmp_path / "infer",
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     out = engine.single_run_aggregated(
         cond={"c0": 0.2, "c1": 0.4},

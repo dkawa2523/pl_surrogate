@@ -4,7 +4,6 @@ import argparse
 import contextlib
 import csv
 import os
-import sys
 import time
 import traceback
 from pathlib import Path
@@ -16,6 +15,7 @@ MODEL_ORDER = (
     "unet",
     "unetpp",
     "unetpp_attn",
+    "unet_operator_v2",
     "fno",
     "ffno",
     "coord_mlp_fourier",
@@ -26,7 +26,6 @@ MODEL_ORDER = (
     "cno_operator_unet",
     "geom_deeponet_pod",
     "geom_deeponet_siren",
-    "deeponet_plasma_pod",
     "deeponet_plasma",
 )
 
@@ -45,11 +44,11 @@ STATUS_FIELDS = (
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run ext0520 benchmark configs one at a time with low host load.")
-    parser.add_argument("--sizes", nargs="+", type=int, default=[78])
+    parser.add_argument("--sizes", nargs="+", type=int, default=[27, 54, 78])
     parser.add_argument("--models", nargs="+", default=list(MODEL_ORDER))
-    parser.add_argument("--config-root", default="runs/benchmarkrun_ext0520/configs")
-    parser.add_argument("--run-root", default="runs/benchmarkrun_ext0520")
-    parser.add_argument("--status-csv", default="runs/benchmarkrun_ext0520/run_status.csv")
+    parser.add_argument("--config-root", default="runs/gec_ccp_trustworthy_v1/configs")
+    parser.add_argument("--run-root", default="runs/gec_ccp_trustworthy_v1")
+    parser.add_argument("--status-csv", default="runs/gec_ccp_trustworthy_v1/run_status.csv")
     parser.add_argument(
         "--load-profile",
         choices=("low", "normal"),

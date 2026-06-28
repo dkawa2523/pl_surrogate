@@ -1,101 +1,84 @@
 # 05 Inference And Evaluation
 
-inference / evaluation は checkpoint と preprocessing artifact を接続し、field、QoI、metrics、benchmark summary を作る。
+Inference connects a checkpoint with preprocessing artifacts. Evaluation reports
+both metric values and whether those values are valid for selection.
 
 ## Inference Contract
 
-`InferenceEngine` は次を正本として読む。
+`InferenceEngine` reads:
 
-- target order: `preprocessing/schema/output_layout.json`
-- target role metadata: `preprocessing/schema/target_role_schema.json`
-- target transforms: `preprocessing/scalers/y_scalers.json`
-- feature order: `preprocessing/features/coord_feature_pack_meta.json`
-- channel order: `preprocessing/schema/channel_map.json`
-- runtime schema hash: `preprocessing/validation/runtime_schema_hashes.json`
-- model capability: `src/plasma_surrogate/core/model_specs.py`
+- target order and target roles
+- target transforms
+- feature order and channel map
+- runtime schema hashes
+- model capability metadata
 
-checkpoint metadata と runtime request metadata の required keys が一致しない場合は fail-fast とする。
+Checkpoint metadata and request metadata must match for required runtime keys.
 
-## Physics Symbol Mapping
+## Physics Symbols
 
-physics / OOD / boundary operator は target 名 alias に依存しない。明示 `symbols` を最優先し、無い場合だけ一意の role / field family から解決する。解決不能または曖昧な場合は fail-fast とする。
+Physics, OOD diagnostics, and boundary-operator diagnostics resolve targets from
+explicit symbols first, then unique target role/family metadata. Target names are
+examples, not aliases baked into the product contract.
 
 ```yaml
-inference:
-  ood:
-    physics:
-      enabled: true
-      symbols:
-        density: electron_density
-        temperature: electron_temperature
-        potential: plasma_potential
+physics:
+  symbols:
+    density: electron_density
+    temperature: electron_temperature
+    potential: plasma_potential
+  terms:
+    poisson:
+      weight: 0.1
 ```
+
+## Derived Fields
+
+Learned targets are checkpoint outputs listed in `output_layout.vars`. Derived
+fields are inference-time products computed from physical-space learned targets.
+They are not training targets and are not fed into loss.
+
+By default, inference writes `E_mag` only when a unique potential can be
+resolved from `physics.symbols` or target-role metadata. Optional
+`inference.derived_fields` entries can request `negative_gradient`,
+`vector_magnitude`, or `electric_field_magnitude`. Missing sources are skipped by
+default; set `derived_fields_strict: true` to fail fast.
 
 ## Metrics
 
-evaluate / benchmark は active target に応じた dynamic metric column を作る。
+Evaluation produces dynamic target columns:
 
 - `test_rmse_<var>`
 - `test_r2_<var>`
 - `test_rmse_<var>_plasma`
 - `test_r2_<var>_plasma`
 
-固定 target header は product contract にしない。
+Masked metrics return `NaN` when the active mask is empty or active values are
+non-finite. This prevents invalid regions from looking like perfect scores.
 
-## Benchmark Selection
+## Benchmark Tables
 
-benchmark selection の default は lower-better の `surrogate_quality_score` である。R2 / RMSE は補助指標として残すが、primary selection にはしない。
+Benchmark writes comparison and diagnostics separately:
 
-`surrogate_quality_score` は次の component を集約する。
+- `leaderboard.csv`: model id, target RMSE/R2, `surrogate_quality_score`, and
+  primary metric reliability.
+- `core_metrics.csv`: the same core comparison columns without diagnostic
+  payloads.
+- `diagnostics/diagnostics.csv`: quality components, finite-count checks,
+  boundary/deep-region contrast, continuity ratios, and optional distribution
+  summaries.
 
-- target ごとの normalized RMSE
-- boundary / deep region の誤差バランス
-- continuity diagnostic
-- physics residual diagnostic
-- positive target の sign penalty
+`target_metrics_valid` stays in the core row because it gates primary metric
+reliability. Detailed `quality_components` and `validity_flags` live in the
+diagnostics table.
 
-role schema が無い場合、sign penalty は 0 contribution とする。
+`surrogate_quality_score` remains the default lower-better selection metric. Its
+sign component uses `target_role_schema.positive_targets`; without positive
+metadata, that component contributes zero.
 
 ## Optimization Objective
 
-`inference.optimize.objective` の product contract は `weighted_sum` のみである。各 term は `InferenceResult.qoi` を先に参照し、無ければ `InferenceResult.diagnostics` を参照する。
-
-```yaml
-inference:
-  optimize:
-    enabled: true
-    backend: optuna
-    objective:
-      mode: weighted_sum
-      terms:
-        - key: uniformity
-          direction: min
-          weight: 1.0
-        - key: boundary_gamma_uniformity
-          direction: min
-          weight: 0.3
-        - key: poisson_residual_norm
-          direction: min
-          weight: 0.2
-          transform: log1p_abs
-          scale: 1.0
-    constraints:
-      - key: poisson_residual_norm
-        upper: 0.05
-```
-
-Term fields:
-
-- `key`: QoI または scalar diagnostic 名。
-- `direction`: `min` または `max`。`max` は lower-better objective へ負寄与で変換する。
-- `weight`: weighted sum の係数。
-- `scale`: 正の有限値。既定は `1.0`。
-- `transform`: `identity` または `log1p_abs`。
-
-missing / non-finite term は config error として fail-fast とする。Best selection は feasible trial を優先し、feasible trial が無い場合だけ全 trial の最小 `objective_value` を使う。
-
-Trial record は `objective_value`, `search_value`, `feasible`, `violated_constraints`, `constraint_violation_total`, `qoi_*`, `diagnostic_*`, `objective_term_*` を持つ。
-
-## Planned Extension Points
-
-能動学習、多様性最適化、Pareto front は未実装である。将来は `objective.mode` を追加して拡張し、現行の `weighted_sum` contract を肥大化させない。
+The product objective mode is `weighted_sum`. Terms read scalar QoI first and
+then scalar diagnostics. Constraints affect feasibility and `search_value`.
+Benchmark summaries expose `status`, `skip_reason`, `objective_value`,
+`search_value`, and constraint violation information.

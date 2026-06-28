@@ -54,7 +54,6 @@ def _make_engine(
     geom_provider = FixedGeometryProvider(geometry_root)
     output_dir = temp_root / model_name / split
     coord_feature_pack = bundle.schemas.get("coord_feature_pack")
-    coord_pack_meta = dict(bundle.schemas.get("coord_feature_pack_meta", {}))
     coord_scaler = dict(bundle.transforms.get("coord_scaler", {}))
     coord_feature_scaler = dict(bundle.transforms.get("coord_feature_scaler", {}))
     coord_distance_stats = dict(bundle.transforms.get("distance_transform_stats", {}))

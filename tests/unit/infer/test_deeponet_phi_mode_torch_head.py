@@ -26,14 +26,28 @@ class _DummyDeepONetHead:
 
 def test_plasma_head_prefers_predict_phi_for_deeponet_mode(tmp_path: Path, geometry_root: Path):
     head = _DummyDeepONetHead()
+    target_role_schema = {
+        "targets": [
+            {"id": "electron_density", "role": "density_electron", "field_family": "density"},
+            {"id": "electron_temperature", "role": "temperature_electron", "field_family": "temperature"},
+            {"id": "plasma_potential", "role": "potential", "field_family": "electrostatic"},
+        ],
+    }
     engine = InferenceEngine(
-            model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=0),
+        model=GlobalMLP(
+            input_dim=3,
+            grid_shape=(8, 8),
+            output_keys=["electron_density", "electron_temperature", "plasma_potential"],
+            seed=0,
+        ),
         cond_schema=CondSchema(order=["c0", "c1", "c2"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=FixedGeometryProvider(geometry_root),
         output_dir=tmp_path / "infer",
         phi_mode="deeponet_poisson",
         deeponet_head=head,
+        ood_cfg={"qoi": {"uniformity": {"target": "electron_density"}}},
+        target_role_schema=target_role_schema,
     )
     res = engine.single_run(
         cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
@@ -41,4 +55,4 @@ def test_plasma_head_prefers_predict_phi_for_deeponet_mode(tmp_path: Path, geome
         axis={"mode": "steady", "value": 0.0},
     )
     assert head.used_predict_phi is True
-    assert res.fields_phys["phi"].shape == (1, 8, 8)
+    assert res.fields_phys["plasma_potential"].shape == (1, 8, 8)

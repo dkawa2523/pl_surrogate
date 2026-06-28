@@ -46,7 +46,7 @@ from plasma_surrogate.preprocessing.report import PreprocessReportBuilder
 from plasma_surrogate.preprocessing.scalers import ScalerFactory, fit_scalers_train_only
 from plasma_surrogate.preprocessing.schema import AxisSchema, ChannelMap, CondSchema
 from plasma_surrogate.preprocessing.split_plan import SplitPlanBuilder
-from plasma_surrogate.train.spatial_features import (
+from plasma_surrogate.preprocessing.spatial_features import (
     ICP_PART_SDF_CHANNELS,
     ICP_PART_SDF_LITE_CASE_CHANNELS,
     ICP_STRUCT_CASE_CHANNELS,
@@ -62,6 +62,26 @@ def _resolve_y_vars(cases: list[dict[str, Any]]) -> list[str]:
     if len(keys) == 0:
         raise ValueError("Each case.y must include at least one target variable")
     return [str(k) for k in keys]
+
+
+def _build_grid2d_field_layout(output_layout: dict[str, Any]) -> dict[str, Any]:
+    shape = [int(v) for v in list(output_layout.get("shape", []))]
+    vars_eff = [str(v) for v in list(output_layout.get("vars", []))]
+    if len(shape) != 3:
+        raise ValueError(f"grid2d field_layout requires output_layout.shape=[C,H,W], got={shape}")
+    if int(shape[0]) != len(vars_eff):
+        raise ValueError(
+            "grid2d field_layout requires output_layout.shape[0] to match output_layout.vars length; "
+            f"shape={shape}, vars={vars_eff}"
+        )
+    return {
+        "version": 1,
+        "layout_type": "grid2d",
+        "vars": vars_eff,
+        "shape": shape,
+        "order": str(output_layout.get("order", "C")),
+        "axes": ["channel", "y", "x"],
+    }
 
 
 def _coord_xy_maps(coord_grid: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -161,7 +181,7 @@ def _distance_to_mask(mask: np.ndarray) -> np.ndarray:
     return np.where(binary > 0.5, 0.0, np.abs(signed)).astype(np.float32)
 
 
-def _build_compact_case_spatial_feature_pack(
+def _build_split_spatial_feature_packs(
     *,
     cases: list[dict[str, Any]],
     channels: list[str],
@@ -329,7 +349,6 @@ class PreprocessArtifacts:
             "channel_map": self.channel_map,
             "coord_feature_pack_meta": self.coord_feature_pack_meta,
             "static_spatial_feature_pack_meta": self.static_spatial_feature_pack_meta,
-            "case_spatial_feature_pack_meta": {},
             "case_structure_feature_pack_meta": self.case_structure_feature_pack_meta,
             "structure_descriptor_pack_meta": self.structure_descriptor_pack_meta,
             "latent_feature_pack_meta": self.latent_feature_pack_meta,
@@ -543,12 +562,14 @@ class PreprocessRunner:
         axis_schema: AxisSchema,
         channel_map_payload: dict[str, Any],
         output_layout_payload: dict[str, Any],
+        field_layout_payload: dict[str, Any],
         target_role_schema_payload: dict[str, Any],
     ) -> None:
         self.store.save_json("schema/cond_schema.json", cond_schema.to_dict())
         self.store.save_json("schema/axis_schema.json", axis_schema.to_dict())
         self.store.save_json("schema/channel_map.json", channel_map_payload)
         self.store.save_json("schema/output_layout.json", output_layout_payload)
+        self.store.save_json("schema/field_layout.json", field_layout_payload)
         self.store.save_json("schema/target_role_schema.json", target_role_schema_payload)
 
     def _save_runtime_schema_hashes(
@@ -741,12 +762,14 @@ class PreprocessRunner:
             "shape": [len(y_vars), int(sample_shape[0]), int(sample_shape[1])],
             "vars": y_vars,
         }
+        field_layout_payload = _build_grid2d_field_layout(output_layout_payload)
         target_role_schema_payload = build_target_role_schema(target_metadata, y_vars=y_vars)
         self._save_schema_artifacts(
             cond_schema=cond_schema,
             axis_schema=axis_schema,
             channel_map_payload=channel_map_payload,
             output_layout_payload=output_layout_payload,
+            field_layout_payload=field_layout_payload,
             target_role_schema_payload=target_role_schema_payload,
         )
         cond_scaler_payload = transforms.cond_scaler.to_dict()
@@ -948,7 +971,7 @@ class PreprocessRunner:
         compact_fit_mask = np.ones_like(coord_x, dtype=bool)
         if case_spatial_feature_enabled:
             static_spatial_feature_data, case_structure_feature_data, case_spatial_meta = (
-                _build_compact_case_spatial_feature_pack(
+                _build_split_spatial_feature_packs(
                     cases=cases,
                     channels=coord_feature_channels,
                     coord_x=coord_x,

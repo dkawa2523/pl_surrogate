@@ -1,4 +1,4 @@
-﻿benchmark:
+benchmark:
   output_dir: runs/periodic_real_tuned_v83/benchmark_m7_unetpp_isolated_mainline
   profile: m7_unetpp_isolated
   seed: 411
@@ -29,8 +29,8 @@
     root: data/outputs_merged_td_csv_periodic
     index_csv: index.csv
     targets:
-      - {id: ne, source_key: log_ne, value_transform: pow10, units: "m^-3", dtype: float32}
-      - {id: ni, source_key: log_ni, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: ne, source_key: ne, value_transform: identity, units: "m^-3", dtype: float32}
+      - {id: ni, source_key: ni, value_transform: identity, units: "m^-3", dtype: float32}
       - {id: Te, source_key: Te, value_transform: identity, units: "eV", dtype: float32}
       - {id: phi, source_key: phi, value_transform: identity, units: "V", dtype: float32}
     cond_columns: [PP0, Td, gamma]
@@ -117,27 +117,11 @@
           mode: shared
     loss:
       supervised:
-        type: huber
-        delta: 1.0
+        type: mse
         normalization: sample_mean
         sample_mean_group_mode: batch
         sample_mean_weight_denominator: count
         mask: plasma_only
-        nan_region_policy: sdf_continuous
-        spatial_consistency:
-          enabled: true
-          vars: [ne, ni, Te, phi]
-          mode: grad_huber
-          lambda: 0.05
-          delta: 1.0
-          apply_region: plasma_only
-          normalize_by_var_scale: true
-          multiscale:
-            enabled: false
-            scales: [1, 2, 4]
-            scale_weights: [1.0, 0.7, 0.5]
-        chamber_aux:
-          enabled: false
       multitask:
         weighting: fixed
         fixed_weights_by_var:

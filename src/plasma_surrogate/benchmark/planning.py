@@ -133,9 +133,10 @@ class BenchmarkPlanBuilder:
     def inference_ood_cfg(self) -> dict[str, Any]:
         inference_cfg = dict(self.cfg.get("inference", {}) or {})
         ood_cfg = dict(inference_cfg.get("ood", {"poisson_residual_limit": 1e2}) or {})
-        for key in ("qoi", "postprocess", "diagnostics"):
+        for key in ("qoi", "postprocess", "diagnostics", "derived_fields", "derived_fields_strict"):
             if key in inference_cfg:
-                ood_cfg[key] = dict(inference_cfg.get(key, {}) or {})
+                value = inference_cfg.get(key)
+                ood_cfg[key] = dict(value or {}) if isinstance(value, dict) else value
         return ood_cfg
 
 

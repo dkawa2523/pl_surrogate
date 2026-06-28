@@ -163,19 +163,3 @@ def run_data_audit(
         "cond_range_summary": _cond_range_summary(cases, cond_order),
         "required_outputs": req_outputs,
     }
-
-
-def run_synthetic_data_audit(
-    cases: list[dict[str, Any]],
-    cond_order: list[str],
-    axis_mode: str,
-    required_outputs: list[str] | None = None,
-) -> dict[str, Any]:
-    """Backward-compatible wrapper kept for existing callers/tests."""
-
-    return run_data_audit(
-        cases=cases,
-        cond_order=cond_order,
-        axis_mode=axis_mode,
-        required_outputs=required_outputs,
-    )

@@ -132,10 +132,6 @@ def _load_gt_from_fields_npz(npz_path: Path, var_name: str) -> np.ndarray:
     data = np.load(npz_path)
     if var_name in data.files:
         arr = data[var_name]
-    elif var_name == "ne" and "log_ne" in data.files:
-        arr = np.power(10.0, np.asarray(data["log_ne"], dtype=np.float32))
-    elif var_name == "ni" and "log_ni" in data.files:
-        arr = np.power(10.0, np.asarray(data["log_ni"], dtype=np.float32))
     else:
         raise KeyError(f"GT field {var_name} not found in {npz_path.name}")
     return np.asarray(arr, dtype=np.float32)

@@ -40,6 +40,7 @@ def test_optimize_csv_backend_smoke(tmp_path: Path):
         "model": {"name": "global_mlp"},
         "train": {"epochs": 3, "lr": 0.01},
         "inference": {
+            "qoi": {"uniformity": {"target": "ne"}},
             "optimize": {
                 "enabled": True,
                 "backend": "csv",

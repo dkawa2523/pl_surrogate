@@ -1,3 +1,0 @@
-model_id,objective,space_mode,mid_height_row,sample_count,n_trials,invalid_trial_count,base_uniformity,best_uniformity,absolute_improvement,relative_improvement,base_boundary_gamma_uniformity,best_boundary_gamma_uniformity
-ffno,ne_uniformity_plasma_mid_height,coil_layout_rectangles_v1,119,600,80,0,0.339565246249552,0.3203693428980706,0.019195903351481358,0.056530824527825735,0.7903564984463768,0.7853523971529079
-unet,ne_uniformity_plasma_mid_height,coil_layout_rectangles_v1,119,600,80,0,0.715546752671346,0.6993914564626688,0.016155296208677283,0.022577555063124557,0.649543951789388,0.6438208428011848

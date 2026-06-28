@@ -42,7 +42,8 @@ python -m plasma_surrogate benchmark run --config path/to/benchmark.yaml
 - Target definitions start at `dataset.targets[]`.
 - Target order after preprocessing is `preprocessing/schema/output_layout.json`.
 - Target role metadata is `preprocessing/schema/target_role_schema.json`.
-- Target transforms are reversible preprocessing artifacts, not model policy.
+- Raw target metadata starts in `dataset.targets[]`; reversible transforms,
+  scalers, and clipping are preprocessing artifacts.
 - Feature and channel order come from `coord_feature_pack_meta.json` and
   `channel_map.json`.
 - Train, infer, and benchmark use the same preprocessing artifact bundle.
@@ -52,6 +53,7 @@ python -m plasma_surrogate benchmark run --config path/to/benchmark.yaml
 - Checkpoint, inference, and benchmark metadata validate `target_schema_hash`
   and `feature_schema_hash` fail-fast.
 - Model capability is defined in `src/plasma_surrogate/core/model_specs.py`.
+- First-class product examples use `output_heads.mode: shared`.
 - Benchmark selection defaults to lower-better `surrogate_quality_score`.
 - Optimization uses `inference.optimize.objective`.
 

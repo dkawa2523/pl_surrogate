@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.core.target_groups import TargetGroup, resolve_target_groups
 from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.core.torch_backend import require_torch
 from plasma_surrogate.train.loss_contract import removed_supervised_keys
+from plasma_surrogate.train.loss_protocols import (
+    GROUP_WEIGHTING_MODES,
+    GROUP_WEIGHTING_NONE,
+    GROUP_WEIGHTING_UNIFORM_BY_TARGET,
+)
 from plasma_surrogate.train.losses import physics_loss_and_grad
 from plasma_surrogate.train.physics_terms import resolve_numpy_terms, resolve_torch_terms
 from plasma_surrogate.train.torch_losses import physics_terms_torch
@@ -23,6 +30,13 @@ def _empty_components() -> dict[str, float]:
 
 def _dict_or_empty(raw: Any) -> dict[str, Any]:
     return dict(raw or {})
+
+
+def _positive_finite_float(raw: Any, *, key_name: str) -> float:
+    value = float(raw)
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{key_name} must be finite and > 0")
+    return value
 
 
 def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
@@ -49,14 +63,22 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
     if target_weights and not fixed_weights_by_var:
         fixed_weights_by_var = target_weights
 
-    supervised_type = str(sup.get("type", sup.get("base", "mse"))).strip().lower()
-    if supervised_type not in {"mse", "mae", "huber"}:
-        raise ValueError("supervised.base/type must be one of: mse, mae, huber")
+    if "base" in sup:
+        raise ValueError("supervised.base is removed; use supervised.type")
+    if "delta" in sup:
+        raise ValueError("supervised.delta is removed; use supervised.huber_delta")
+
+    supervised_type = str(sup.get("type", "mse")).strip().lower()
+    if supervised_type not in {"mse", "huber"}:
+        raise ValueError("supervised.type must be one of: mse, huber")
+    delta = _positive_finite_float(
+        sup.get("huber_delta", 1.0),
+        key_name="supervised.huber_delta",
+    )
 
     return {
         "type": supervised_type,
-        "delta": float(sup.get("delta", sup.get("huber_delta", 1.0))),
-        "delta_by_var": _dict_or_empty(sup.get("delta_by_var")),
+        "delta": delta,
         "normalization": str(sup.get("normalization", "pixel_mean")).strip().lower(),
         "sample_mean_group_mode": str(sup.get("sample_mean_group_mode", "batch")).strip().lower(),
         "sample_mean_weight_denominator": str(sup.get("sample_mean_weight_denominator", "weighted")).strip().lower(),
@@ -65,6 +87,101 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         "sigma_init": _dict_or_empty(mt.get("sigma_init")),
         "sigma_clamp": tuple(mt.get("sigma_clamp", [-3.0, 3.0])),
     }
+
+
+def _resolve_group_weighting_mode(loss_cfg: dict[str, Any] | None) -> str:
+    cfg = _dict_or_empty(loss_cfg)
+    group_weighting = _dict_or_empty(cfg.get("group_weighting"))
+    mode = str(group_weighting.get("mode", GROUP_WEIGHTING_NONE)).strip().lower()
+    if mode not in GROUP_WEIGHTING_MODES:
+        raise ValueError(
+            "train.loss.group_weighting.mode must be one of: "
+            f"{', '.join(GROUP_WEIGHTING_MODES)}"
+        )
+    return mode
+
+
+def _filter_target_role_schema_for_outputs(
+    target_role_schema: dict[str, Any],
+    *,
+    y_order: list[str],
+) -> dict[str, Any]:
+    raw_targets = target_role_schema.get("targets", [])
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise ValueError("train.loss.group_weighting.mode=uniform_by_group requires target_role_schema.targets")
+    y_set = set(str(name) for name in y_order)
+    filtered_targets: list[dict[str, Any]] = []
+    filtered_ids: set[str] = set()
+    for raw in raw_targets:
+        if not isinstance(raw, dict):
+            continue
+        target_id = str(raw.get("id", "")).strip()
+        if target_id in y_set:
+            filtered_targets.append(dict(raw))
+            filtered_ids.add(target_id)
+    missing = [str(name) for name in y_order if str(name) not in filtered_ids]
+    if missing:
+        raise ValueError(
+            "train.loss.group_weighting.mode=uniform_by_group missing target_role_schema targets: "
+            f"{missing}"
+        )
+    filtered = dict(target_role_schema)
+    filtered["targets"] = filtered_targets
+    return filtered
+
+
+def _safe_group_loss_suffix(name: str) -> str:
+    suffix = re.sub(r"[^0-9A-Za-z_]+", "_", str(name).strip()).strip("_")
+    return suffix or "group"
+
+
+def _resolve_loss_target_multipliers(
+    *,
+    y_order: list[str],
+    loss_cfg: dict[str, Any] | None,
+) -> tuple[str, dict[str, float], dict[str, TargetGroup]]:
+    mode = _resolve_group_weighting_mode(loss_cfg)
+    target_names = [str(name) for name in y_order]
+    if mode == GROUP_WEIGHTING_NONE:
+        return mode, {name: 1.0 for name in target_names}, {}
+    if mode == GROUP_WEIGHTING_UNIFORM_BY_TARGET:
+        scale = 1.0 / float(max(len(target_names), 1))
+        return mode, {name: scale for name in target_names}, {}
+
+    cfg = _dict_or_empty(loss_cfg)
+    target_role_schema = _dict_or_empty(cfg.get("target_role_schema"))
+    filtered_schema = _filter_target_role_schema_for_outputs(target_role_schema, y_order=target_names)
+    groups = resolve_target_groups(
+        output_vars=target_names,
+        target_role_schema=filtered_schema,
+        mode="field_family",
+        strict=True,
+    )
+    if not groups:
+        raise ValueError("train.loss.group_weighting.mode=uniform_by_group resolved no target groups")
+    multipliers: dict[str, float] = {}
+    group_count = float(len(groups))
+    for group in groups.values():
+        group_size = float(max(len(group.targets), 1))
+        scale = 1.0 / float(group_count * group_size)
+        for target in group.targets:
+            multipliers[str(target)] = scale
+    missing = [name for name in target_names if name not in multipliers]
+    if missing:
+        raise ValueError(f"train.loss.group_weighting did not assign targets: {missing}")
+    return mode, multipliers, groups
+
+
+def _append_group_loss_breakdown(
+    per_var_loss: dict[str, float],
+    *,
+    groups: dict[str, TargetGroup],
+) -> None:
+    for group in groups.values():
+        values = [float(per_var_loss[target]) for target in group.targets if target in per_var_loss]
+        if not values:
+            continue
+        per_var_loss[f"loss_supervised_group_{_safe_group_loss_suffix(group.name)}"] = float(sum(values))
 
 
 def _validate_var_payload(payload: dict[str, Any], *, key_name: str, y_order: list[str]) -> None:
@@ -83,7 +200,7 @@ def _resolve_sigma_for_var(name: str, base_loss: float, cfg: dict[str, Any]) -> 
 
 
 def _huber_loss_and_grad(err: np.ndarray, *, delta: float) -> tuple[np.ndarray, np.ndarray]:
-    d = float(max(delta, 1.0e-8))
+    d = _positive_finite_float(delta, key_name="supervised.huber_delta")
     abs_err = np.abs(err)
     quad = abs_err <= d
     loss = np.where(quad, 0.5 * err * err, d * (abs_err - 0.5 * d))
@@ -169,11 +286,10 @@ def compose_supervised_numpy(
     if sample_mean_group_mode != "batch":
         raise ValueError("supervised.sample_mean_group_mode must be one of: batch")
 
-    delta_by_var = _dict_or_empty(cfg.get("delta_by_var"))
-    _validate_var_payload(delta_by_var, key_name="supervised.delta_by_var", y_order=y_order)
-    for key, value in delta_by_var.items():
-        if float(value) <= 0.0:
-            raise ValueError(f"supervised.delta_by_var[{key}] must be > 0")
+    _mode, target_multipliers, target_groups = _resolve_loss_target_multipliers(
+        y_order=y_order,
+        loss_cfg=loss_cfg,
+    )
 
     fixed_weights_by_var = _dict_or_empty(cfg.get("fixed_weights_by_var"))
     _validate_var_payload(fixed_weights_by_var, key_name="multitask.fixed_weights_by_var", y_order=y_order)
@@ -187,12 +303,8 @@ def compose_supervised_numpy(
         pred = _as_bhw(pred_fields[name], key=f"pred_{name}")
         target = _as_bhw(target_fields[name], key=f"target_{name}")
         err = (pred - target).astype(np.float32)
-        var_delta = float(delta_by_var.get(name, cfg["delta"])) if delta_by_var else float(cfg["delta"])
         if cfg["type"] == "huber":
-            loss_map, grad_map = _huber_loss_and_grad(err, delta=var_delta)
-        elif cfg["type"] == "mae":
-            loss_map = np.abs(err).astype(np.float32)
-            grad_map = np.sign(err).astype(np.float32)
+            loss_map, grad_map = _huber_loss_and_grad(err, delta=float(cfg["delta"]))
         else:
             loss_map = (0.5 * err * err).astype(np.float32)
             grad_map = err
@@ -222,9 +334,13 @@ def compose_supervised_numpy(
             fixed_weight = float(fixed_weights_by_var.get(name, 1.0)) if fixed_weights_by_var else 1.0
             weighted = float(base_loss * fixed_weight)
             grad = (grad * fixed_weight).astype(np.float32)
+        target_multiplier = float(target_multipliers.get(str(name), 1.0))
+        weighted = float(weighted * target_multiplier)
+        grad = (grad * target_multiplier).astype(np.float32)
         per_var_loss[name] = weighted
         grads[name] = grad.astype(np.float32)
         total += weighted
+    _append_group_loss_breakdown(per_var_loss, groups=target_groups)
     return float(total), grads, per_var_loss
 
 
@@ -286,11 +402,10 @@ def compose_supervised_torch(
 
     normalization = str(cfg.get("normalization", "pixel_mean")).strip().lower()
     weight_denominator = str(cfg.get("sample_mean_weight_denominator", "weighted")).strip().lower()
-    delta_by_var = _dict_or_empty(cfg.get("delta_by_var"))
-    _validate_var_payload(delta_by_var, key_name="supervised.delta_by_var", y_order=y_order)
-    for key, value in delta_by_var.items():
-        if float(value) <= 0.0:
-            raise ValueError(f"supervised.delta_by_var[{key}] must be > 0")
+    _mode, target_multipliers, target_groups = _resolve_loss_target_multipliers(
+        y_order=y_order,
+        loss_cfg=loss_cfg,
+    )
 
     fixed_weights_by_var = _dict_or_empty(cfg.get("fixed_weights_by_var"))
     _validate_var_payload(fixed_weights_by_var, key_name="multitask.fixed_weights_by_var", y_order=y_order)
@@ -308,11 +423,8 @@ def compose_supervised_torch(
             )
         target_i = target[:, idx : idx + 1]
         err = pred - target_i
-        var_delta = float(delta_by_var.get(name, cfg["delta"])) if delta_by_var else float(cfg["delta"])
         if cfg["type"] == "huber":
-            base_map = torch.nn.functional.huber_loss(pred, target_i, delta=var_delta, reduction="none")
-        elif cfg["type"] == "mae":
-            base_map = torch.abs(err)
+            base_map = torch.nn.functional.huber_loss(pred, target_i, delta=float(cfg["delta"]), reduction="none")
         else:
             base_map = 0.5 * err * err
 
@@ -330,8 +442,10 @@ def compose_supervised_torch(
         else:
             fixed_weight = float(fixed_weights_by_var.get(name, 1.0)) if fixed_weights_by_var else 1.0
             weighted = base * float(fixed_weight)
+        weighted = weighted * float(target_multipliers.get(str(name), 1.0))
         per_var[name] = float(weighted.detach().cpu().item())
         total = total + weighted
+    _append_group_loss_breakdown(per_var, groups=target_groups)
     return total, per_var
 
 
@@ -380,9 +494,7 @@ def compose_numpy(
     """Compose numpy physics terms using the finite-difference implementation."""
 
     if not physics_cfg or not bool(physics_cfg.get("enabled", False)):
-        if "phi" in pred_fields:
-            ref = _as_bhw(pred_fields["phi"], key="phi")
-        elif pred_fields:
+        if pred_fields:
             first_key = str(next(iter(pred_fields.keys())))
             ref = _as_bhw(pred_fields[first_key], key=first_key)
         else:
@@ -429,9 +541,7 @@ def compose_torch(
     """Compose torch physics terms using the autograd-compatible implementation."""
 
     torch = require_torch()
-    if "phi" in pred_fields:
-        ref = torch.as_tensor(pred_fields["phi"], dtype=torch.float32)
-    elif pred_fields:
+    if pred_fields:
         first_key = str(next(iter(pred_fields.keys())))
         ref = torch.as_tensor(pred_fields[first_key], dtype=torch.float32)
     else:

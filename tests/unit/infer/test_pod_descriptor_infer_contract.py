@@ -131,6 +131,7 @@ def test_deeponet_pod_table_plus_descriptor_lane_passes_when_dim_matches(tmp_pat
         input_mode_meta=input_mode_meta,
         checkpoint_input_mode_meta=dict(input_mode_meta),
         checkpoint_meta=checkpoint_meta,
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     out = engine.single_run(
         cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
@@ -165,6 +166,7 @@ def test_deeponet_pod_descriptor_dim_mismatch_is_rejected(tmp_path: Path) -> Non
             DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY: "none",
             DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: False,
         },
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     with pytest.raises(ValueError, match="descriptor dim mismatch"):
         engine.single_run(
@@ -229,6 +231,7 @@ def test_deeponet_pod_descriptor_is_cached_per_geom_ref(tmp_path: Path, monkeypa
             DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY: "none",
             DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: False,
         },
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     call_count = 0
     original_builder = engine_mod.build_structure_descriptor

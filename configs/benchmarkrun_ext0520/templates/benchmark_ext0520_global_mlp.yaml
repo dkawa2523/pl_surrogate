@@ -1,12 +1,12 @@
 benchmark:
-  output_dir: runs/benchmarkrun_ext0520/n54/global_mlp
+  output_dir: runs/gec_ccp_trustworthy_v1/n54/global_mlp
   profile: m7_global_frozen_ref
   seed: 411
   phi_mode: direct
   eval:
     mask_metrics: plasma_only
     interp_mode: overlap
-    protocol_variant: global_mlp_benchmarkrun_ext0520_n54
+    protocol_variant: global_mlp_gec_ccp_trustworthy_v1_n54
     target_vars_for_score:
     - ne
     - ni
@@ -14,6 +14,11 @@ benchmark:
     - phi
     primary_metric: surrogate_quality_score
     objective_mode: min
+    target_family_for_score: allvars
+    region_bands:
+      mode: fixed_px
+      boundary_in_px: 2.0
+      deep_plasma_px: 10.0
   eval_protocol:
     mode: dual_axis
     scope: global_frozen
@@ -21,31 +26,48 @@ benchmark:
     interp_weight: 0.5
     extrap_weight: 0.5
     frozen_ref_tag: periodic_global_frozen_v2
+    interp_mode: overlap
   dataset:
     type: csv_npz
     root: data/outputs_merged_td_csv_periodic_ext0520
     index_csv: index_54.csv
     targets:
     - id: ne
-      source_key: log_ne
-      value_transform: pow10
+      source_key: ne
+      value_transform: identity
       units: m^-3
       dtype: float32
+      role: density_electron
+      positive: true
+      field_family: density
+      default_region: plasma_only
     - id: ni
-      source_key: log_ni
-      value_transform: pow10
+      source_key: ni
+      value_transform: identity
       units: m^-3
       dtype: float32
+      role: density_ion
+      positive: true
+      field_family: density
+      default_region: plasma_only
     - id: Te
       source_key: Te
       value_transform: identity
       units: eV
       dtype: float32
+      role: temperature_electron
+      positive: true
+      field_family: temperature
+      default_region: plasma_only
     - id: phi
       source_key: phi
       value_transform: identity
       units: V
       dtype: float32
+      role: potential
+      positive: false
+      field_family: electrostatic
+      default_region: plasma_only
     cond_columns:
     - PP0
     - Td
@@ -94,7 +116,7 @@ benchmark:
     distance_contract:
       require_negative_outside: error
     coord_grid_contract:
-      require_requested_source: warn
+      require_requested_source: false
     coord_grid_source: coord_grid
   train:
     global_mlp:
@@ -125,34 +147,8 @@ benchmark:
         weight_decay: 0.0
     loss:
       supervised:
-        type: huber
-        delta: 1.0
-        normalization: sample_mean
-        sample_mean_group_mode: batch
-        sample_mean_weight_denominator: count
+        type: mse
         mask: plasma_only
-        nan_region_policy: sdf_continuous
-        chamber_weight_by_var:
-          ne: 0.0
-          ni: 0.0
-          Te: 0.05
-          phi: 0.08
-        sdf_weighting:
-          tau_in: 2.0
-          tau_out: 1.5
-          w_boundary: 3.0
-          w_inner: 1.0
-          w_chamber_floor: 0.08
-      multitask:
-        weighting: uncertainty
-        sigma_init:
-          ne: 0.0
-          ni: 0.0
-          Te: 0.0
-          phi: 0.0
-        sigma_clamp:
-        - -3.0
-        - 3.0
   boundary_operator:
     primary_qoi_key: Gamma_i
   physics:
@@ -161,6 +157,13 @@ benchmark:
     axis:
       mode: steady
       value: 0.0
+    ood:
+      physics:
+        enabled: true
+        symbols:
+          density: ne
+          temperature: Te
+          potential: phi
   runtime:
     input_mode: table_only
     structure:

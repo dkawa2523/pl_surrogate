@@ -102,7 +102,7 @@ def test_physics_loss_includes_boundary_operator_term():
             "enabled": True,
             "weight": 0.5,
             "mask_band": mask_band,
-            "target_coeffs": {"density": 0.1, "Te": 0.1, "bias": 0.0},
+            "target_coeffs": {"density": 0.1, "temperature": 0.1, "bias": 0.0},
         },
     }
     loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, density=density, te=te)
@@ -128,7 +128,7 @@ def test_boundary_operator_mode_operator_prior_runs():
             "weight": 0.5,
             "mode": "operator_prior",
             "mask_band": mask_band,
-            "prior_coeffs": {"density": 0.08, "Te": 0.06, "E_n": 0.04, "bias": 0.0},
+            "prior_coeffs": {"density": 0.08, "temperature": 0.06, "E_n": 0.04, "bias": 0.0},
         },
     }
     loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, density=density, te=te)

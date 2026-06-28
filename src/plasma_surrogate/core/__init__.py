@@ -43,6 +43,7 @@ from plasma_surrogate.core.model_specs import ModelSpec, get_model_spec
 from plasma_surrogate.core.registry import Registry
 from plasma_surrogate.core.run_bundle import RunBundle, RunBundleLoader, require_artifacts
 from plasma_surrogate.core.synthetic_data import SyntheticDataset, build_synthetic_dataset
+from plasma_surrogate.core.target_groups import TargetGroup, resolve_target_groups
 from plasma_surrogate.core.task_spec import TaskSpecV1
 
 __all__ = [
@@ -75,8 +76,10 @@ __all__ = [
     "resolve_effective_adapter_mode",
     "resolve_effective_input_mode_metadata_for_model",
     "resolve_supported_input_modes",
+    "resolve_target_groups",
     "get_model_spec",
     "SyntheticDataset",
+    "TargetGroup",
     "TaskSpecV1",
     "TrainArtifacts",
     "build_product_manifest",

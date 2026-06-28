@@ -15,8 +15,9 @@ and optimization features.
 
 Use this README and one curated YAML as the stable entry points. Directories
 named `generated*` are reproducible artifacts from
-`scripts/generate_icp_stage4_core4_benchmark_configs.py`; do not edit them by
-hand or treat every generated file as a maintained product config.
+`experiments/icp_stage4/scripts/generate_icp_stage4_core4_benchmark_configs.py`;
+do not edit them by hand or treat every generated file as a maintained product
+config.
 
 Recommended maintained inputs:
 
@@ -94,7 +95,7 @@ Recommended primary run:
 
 ```powershell
 $env:PYTHONPATH='src;.'
-py -3 scripts\generate_icp_stage4_core4_benchmark_configs.py `
+py -3 experiments\icp_stage4\scripts\generate_icp_stage4_core4_benchmark_configs.py `
   --part-lite-v1 `
   --models ffno unet cno_operator_unet `
   --sizes smoke full `
@@ -106,7 +107,7 @@ py -3 scripts\generate_icp_stage4_core4_benchmark_configs.py `
 Compatibility baselines:
 
 ```powershell
-py -3 scripts\generate_icp_stage4_core4_benchmark_configs.py `
+py -3 experiments\icp_stage4\scripts\generate_icp_stage4_core4_benchmark_configs.py `
   --part-sdf-lite-v1 `
   --models ffno unet `
   --sizes smoke full `
@@ -114,7 +115,7 @@ py -3 scripts\generate_icp_stage4_core4_benchmark_configs.py `
   --out-root configs\experimental\icp_stage4\generated_part_sdf_lite_v1_e80_primary `
   --run-root runs\icp_stage4_part_sdf_lite_v1_e80_primary
 
-py -3 scripts\generate_icp_stage4_core4_benchmark_configs.py `
+py -3 experiments\icp_stage4\scripts\generate_icp_stage4_core4_benchmark_configs.py `
   --structure-spatial-v1 `
   --models ffno unet cno_operator_unet `
   --sizes smoke full `
@@ -143,7 +144,7 @@ Smoke first:
 ```powershell
 $env:PYTHONPATH='src;.'
 $env:PLASMA_SURROGATE_ENABLE_TORCH='1'
-.venv-torch\Scripts\python.exe scripts\run_icp_stage4_core4_benchmarks.py `
+.venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_stage4_core4_benchmarks.py `
   --sizes smoke `
   --models ffno unet cno_operator_unet `
   --config-root configs\experimental\icp_stage4\generated_part_lite_v1_e80_primary `
@@ -154,14 +155,14 @@ $env:PLASMA_SURROGATE_ENABLE_TORCH='1'
 Full comparison:
 
 ```powershell
-.venv-torch\Scripts\python.exe scripts\run_icp_stage4_core4_benchmarks.py `
+.venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_stage4_core4_benchmarks.py `
   --sizes full `
   --models ffno unet cno_operator_unet `
   --config-root configs\experimental\icp_stage4\generated_part_lite_v1_e80_primary `
   --run-root runs\icp_stage4_part_lite_v1_e80_primary `
   --status-csv runs\icp_stage4_part_lite_v1_e80_primary\run_status.csv
 
-.venv-torch\Scripts\python.exe scripts\summarize_icp_stage4_core4_benchmarks.py `
+.venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\summarize_icp_stage4_core4_benchmarks.py `
   --sizes full `
   --models ffno unet cno_operator_unet `
   --config-root configs\experimental\icp_stage4\generated_part_lite_v1_e80_primary `
@@ -181,7 +182,7 @@ optimize raw masks or feed raw coil parameter vectors to the model.
 Process + layout smoke:
 
 ```powershell
-.venv-torch\Scripts\python.exe scripts\run_icp_part_sdf_shape_optimize.py `
+.venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_part_sdf_shape_optimize.py `
   --config configs\experimental\icp_stage4\generated_part_lite_v1_e80_primary\full\benchmark_icp_stage4_core4_full_ffno.yaml `
   --run-dir runs\icp_stage4_part_lite_v1_e80_primary\full\ffno `
   --model ffno `
@@ -198,7 +199,7 @@ Process + layout smoke:
 Final candidate search:
 
 ```powershell
-.venv-torch\Scripts\python.exe scripts\run_icp_part_sdf_shape_optimize.py `
+.venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_part_sdf_shape_optimize.py `
   --config configs\experimental\icp_stage4\generated_part_lite_v1_e80_primary\full\benchmark_icp_stage4_core4_full_ffno.yaml `
   --run-dir runs\icp_stage4_part_lite_v1_e80_primary\full\ffno `
   --model ffno `
@@ -209,7 +210,8 @@ Final candidate search:
   --n-trials 512
 ```
 
-The optimizer uses `two_stage` by default with `uniformity` as the main
-objective and small negative, physics, and boundary penalties. Re-score the top
-FFNO candidates with UNet/CNO before selecting 3-5 designs for high-fidelity
-COMSOL validation.
+The optimizer uses `two_stage` by default with a normalized `weighted_sum`
+objective. Feasible trials are selected first, and physics / boundary terms are
+configured as ordinary objective terms or constraints. Re-score the top FFNO
+candidates with UNet/CNO before selecting 3-5 designs for high-fidelity COMSOL
+validation.

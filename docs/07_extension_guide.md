@@ -1,76 +1,127 @@
 # 07 Extension Guide
 
-この guide は contributor が新しい model、target、feature、metric、optimization objective を追加するときの入口だけを示す。
+Use the smallest implemented contract surface. There is no full ModelPlugin
+system yet; new work should start from the current registries and adapters.
 
-## Principles
+## New Target
 
-- target 定義は `dataset.targets[]` から始める。
-- target 順序は `output_layout.vars` を読む。
-- target role は `target_role_schema.json` を読む。
-- feature 順序は `coord_feature_pack_meta.json` / `channel_map.json` を読む。
-- model capability は `src/plasma_surrogate/core/model_specs.py` に置く。
-- inference optimization objective は `inference.optimize.objective` に置く。
+1. Add the field to `dataset.targets[]` with `id`, optional `source_key`, and
+   role metadata such as `role`, `field_family`, and `positive`.
+2. Keep `dataset.targets[].value_transform: identity` for current `csv_npz`
+   product datasets.
+3. Add reversible transforms, scaler, fit scope, and clipping under
+   `preprocessing.scalers.target_transforms.<target>`.
+4. Run preprocessing and check `preprocessing/schema/output_layout.json` and
+   `preprocessing/schema/target_role_schema.json`.
+5. Add `physics.symbols` only when role/family metadata cannot resolve a unique
+   density, temperature, or potential.
 
-## Add Or Change A Model
+Metrics, target groups, and positive diagnostics derive from
+`output_layout.vars` plus `target_role_schema`; do not add target-name branches.
 
-1. `src/plasma_surrogate/core/model_specs.py` に model id と capability を追加する。
-2. 必要な最小 model implementation を `src/plasma_surrogate/models/` に追加する。
-3. checkpoint build / save / load を接続する。
-4. train adapter を追加する。
-5. generic inference path で足りない場合だけ inference adapter を追加する。
-6. train / infer contract が安定してから benchmark support を追加する。
+## New Transform Or Scaler
 
-同じ model-specific policy を train / infer / benchmark に並列で増やさない。
+Add target value transforms and scaler behavior in
+`preprocessing/scalers.py`. That module owns:
 
-## Add Or Change Targets
+- allowed `target_transforms.<target>.value_transform` values
+- scaler construction and serialization
+- `TransformBundle` forward/inverse behavior
+- clipping and fit-scope handling
 
-1. `dataset.targets[]` に `id`, `source_key`, `role`, metadata を置く。
-2. target ごとの transform が必要なら preprocessing config に置く。
-3. preprocessing 後の `output_layout.vars` を確認する。
-4. physics を使う場合は `physics.symbols` / `inference.ood.*.symbols` を明示する。
-5. benchmark metric は active target set から生成する。
+Do not implement target transforms in dataset loading, training, inference, or
+benchmark code.
 
-## Add Or Change Features
+## New Model
 
-1. preprocessing で feature pack を作る。
-2. `coord_feature_pack_meta.json` と `channel_map.json` に順序を残す。
-3. inference 側で同じ metadata を読む。
-4. required feature が欠けたら fail-fast とする。
+1. Add the model id and capability in `core/model_specs.py`.
+2. Add the implementation under `models/`.
+3. Add construction in `models/factory.py`.
+4. Add checkpoint save/load support in the relevant checkpoint module.
+5. Reuse an existing train lane in `train/model_adapters.py` when possible.
+   Add a new adapter only if no existing lane fits.
+6. Put lane-specific validation in a narrow helper such as
+   `train/grid_contracts.py` or `train/deeponet_contracts.py`.
+7. Add inference-specific code only when generic checkpoint/model inference is
+   insufficient.
+8. For first-class benchmark inclusion, set `benchmark_scope` in
+   `core/model_specs.py`; benchmark scope maps are derived from model specs.
 
-feature list を train / infer / benchmark で別々に書かない。
+Do not copy model capability tables into train, infer, and benchmark. If a new
+table seems necessary, first check whether it belongs in `ModelSpec`.
 
-## Add Or Change Metrics
+## New Output Head Mode
 
-Metrics と compare header は active target から作る。
+`output_heads.mode: shared` is the default baseline. Implement new modes only as
+opt-in behavior.
 
-- `test_rmse_<var>`
-- `test_r2_<var>`
-- `test_rmse_<var>_plasma`
-- `test_r2_<var>_plasma`
+Current grouped-head code lives in `models/heads/role_grouped.py`:
 
-Benchmark selection は `surrogate_quality_score` を既定にし、R2 / RMSE は補助指標として扱う。
+- mode validation
+- custom group parsing
+- target group metadata serialization
+- lightweight grouped conv head construction
 
-## Add Or Change Optimization Objective
+For a new head mode, add validation there, wire only supported model families,
+preserve `output_layout.vars` order, and add checkpoint/inference contract
+tests. Non-default group heads such as `poisson_hybrid` are planned experiment
+lanes unless explicitly implemented and tested.
 
-1. objective config は `inference.optimize.objective` に置く。
-2. product mode は `weighted_sum` とする。
-3. objective term は QoI / scalar diagnostics から読む。
-4. constraints は feasibility と `search_value` に反映する。
-5. 新しい objective mode は、現在の scalar objective contract が足りなくなった場合だけ追加する。
+## New Physics Term
 
-能動学習、多様性最適化、Pareto front は未実装の extension point として扱う。
+Physics terms are configured through `physics.terms`; removed keys such as
+`lambda_poisson` stay rejected.
 
-## Tests
+1. Add the term name to `REGISTERED_PHYSICS_TERMS` in
+   `core/physics_contract.py` only when the term is implemented.
+2. Keep symbols top-level in `physics.symbols`; term-local `symbols` are not
+   supported.
+3. Extend `train/physics_terms.py` if the term needs resolution metadata beyond
+   `name`, `enabled`, and `weight`.
+4. Add the numerical equation in `train/losses.py` for NumPy and/or
+   `train/torch_losses.py` for Torch.
+5. Compose the term in `train/loss_composer.py`; `LossComposer` should combine
+   resolved terms, not own symbol resolution policy.
+6. Add tests for config validation, symbol resolution, and enabled/disabled
+   behavior.
 
-通常 CI は小さな contract test を優先する。
+Do not document a physics term as available until both validation and loss
+calculation exist for the intended trainer.
+
+## New Feature
+
+1. Build the feature artifact in preprocessing.
+2. Save feature order, shape, and metadata with the artifact.
+3. Read the same metadata in train, infer, and benchmark.
+4. Fail fast when a required feature is missing.
+
+Keep preprocessing feature construction outside train dispatch code.
+
+## New Metric Or Diagnostic
+
+Metric rows should be target-driven and validity-aware. Default benchmark
+columns should stay compact:
+
+- target-wise RMSE/R2
+- plasma target-wise RMSE/R2
+- group-wise RMSE/R2
+- plasma group-wise RMSE/R2
+- `surrogate_quality_score`
+
+Region, positive, physics, or detailed spatial diagnostics should remain
+opt-in through benchmark/eval diagnostics.
+
+## Minimal Tests
+
+Pick the smallest test set that covers the changed contract:
 
 - dataset target parsing
 - preprocessing artifact roundtrip
+- transform/scaler inverse behavior
 - feature channel order
-- model spec capability
-- train dispatch contract
+- model spec and train adapter selection
+- checkpoint save/load
 - inference symbol mapping
-- surrogate quality score
-- optimization objective smoke
-
-大きな benchmark sweep、生成 config catalog、report reproduction は別 lane で扱う。
+- output head shape/order and metadata
+- physics term validation and contribution
+- benchmark metric row smoke

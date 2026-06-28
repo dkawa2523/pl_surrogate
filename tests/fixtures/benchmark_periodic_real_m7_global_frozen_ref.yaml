@@ -1,4 +1,4 @@
-﻿benchmark:
+benchmark:
   output_dir: runs/periodic_real_tuned_v48/benchmark_m7_global_frozen_ref_v2
   profile: m7_global_frozen_ref
   seed: 411
@@ -22,8 +22,8 @@
     root: data/outputs_merged_td_csv_periodic
     index_csv: index.csv
     targets:
-      - {id: ne, source_key: log_ne, value_transform: pow10, units: "m^-3", dtype: float32}
-      - {id: ni, source_key: log_ni, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: ne, source_key: ne, value_transform: identity, units: "m^-3", dtype: float32}
+      - {id: ni, source_key: ni, value_transform: identity, units: "m^-3", dtype: float32}
       - {id: Te, source_key: Te, value_transform: identity, units: "eV", dtype: float32}
       - {id: phi, source_key: phi, value_transform: identity, units: "V", dtype: float32}
     cond_columns: [PP0, Td, gamma]
@@ -69,24 +69,11 @@
         weight_decay: 0.0
     loss:
       supervised:
-        type: huber
-        delta: 1.0
+        type: mse
         normalization: sample_mean
         sample_mean_group_mode: batch
         sample_mean_weight_denominator: count
         mask: plasma_only
-        nan_region_policy: sdf_continuous
-        chamber_weight_by_var:
-          ne: 0.0
-          ni: 0.0
-          Te: 0.05
-          phi: 0.08
-        sdf_weighting:
-          tau_in: 2.0
-          tau_out: 1.5
-          w_boundary: 3.0
-          w_inner: 1.0
-          w_chamber_floor: 0.08
       multitask:
         weighting: uncertainty
         sigma_init: {ne: 0.0, ni: 0.0, Te: 0.0, phi: 0.0}

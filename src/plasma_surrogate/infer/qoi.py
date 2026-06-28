@@ -8,6 +8,7 @@ import numpy as np
 
 from plasma_surrogate.data.geometry_context import GeometryContext
 from plasma_surrogate.eval.metrics import boundary_band_mask, boundary_gamma_proxy, uniformity
+from plasma_surrogate.eval.positive_diagnostics import positive_targets_from_schema
 
 
 def _dict_or_empty(raw: Any) -> dict[str, Any]:
@@ -21,24 +22,6 @@ def _config_string_list(raw: Any) -> list[str]:
         text = raw.strip()
         return [text] if text else []
     return [str(v).strip() for v in list(raw) if str(v).strip()]
-
-
-def _positive_targets_from_schema(target_role_schema: dict[str, Any] | None) -> list[str]:
-    schema = dict(target_role_schema or {})
-    positive = schema.get("positive_targets", [])
-    if isinstance(positive, list):
-        return [str(v) for v in positive if str(v).strip()]
-    targets = schema.get("targets", [])
-    if not isinstance(targets, list):
-        return []
-    out: list[str] = []
-    for entry in targets:
-        if not isinstance(entry, dict):
-            continue
-        target_id = str(entry.get("id", "")).strip()
-        if target_id and entry.get("positive") is True:
-            out.append(target_id)
-    return out
 
 
 def pick_uniformity_target(
@@ -59,7 +42,7 @@ def pick_uniformity_target(
         )
     positive_targets = [
         key
-        for key in _positive_targets_from_schema(target_role_schema)
+        for key in positive_targets_from_schema(target_role_schema)
         if key in fields_phys and key not in excluded
     ]
     unique = sorted(set(positive_targets))

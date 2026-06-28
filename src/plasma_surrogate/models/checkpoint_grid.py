@@ -162,6 +162,20 @@ def _meta_output_keys(meta: dict[str, Any]) -> list[str]:
     return keys
 
 
+def _output_head_checkpoint_meta(model: Any) -> dict[str, Any]:
+    mode = str(getattr(model, "output_heads_mode", "shared")).strip().lower() or "shared"
+    groups = list(getattr(model, "target_groups_metadata", []) or [])
+    output_heads = dict(getattr(model, "output_heads_effective", {}) or {"mode": mode})
+    output_heads["mode"] = mode
+    if groups:
+        output_heads["target_groups"] = groups
+    return {
+        "output_heads": output_heads,
+        "output_heads_mode_effective": mode,
+        "target_groups": groups,
+    }
+
+
 def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
     """Return checkpoint metadata for a grid family model, or None if unsupported."""
 
@@ -186,9 +200,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
                 "depth": int(getattr(model, "_torch_depth", 1)),
                 "upsample_mode": str(getattr(model, "_torch_upsample_mode", "deconv")),
             },
-            "output_heads": {
-                "mode": str(getattr(model, "output_heads_mode", "shared")),
-            },
+            **_output_head_checkpoint_meta(model),
             "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
         }
 
@@ -224,9 +236,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
                     },
                 )
             ),
-            "output_heads": {
-                "mode": str(getattr(model, "output_heads_mode", "shared")),
-            },
+            **_output_head_checkpoint_meta(model),
             "head_arch_version": str(getattr(model, "head_arch_version", "conv_unetpp_v1")),
         }
 
@@ -264,6 +274,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "head_mlp": dict(getattr(model, "head_mlp_cfg", {})),
             "spectral_cfg": dict(getattr(model, "spectral_cfg", {})),
             "fno_impl_version": str(getattr(model, "fno_impl_version", "spectral_v2")),
+            **_output_head_checkpoint_meta(model),
             "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
         }
 
@@ -281,6 +292,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "head_mlp": dict(getattr(model, "head_mlp_cfg", {})),
             "spectral_cfg": dict(getattr(model, "spectral_cfg", {})),
             "fno_impl_version": str(getattr(model, "fno_impl_version", "factorized_separable_1d_v1")),
+            **_output_head_checkpoint_meta(model),
             "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
         }
 
@@ -298,6 +310,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "head_mlp": dict(getattr(model, "head_mlp_cfg", {})),
             "uno_cfg": dict(getattr(model, "uno_cfg", {})),
             "uno_impl_version": str(getattr(model, "fno_impl_version", "uno_lite_v1")),
+            **_output_head_checkpoint_meta(model),
             "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
         }
 
@@ -314,6 +327,7 @@ def make_grid_checkpoint_meta(model: Any) -> dict[str, Any] | None:
             "head_mlp": dict(getattr(model, "head_mlp_cfg", {})),
             "cno_cfg": dict(getattr(model, "cno_cfg", {})),
             "cno_impl_version": str(getattr(model, "fno_impl_version", "cno_lite_v1")),
+            **_output_head_checkpoint_meta(model),
             "head_arch_version": str(getattr(model, "head_arch_version", "linear_v1")),
         }
 
@@ -464,6 +478,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
             spectral_cfg=dict(meta.get("spectral_cfg", {})),
+            output_heads=dict(meta.get("output_heads", {})),
             backend=backend,
         )
 
@@ -479,6 +494,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
             spectral_cfg=dict(meta.get("spectral_cfg", {})),
+            output_heads=dict(meta.get("output_heads", {})),
             backend=backend,
         )
 
@@ -494,6 +510,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
             uno_cfg=normalize_uno_cfg(dict(meta.get("uno_cfg", {}))),
+            output_heads=dict(meta.get("output_heads", {})),
             backend=backend,
         )
 
@@ -508,6 +525,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             head_mlp=dict(meta.get("head_mlp", {})),
             input_feature_channels=list(meta.get("input_feature_channels", ["x", "y"])),
             cno_cfg=normalize_cno_cfg(dict(meta.get("cno_cfg", {}))),
+            output_heads=dict(meta.get("output_heads", {})),
             backend=backend,
         )
 
