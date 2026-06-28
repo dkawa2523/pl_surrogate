@@ -12,6 +12,11 @@ from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.deeponet_contract import allvars_plasma_balance_score
 from plasma_surrogate.core.physics_contract import resolve_epoch_scaled_physics
 from plasma_surrogate.core.torch_backend import require_torch
+from plasma_surrogate.train.artifact_writers import (
+    save_physics_terms,
+    save_resolved_physics,
+    save_torch_optimization_diagnostics,
+)
 from plasma_surrogate.train.loss_composer import compose_supervised_torch, compose_torch
 
 
@@ -24,80 +29,6 @@ class TorchTrainOutput:
 class TorchTrainer:
     def __init__(self, output_dir: str | Path):
         self.store = ArtifactStore(output_dir)
-
-    def _save_physics_terms(self, history: list[dict[str, float]]) -> None:
-        if not history:
-            return
-        header = [
-            "epoch",
-            "stage",
-            "train_phys_loss",
-            "train_poisson_loss",
-            "train_boundary_operator_loss",
-            "train_boundary_loss",
-            "train_rho_loss",
-        ]
-        rows = [
-            [
-                row.get("epoch", 0.0),
-                row.get("stage", 0.0),
-                row.get("train_phys_loss", 0.0),
-                row.get("train_poisson_loss", 0.0),
-                row.get("train_boundary_operator_loss", 0.0),
-                row.get("train_boundary_loss", 0.0),
-                row.get("train_rho_loss", 0.0),
-            ]
-            for row in history
-        ]
-        self.store.save_csv("scalars/physics_terms.csv", header, rows)
-
-    def _save_resolved_physics(self, physics_cfg: dict[str, Any] | None) -> None:
-        cfg = dict(physics_cfg or {})
-        self.store.save_json(
-            "resolved_physics.json",
-            {
-                "enabled": bool(cfg.get("enabled", False)),
-                "resolved_terms": list(cfg.get("resolved_terms", [])),
-                "boundary_operator": {
-                    "enabled": bool(cfg.get("boundary_operator", {}).get("enabled", False)),
-                    "weight": float(cfg.get("boundary_operator", {}).get("weight", 0.0)),
-                    "mode": str(cfg.get("boundary_operator", {}).get("mode", "operator_prior")),
-                    "primary_qoi_key": str(cfg.get("boundary_operator", {}).get("primary_qoi_key", "Gamma_i")),
-                },
-            },
-        )
-
-    def _save_optimization_diagnostics(self, rows: list[dict[str, float]]) -> None:
-        if not rows:
-            return
-        base_header = [
-            "epoch",
-            "grad_l2_total",
-            "active_weight_ratio",
-            "step_rel_hidden_mean",
-            "step_rel_output",
-            "step_rel_output_to_hidden",
-            "grad_scale_applied",
-            "grad_norm_pre_scale",
-            "grad_norm_post_scale",
-            "grad_norm_post_clip",
-            "clip_ratio",
-            "effective_clip_flag",
-            "stagnation_flag",
-            "head_refresh_applied",
-            "head_design_cond",
-        ]
-        dynamic_grad = sorted(
-            {
-                str(k)
-                for row in rows
-                for k in row.keys()
-                if str(k).startswith("grad_l2_") and str(k) != "grad_l2_total"
-            }
-        )
-        header = ["epoch", "grad_l2_total"] + dynamic_grad + [k for k in base_header if k not in {"epoch", "grad_l2_total"}]
-        data = [[r.get(k, 0.0) for k in header] for r in rows]
-        self.store.save_csv("scalars/optimization_diagnostics.csv", header, data)
 
     @staticmethod
     def _clone_model_state_numpy(model: Any) -> dict[str, np.ndarray]:
@@ -196,7 +127,7 @@ class TorchTrainer:
             _append(getattr(ph, "net", None), "poisson_head.net.")
         bo = getattr(model, "boundary_operator", None)
         if bo is not None:
-            for name in ["w_log_ne", "w_te", "w_en", "bias"]:
+            for name in ["w_density", "w_te", "w_en", "bias"]:
                 p = getattr(bo, name, None)
                 if p is None:
                     continue
@@ -351,7 +282,11 @@ class TorchTrainer:
         device = getattr(model, "device", torch.device("cuda" if bool(torch.cuda.is_available()) else "cpu"))
         if hasattr(model, "to"):
             model.to(device)
-        self._save_resolved_physics(physics_cfg)
+        save_resolved_physics(
+            store=self.store,
+            physics_cfg=physics_cfg,
+            boundary_operator_default_mode="operator_prior",
+        )
         resolved_terms = list((physics_cfg or {}).get("resolved_terms", []))
         stages_cfg = list(stages or [{"name": "stage1", "epochs": 10, "lr": 1e-3, "freeze_poisson_head": True, "freeze_boundary_operator": True}])
         c_tr = torch.as_tensor(cond_train, dtype=torch.float32, device=device)
@@ -369,8 +304,10 @@ class TorchTrainer:
         opt_contract = dict(optimizer_contract or {})
         selection_cfg = dict(selection_cfg or {})
         selection_mode = str(selection_cfg.get("mode", "last")).strip().lower()
-        if selection_mode not in {"last", "best_val_allvars_balance"}:
-            raise ValueError("train.deeponet_plasma.selection.mode must be one of: last, best_val_allvars_balance")
+        if selection_mode == "best_val_data_loss":
+            selection_mode = "best_val_loss"
+        if selection_mode not in {"last", "best_val_allvars_balance", "best_val_loss"}:
+            raise ValueError("train.deeponet_plasma.selection.mode must be one of: last, best_val_allvars_balance, best_val_loss")
         selection_eval_every = int(max(int(selection_cfg.get("eval_every_n_epochs", 2)), 1))
         selection_warmup = int(max(int(selection_cfg.get("warmup_epochs", 5)), 0))
         raw_weights = dict(selection_cfg.get("weights", {}))
@@ -398,6 +335,7 @@ class TorchTrainer:
         min_grad_l2_total = float(alert_cfg.get("min_grad_l2_total", 1.0e-5))
         best_state: dict[str, np.ndarray] | None = None
         best_score = float("-inf")
+        best_loss = float("inf")
         best_epoch = -1
         best_score_parts: dict[str, float] = {}
         selection_valid = selection_mode == "last"
@@ -617,6 +555,13 @@ class TorchTrainer:
                     val_phys = float(val_phys_num / denom_va)
                     val_total = float(val_total_num / denom_va)
                 val_balance_score = float("nan")
+                if selection_mode == "best_val_loss" and np.isfinite(float(val_total)) and float(val_total) < best_loss:
+                    best_state = self._clone_model_state_numpy(model)
+                    best_loss = float(val_total)
+                    best_score = float(best_loss)
+                    best_epoch = int(epoch_abs)
+                    best_score_parts = {}
+                    selection_valid = True
                 if should_eval_selection:
                     pred_stack = (
                         np.concatenate(pred_stack_chunks, axis=0)
@@ -630,16 +575,12 @@ class TorchTrainer:
                     )
                     bsz, _c, hh, ww = pred_stack.shape
                     plasma_mask = self._align_mask_bhw(supervised_mask, batch_size=bsz, h=hh, w=ww)
-                    target_region_by_var = dict(
-                        dict(dict(loss_cfg or {}).get("supervised", {})).get("target_region_by_var", {})
-                    )
                     val_balance_score, parts = allvars_plasma_balance_score(
                         pred=pred_stack,
                         target=target_stack,
                         y_vars=list(y_vars),
                         weights=selection_weights,
                         plasma_mask=plasma_mask,
-                        target_region_by_var=target_region_by_var,
                     )
                     if np.isfinite(val_balance_score) and (
                         best_state is None or float(val_balance_score) > float(best_score)
@@ -707,14 +648,14 @@ class TorchTrainer:
             epoch_offset += n_epochs
 
         selected_epoch_effective = int(best_epoch if best_epoch >= 0 else (len(history) - 1))
-        if selection_mode == "best_val_allvars_balance" and best_state is not None:
+        if selection_mode in {"best_val_allvars_balance", "best_val_loss"} and best_state is not None:
             self._restore_model_state_numpy(model, best_state)
-        if selection_mode == "best_val_allvars_balance" and best_state is None:
+        if selection_mode in {"best_val_allvars_balance", "best_val_loss"} and best_state is None:
             selection_valid = False
         for row in history:
             row["selected_epoch_flag"] = 1.0 if int(row.get("epoch", -1)) == selected_epoch_effective else 0.0
             row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
-            row["selected_epoch_score"] = float(best_score if best_epoch >= 0 else 0.0)
+            row["selected_epoch_score"] = float(best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0))
             if int(row.get("epoch", -1)) == selected_epoch_effective and best_epoch >= 0:
                 for name in y_vars:
                     key = f"selection_score_{name}"
@@ -723,8 +664,8 @@ class TorchTrainer:
         header = list(history[0].keys()) if history else ["epoch", "train_loss", "val_loss"]
         rows = [[r[k] for k in header] for r in history]
         self.store.save_csv("scalars/metrics.csv", header, rows)
-        self._save_physics_terms(history)
-        self._save_optimization_diagnostics(diagnostics_rows)
+        save_physics_terms(store=self.store, history=history, include_stage=True)
+        save_torch_optimization_diagnostics(store=self.store, rows=diagnostics_rows)
         self.store.save_json(
             "trainable_params.json",
             {

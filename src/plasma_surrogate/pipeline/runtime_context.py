@@ -51,7 +51,7 @@ def _resolve_axis_mode(cfg: dict[str, Any], *, fallback: str = "steady") -> str:
 
 def build_preprocess_context(config_path: str | Path) -> RuntimeContext:
     cfg = _load_cfg(config_path)
-    run_dir = Path(cfg.get("run_dir", "runs/cycle1"))
+    run_dir = Path(cfg.get("run_dir", "runs/mainline"))
     dataset = load_dataset(cfg, run_dir)
     axis_mode = _resolve_axis_mode(cfg, fallback="steady")
     input_mode_meta = build_input_mode_effective_metadata(cfg)

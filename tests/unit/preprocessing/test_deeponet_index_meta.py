@@ -30,7 +30,7 @@ def test_preprocess_writes_deeponet_index_meta(tmp_path: Path):
     )
     pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
 
-    droot = run_dir / "preprocessing" / "sampling" / "deeponet"
+    droot = run_dir / "preprocessing" / "sampling" / "deeponet" / "default"
     with (droot / "index_meta.json").open("r", encoding="utf-8") as f:
         meta = json.load(f)
     assert meta["flatten_order"] == "C"

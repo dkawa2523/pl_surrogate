@@ -6,7 +6,9 @@ from typing import Any
 import numpy as np
 import pytest
 
-from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
+from plasma_surrogate.train import model_dispatch
+from plasma_surrogate.train.model_adapters import MODEL_ADAPTERS, ModelAdapter
+from plasma_surrogate.train.model_dispatch import TrainDispatchContext, TrainDispatchResult, run_model_train_predict
 from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.train.trainer import TrainOutput, Trainer
 from plasma_surrogate.train.torch_trainer import TorchTrainOutput, TorchTrainer
@@ -128,10 +130,11 @@ def test_unet_mainline_accepts_allvars_shared(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == set(ctx.y_vars)
-    assert out.extra_artifacts.get("unet_contract_effective", {}).get("target_family_effective") == "allvars"
+    assert out.extra_artifacts.get("model_contracts", {}).get("unet", {}).get("target_family_effective") == "allvars"
     assert (
-        out.extra_artifacts.get("unet_contract_effective", {})
-        .get("unet_feature_contract_effective", {})
+        out.extra_artifacts.get("model_contracts", {})
+        .get("unet", {})
+        .get("feature", {})
         .get("input_features_mode")
         == "geom_feature_pack"
     )
@@ -165,7 +168,7 @@ def test_unet_mainline_auto_uniform_selection_weights_for_dynamic_targets(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == set(custom_vars)
-    contract = out.extra_artifacts.get("unet_contract_effective", {})
+    contract = out.extra_artifacts.get("model_contracts", {}).get("unet", {})
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}
 
 
@@ -195,6 +198,69 @@ def test_deeponet_requires_cond_only_branch_mode(tmp_path: Path) -> None:
     }
     with pytest.raises(ValueError, match="branch_mode must be cond_only"):
         run_model_train_predict(ctx)
+
+
+def test_train_dispatch_enters_adapter_registry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    ctx = _ctx(tmp_path, "global_mlp")
+    captured: dict[str, Any] = {}
+
+    def _fake_run(self: ModelAdapter, call_ctx: TrainDispatchContext) -> TrainDispatchResult:
+        captured["adapter"] = self.name
+        captured["ctx"] = call_ctx
+        empty = np.zeros((0,), dtype=np.float32)
+        return TrainDispatchResult(
+            model=object(),
+            history=[],
+            pred_eval={},
+            true_eval={},
+            metrics={},
+            r2_scores={},
+            extra_artifacts={"marker": empty},
+        )
+
+    monkeypatch.setattr(ModelAdapter, "run", _fake_run)
+
+    out = run_model_train_predict(ctx)
+
+    assert captured["adapter"] == "global_mlp"
+    assert captured["ctx"] is ctx
+    assert "marker" in out.extra_artifacts
+
+
+@pytest.mark.parametrize("adapter", MODEL_ADAPTERS)
+def test_each_train_adapter_routes_to_lane_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    adapter: ModelAdapter,
+) -> None:
+    ctx = _ctx(tmp_path, adapter.model_names[0])
+    captured: dict[str, Any] = {}
+
+    def _fake_runner(
+        call_ctx: TrainDispatchContext,
+        *,
+        adapter: ModelAdapter,
+    ) -> TrainDispatchResult:
+        captured["ctx"] = call_ctx
+        captured["adapter"] = adapter.name
+        return TrainDispatchResult(
+            model=object(),
+            history=[],
+            pred_eval={},
+            true_eval={},
+            metrics={},
+            r2_scores={},
+            extra_artifacts={"model_contracts": {adapter.name: {"lane": adapter.name}}},
+        )
+
+    monkeypatch.setattr(model_dispatch, adapter.runner_name, _fake_runner)
+
+    out = model_dispatch.run_model_train_predict(ctx)
+
+    assert captured == {"ctx": ctx, "adapter": adapter.name}
+    assert out.extra_artifacts["model_contracts"][adapter.name]["lane"] == adapter.name
 
 
 def test_deeponet_mainline_runs_with_plain_cond_only(
@@ -234,7 +300,7 @@ def test_deeponet_mainline_runs_with_plain_cond_only(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == set(ctx.y_vars)
-    contract = out.extra_artifacts.get("deeponet_contract_effective", {})
+    contract = out.extra_artifacts.get("model_contracts", {}).get("deeponet", {})
     assert contract.get("target_family_effective") == "allvars"
 
 
@@ -319,13 +385,6 @@ def test_train_dispatch_resolves_loss_protocol_before_trainer(
 
     loss_cfg = captured["loss_cfg"]
     assert loss_cfg["protocol_effective"] == "plasma_surrogate_v2"
-    assert loss_cfg["supervised"]["type"] == "huber"
-    assert loss_cfg["supervised"]["region_balance"]["enabled"] is True
-    assert loss_cfg["supervised"]["spatial_consistency"]["multiscale"]["enabled"] is True
-    assert loss_cfg["supervised"]["positive_penalty"]["vars"] == ["electron_density"]
-    assert loss_cfg["supervised"]["target_region_by_var"] == {
-        "electron_density": "plasma_only",
-        "plasma_potential": "all_domain",
-    }
+    assert loss_cfg["supervised"] == {"type": "mse", "mask": "plasma_only"}
     assert captured["supervised_mask"] is None
     assert out.extra_artifacts["loss_protocol_effective"] == "plasma_surrogate_v2"

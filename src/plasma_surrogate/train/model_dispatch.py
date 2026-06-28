@@ -5,10 +5,11 @@ from __future__ import annotations
 import copy
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
+from plasma_surrogate.core.contracts import validate_pod_descriptor_latent_contract
 from plasma_surrogate.core.input_modes import (
     DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY,
     DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
@@ -21,9 +22,6 @@ from plasma_surrogate.core.input_modes import (
 from plasma_surrogate.core.vector_pack import load_vector_from_pack
 from plasma_surrogate.core.model_input_policy import (
     ADAPTER_AUTO,
-    ADAPTER_DESCRIPTOR_BRANCH,
-    ADAPTER_HYBRID_PACK_DESCRIPTOR,
-    ADAPTER_NONE,
     resolve_effective_adapter_mode,
     validate_model_input_mode,
 )
@@ -128,6 +126,48 @@ class TrainDispatchResult:
 
 
 @dataclass
+class TrainLaneRuntime:
+    ctx: TrainDispatchContext
+    adapter: Any
+    trainer: Trainer
+    train_cfg: dict[str, Any]
+    optimizer_contract: dict[str, Any]
+    model_name: str
+    input_mode_effective: str
+    structure_adapter_mode_effective: str
+    loss_cfg: dict[str, Any]
+    supervised_mask: np.ndarray | None
+    supervised_distance: np.ndarray | None
+    extra_artifacts: dict[str, Any]
+
+    @property
+    def h(self) -> int:
+        return int(self.ctx.h)
+
+    @property
+    def w(self) -> int:
+        return int(self.ctx.w)
+
+
+@dataclass
+class TrainLaneResult:
+    model: Any
+    history: list[dict[str, float]]
+    pred_eval: dict[str, np.ndarray]
+    true_eval: dict[str, np.ndarray]
+    eval_vars: list[str]
+
+
+TrainLaneHandler = Callable[[TrainLaneRuntime], TrainLaneResult]
+
+
+def _record_model_contract(extra_artifacts: dict[str, Any], model_name: str, contract: dict[str, Any]) -> None:
+    model_contracts = dict(extra_artifacts.get("model_contracts", {}) or {})
+    model_contracts[str(model_name)] = dict(contract)
+    extra_artifacts["model_contracts"] = model_contracts
+
+
+@dataclass
 class DeeponetRuntime:
     model: DeepONetPlasmaOperatorTorch
     supervised_targets: dict[str, np.ndarray] | None
@@ -189,47 +229,27 @@ def _resolve_pod_descriptor_and_latent_contract(
     descriptor_pack: dict[str, Any] | None,
     latent_pack: dict[str, Any] | None,
 ) -> tuple[np.ndarray | None, dict[str, Any]]:
+    meta = validate_pod_descriptor_latent_contract(
+        input_mode=input_mode,
+        adapter_mode=adapter_mode,
+        descriptor_profile=descriptor_profile,
+        latent_profile=latent_profile,
+    )
+    desc_profile = str(meta[DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY])
+    lat_profile = str(meta[DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY])
     mode = _normalize_profile_name(input_mode, default=TABLE_PLUS_STRUCTURE)
-    adapter = _normalize_profile_name(adapter_mode, default=ADAPTER_AUTO)
-    desc_profile = _normalize_profile_name(descriptor_profile, default="none")
-    lat_profile = _normalize_profile_name(latent_profile, default="none")
-    uses_descriptor_adapter = adapter in {ADAPTER_DESCRIPTOR_BRANCH, ADAPTER_HYBRID_PACK_DESCRIPTOR}
 
     if mode == TABLE_ONLY:
-        if desc_profile != "none" or lat_profile != "none":
-            raise ValueError(
-                "runtime.input_mode=table_only requires descriptor_profile/latent_profile to be none for deeponet_pod"
-            )
-        if adapter != ADAPTER_NONE:
-            raise ValueError(
-                "runtime.input_mode=table_only requires adapter_mode_effective='none' for deeponet_pod"
-            )
-        return None, {
-            DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY: 0,
-            DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: "none",
-            DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY: "none",
-            DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: False,
-        }
+        return None, meta
 
-    if mode != TABLE_PLUS_STRUCTURE:
-        raise ValueError(f"unsupported runtime input mode for deeponet_pod: {mode!r}")
     descriptor_vector: np.ndarray | None = None
     descriptor_dim = 0
     if desc_profile != "none":
-        if not uses_descriptor_adapter:
-            raise ValueError(
-                "deeponet_pod descriptor profile requires adapter_mode_effective in "
-                "{descriptor_branch, hybrid_pack_descriptor}"
-            )
         descriptor_vector, _ = load_vector_from_pack(
             pack=descriptor_pack,
             pack_name="structure_descriptor_pack",
         )
         descriptor_dim = int(descriptor_vector.shape[0])
-    elif uses_descriptor_adapter:
-        raise ValueError(
-            "adapter_mode_effective requires runtime.structure.descriptor_profile != none for deeponet_pod"
-        )
 
     latent_hook = False
     if lat_profile != "none":
@@ -277,8 +297,8 @@ def _validate_pod_deeponet_experimental_contract(
         raise ValueError(f"{cfg_prefix}.model_cfg.basis.per_var must be true")
     center = bool(basis_cfg.get("center", True))
     selection_mode = str(dict(selection_cfg or {}).get("mode", "best_val_allvars_balance")).strip().lower()
-    if selection_mode != "best_val_allvars_balance":
-        raise ValueError(f"{cfg_prefix}.selection.mode must be best_val_allvars_balance")
+    if selection_mode not in {"best_val_allvars_balance", "best_val_loss"}:
+        raise ValueError(f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, best_val_loss")
     return {
         "rank": int(rank),
         "fit_scope": fit_scope,
@@ -416,8 +436,8 @@ def _validate_deeponet_mainline_contract(
     if missing_geom_feature_policy != "error":
         raise ValueError(f"{cfg_prefix}.model_cfg.missing_geom_feature_policy must be error")
     sel_mode = str(selection_cfg.get("mode", "last")).strip().lower()
-    if sel_mode != "best_val_allvars_balance":
-        raise ValueError(f"{cfg_prefix}.selection.mode must be best_val_allvars_balance for mainline")
+    if sel_mode not in {"best_val_allvars_balance", "best_val_loss"}:
+        raise ValueError(f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, best_val_loss for mainline")
     if "boundary_bonus_weight" in selection_cfg and float(selection_cfg.get("boundary_bonus_weight", 0.0)) != 0.0:
         raise ValueError(f"{cfg_prefix}.selection.boundary_bonus_weight must be 0.0 for mainline")
     if "density_guard" in selection_cfg:
@@ -450,7 +470,7 @@ def _build_deeponet_contract_effective(
     return {
         "target_family_effective": str(deeponet_target_family),
         "target_vars_effective": list(deeponet_target_vars),
-        "feature_contract_effective": {
+        "feature": {
             "input_features_mode": str(deeponet_input_mode),
             "input_feature_channels": list(deeponet_feature_channels),
             "feature_source_effective": str(deeponet_feature_source),
@@ -688,6 +708,46 @@ def resolve_deeponet_runtime(
 
 
 def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
+    return resolve_train_model_adapter(ctx.model_name).run(ctx)
+
+
+def _run_global_mlp_train_predict(
+    ctx: TrainDispatchContext,
+    *,
+    adapter: Any,
+) -> TrainDispatchResult:
+    return _run_train_lane(ctx, adapter=adapter, handler=_run_global_mlp_lane)
+
+
+def _run_pod_deeponet_train_predict(
+    ctx: TrainDispatchContext,
+    *,
+    adapter: Any,
+) -> TrainDispatchResult:
+    return _run_train_lane(ctx, adapter=adapter, handler=_run_pod_deeponet_lane)
+
+
+def _run_grid_torch_adapter_train_predict(
+    ctx: TrainDispatchContext,
+    *,
+    adapter: Any,
+) -> TrainDispatchResult:
+    return _run_train_lane(ctx, adapter=adapter, handler=_run_grid_torch_lane)
+
+
+def _run_deeponet_plasma_train_predict(
+    ctx: TrainDispatchContext,
+    *,
+    adapter: Any,
+) -> TrainDispatchResult:
+    return _run_train_lane(ctx, adapter=adapter, handler=_run_deeponet_plasma_lane)
+
+
+def _build_train_lane_runtime(
+    ctx: TrainDispatchContext,
+    *,
+    expected_adapter: Any,
+) -> TrainLaneRuntime:
     trainer = Trainer(ctx.model_dir / "train")
     train_cfg = dict(ctx.run_cfg.get("train", {}))
     optimizer_contract = dict(train_cfg.get("optimizer_contract", {}))
@@ -697,8 +757,11 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         structure_adapter_mode_effective=ctx.structure_adapter_mode_effective,
     )
     model_adapter = resolve_train_model_adapter(model_name)
-    h, w = ctx.h, ctx.w
-    history: list[dict[str, float]] = []
+    if model_adapter.name != expected_adapter.name:
+        raise ValueError(
+            f"Train adapter mismatch for {model_name!r}: "
+            f"resolved={model_adapter.name!r}, expected={expected_adapter.name!r}"
+        )
     raw_loss_cfg = ctx.loss_cfg if ctx.loss_cfg is not None else train_cfg.get("loss", {})
     role_schema = dict(dict(ctx.physics_cfg or {}).get("target_role_schema", {}) or {})
     loss_cfg = resolve_loss_protocol(copy.deepcopy(raw_loss_cfg or {}), target_role_schema=role_schema)
@@ -717,172 +780,239 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
         "structure_adapter_mode_effective": str(structure_adapter_mode_effective),
         "loss_protocol_effective": str(loss_cfg.get("protocol_effective", "none")),
     }
-    eval_vars = list(ctx.y_vars)
+    return TrainLaneRuntime(
+        ctx=ctx,
+        adapter=expected_adapter,
+        trainer=trainer,
+        train_cfg=train_cfg,
+        optimizer_contract=optimizer_contract,
+        model_name=model_name,
+        input_mode_effective=input_mode_effective,
+        structure_adapter_mode_effective=structure_adapter_mode_effective,
+        loss_cfg=loss_cfg,
+        supervised_mask=supervised_mask,
+        supervised_distance=supervised_distance,
+        extra_artifacts=extra_artifacts,
+    )
 
-    if model_adapter.name == TRAIN_ADAPTER_GLOBAL_MLP:
-        cfg = dict(train_cfg.get("global_mlp", {}))
-        batch_size_cases = int(cfg.get("batch_size_cases", 0))
-        shuffle_cases = bool(cfg.get("shuffle_cases", True))
-        grad_scale_cfg = dict(cfg.get("grad_scale", {}))
-        layer_lr_multiplier = dict(cfg.get("layer_lr_multiplier", {}))
-        grad_clip_norm = float(cfg.get("grad_clip_norm", 0.0))
-        grad_clip_cfg = dict(cfg.get("grad_clip", {}))
-        output_head_refresh_cfg = dict(cfg.get("output_head_refresh", {}))
-        global_loss_cfg = copy.deepcopy(loss_cfg or {})
-        sup = dict(global_loss_cfg.get("supervised", {}))
-        sup.setdefault("global_target_region", "plasma_only")
-        if bool(sup.get("label_clip_from_scaler", False)):
-            transform_specs = dict(getattr(ctx.transforms, "target_transforms", {}) or {})
-            clip_stats: dict[str, dict[str, float]] = {}
-            for var, spec in transform_specs.items():
-                clip_cfg = dict(dict(spec).get("clip", {}))
-                if str(clip_cfg.get("mode", "none")).strip().lower() != "quantile":
-                    continue
-                if "clip_low" in clip_cfg and "clip_high" in clip_cfg:
-                    clip_stats[str(var)] = {
-                        "clip_low": float(clip_cfg["clip_low"]),
-                        "clip_high": float(clip_cfg["clip_high"]),
-                    }
-            if clip_stats:
-                sup["robust_clip_stats"] = clip_stats
-        global_loss_cfg["supervised"] = sup
-        model = build_model_from_name(
-            model_name="global_mlp",
-            input_dim=ctx.cond_scaled.shape[1],
-            grid_shape=(h, w),
-            model_cfg=dict(cfg.get("model_cfg", {})),
-            seed=ctx.global_seed + ctx.model_idx,
-            phi_mode=str(ctx.profile_lock.get("phi_mode", "direct")),
-            out_channels=len(ctx.y_vars),
-            output_keys=ctx.y_vars,
-        )
-        y_flat = ctx.y_scaled.reshape(ctx.n_cases, -1)
-        out = trainer.run_global(
-            model,
-            ctx.cond_scaled[ctx.tr],
-            y_flat[ctx.tr],
-            ctx.cond_scaled[ctx.va],
-            y_flat[ctx.va],
-            epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
-            lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
-            physics_cfg=ctx.physics_cfg,
-            loss_cfg=global_loss_cfg,
-            curriculum_cfg=ctx.curriculum_cfg,
-            supervised_mask=supervised_mask,
-            supervised_distance=supervised_distance,
-            batch_size_cases=batch_size_cases,
-            shuffle_cases=shuffle_cases,
-            seed=ctx.global_seed + ctx.model_idx,
-            grad_scale_cfg=grad_scale_cfg,
-            layer_lr_multiplier=layer_lr_multiplier,
-            grad_clip_norm=grad_clip_norm,
-            grad_clip_cfg=grad_clip_cfg,
-            output_head_refresh_cfg=output_head_refresh_cfg,
-        )
-        history = out.history
-        steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
-        extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
-        pred_eval = ctx.transforms.inverse_field_dict(model.predict_fields(ctx.cond_scaled[ctx.te]))
-        true_eval = _to_true_eval(ctx.y, ctx.te, ctx.y_vars)
-    elif model_adapter.name == TRAIN_ADAPTER_POD_DEEPONET:
-        cfg = _resolve_family_train_cfg(train_cfg, model_name=model_name)
-        pod_model_type = str(model_name).strip().lower()
-        train_key = f"train.{pod_model_type}"
-        pod_target_family = _resolve_unet_target_family(
-            cfg.get("target_family", "allvars"),
-            cfg_key=f"{train_key}.target_family",
-        )
-        pod_target_vars = _resolve_unet_target_vars_for_family(
-            family=pod_target_family,
-            raw_target_vars=cfg.get("target_vars"),
-            available=ctx.y_vars,
-            cfg_key=f"{train_key}.target_vars",
-        )
-        basis_cfg_effective = _validate_pod_deeponet_experimental_contract(
-            model_name=pod_model_type,
-            y_vars=ctx.y_vars,
-            target_family=pod_target_family,
-            target_vars=pod_target_vars,
-            model_cfg=dict(cfg.get("model_cfg", {})),
-            selection_cfg=dict(cfg.get("selection", {})),
-        )
-        pod_descriptor_vec, pod_descriptor_meta = _resolve_pod_descriptor_and_latent_contract(
-            input_mode=input_mode_effective,
-            adapter_mode=structure_adapter_mode_effective,
-            descriptor_profile=ctx.structure_descriptor_profile_effective,
-            latent_profile=ctx.structure_latent_profile_effective,
-            descriptor_pack=ctx.structure_descriptor_pack,
-            latent_pack=ctx.latent_feature_pack,
-        )
-        extra_artifacts.update(dict(pod_descriptor_meta))
-        pod_target_indices = [ctx.y_vars.index(v) for v in pod_target_vars]
-        cond_train = np.asarray(ctx.cond_scaled[ctx.tr], dtype=np.float32)
-        cond_val = np.asarray(ctx.cond_scaled[ctx.va], dtype=np.float32)
-        cond_test = np.asarray(ctx.cond_scaled[ctx.te], dtype=np.float32)
-        if pod_descriptor_vec is not None:
-            desc_train = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_train.shape[0], axis=0).astype(np.float32)
-            desc_val = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_val.shape[0], axis=0).astype(np.float32)
-            desc_test = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_test.shape[0], axis=0).astype(np.float32)
-            cond_train = np.concatenate([cond_train, desc_train], axis=1).astype(np.float32)
-            cond_val = np.concatenate([cond_val, desc_val], axis=1).astype(np.float32)
-            cond_test = np.concatenate([cond_test, desc_test], axis=1).astype(np.float32)
-        pod_y_train = np.asarray(ctx.y_scaled[ctx.tr][:, pod_target_indices], dtype=np.float32)
-        pod_basis_bundle = fit_pod_basis_from_targets(
-            pod_y_train,
-            output_keys=list(pod_target_vars),
-            requested_rank=int(basis_cfg_effective["rank"]),
-            center=bool(basis_cfg_effective["center"]),
-            per_var=bool(basis_cfg_effective["per_var"]),
-        )
-        pod_model_cfg = normalize_pod_deeponet_model_cfg(
-            dict(cfg.get("model_cfg", {})),
-            model_type=pod_model_type,
-        )
-        model = build_model_from_name(
-            model_name=model_name,
-            input_dim=int(cond_train.shape[1]),
-            grid_shape=(h, w),
-            model_cfg=pod_model_cfg,
-            seed=ctx.global_seed + ctx.model_idx,
-            phi_mode=str(ctx.profile_lock.get("phi_mode", "direct")),
-            out_channels=len(pod_target_vars),
-            output_keys=pod_target_vars,
-            pod_basis_bundle=pod_basis_bundle,
-        )
-        pod_selection_cfg = dict(cfg.get("selection", {}))
-        pod_selection_cfg["weights"] = _resolve_mainline_selection_weights(
-            selection_cfg=pod_selection_cfg,
-            target_vars=pod_target_vars,
-            cfg_prefix=train_key,
-        )
-        pod_optimizer_cfg = dict(cfg.get("optimizer", {}))
-        grid_like_cfg = dict(train_cfg.get("unet_like", {}))
-        batch_size_cases = int(grid_like_cfg.get("batch_size_cases", 0))
-        shuffle_cases = bool(grid_like_cfg.get("shuffle_cases", True))
-        out = trainer.run_unet(
-            model,
-            cond_train,
-            pod_y_train,
-            cond_val,
-            np.asarray(ctx.y_scaled[ctx.va][:, pod_target_indices], dtype=np.float32),
-            epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
-            lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
-            physics_cfg={"enabled": False},
-            loss_cfg=copy.deepcopy(loss_cfg or {}),
-            curriculum_cfg=ctx.curriculum_cfg,
-            supervised_mask=supervised_mask,
-            supervised_distance=supervised_distance,
-            optimizer_contract=optimizer_contract,
-            unet_optimizer_cfg=pod_optimizer_cfg,
-            batch_size_cases=batch_size_cases,
-            shuffle_cases=shuffle_cases,
-            seed=ctx.global_seed + ctx.model_idx,
-            selection_cfg=pod_selection_cfg,
-        )
-        history = out.history
-        steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
-        extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
-        extra_artifacts["deeponet_pod_contract_effective"] = {
+
+def _run_train_lane(
+    ctx: TrainDispatchContext,
+    *,
+    adapter: Any,
+    handler: TrainLaneHandler,
+) -> TrainDispatchResult:
+    runtime = _build_train_lane_runtime(ctx, expected_adapter=adapter)
+    lane = handler(runtime)
+    true_eval_metrics = {k: lane.true_eval[k] for k in lane.eval_vars if k in lane.true_eval and k in lane.pred_eval}
+    pred_eval_metrics = {k: lane.pred_eval[k] for k in lane.eval_vars if k in lane.true_eval and k in lane.pred_eval}
+    return TrainDispatchResult(
+        model=lane.model,
+        history=lane.history,
+        pred_eval=lane.pred_eval,
+        true_eval=lane.true_eval,
+        metrics=rmse_by_var(true_eval_metrics, pred_eval_metrics),
+        r2_scores=r2_by_var(true_eval_metrics, pred_eval_metrics),
+        extra_artifacts=runtime.extra_artifacts,
+    )
+
+
+def _run_model_train_predict_for_adapter(
+    ctx: TrainDispatchContext,
+    *,
+    expected_adapter: Any,
+) -> TrainDispatchResult:
+    handlers: dict[str, TrainLaneHandler] = {
+        TRAIN_ADAPTER_GLOBAL_MLP: _run_global_mlp_lane,
+        TRAIN_ADAPTER_POD_DEEPONET: _run_pod_deeponet_lane,
+        TRAIN_ADAPTER_GRID_TORCH: _run_grid_torch_lane,
+        TRAIN_ADAPTER_DEEPONET_PLASMA: _run_deeponet_plasma_lane,
+    }
+    try:
+        handler = handlers[str(expected_adapter.name)]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported train adapter: {expected_adapter.name}") from exc
+    return _run_train_lane(ctx, adapter=expected_adapter, handler=handler)
+
+
+def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
+    ctx = rt.ctx
+    train_cfg = rt.train_cfg
+    cfg = dict(train_cfg.get("global_mlp", {}))
+    batch_size_cases = int(cfg.get("batch_size_cases", 0))
+    shuffle_cases = bool(cfg.get("shuffle_cases", True))
+    grad_scale_cfg = dict(cfg.get("grad_scale", {}))
+    layer_lr_multiplier = dict(cfg.get("layer_lr_multiplier", {}))
+    grad_clip_norm = float(cfg.get("grad_clip_norm", 0.0))
+    grad_clip_cfg = dict(cfg.get("grad_clip", {}))
+    output_head_refresh_cfg = dict(cfg.get("output_head_refresh", {}))
+    global_loss_cfg = copy.deepcopy(rt.loss_cfg or {})
+    sup = dict(global_loss_cfg.get("supervised", {}))
+    if bool(sup.get("label_clip_from_scaler", False)):
+        transform_specs = dict(getattr(ctx.transforms, "target_transforms", {}) or {})
+        clip_stats: dict[str, dict[str, float]] = {}
+        for var, spec in transform_specs.items():
+            clip_cfg = dict(dict(spec).get("clip", {}))
+            if str(clip_cfg.get("mode", "none")).strip().lower() != "quantile":
+                continue
+            if "clip_low" in clip_cfg and "clip_high" in clip_cfg:
+                clip_stats[str(var)] = {
+                    "clip_low": float(clip_cfg["clip_low"]),
+                    "clip_high": float(clip_cfg["clip_high"]),
+                }
+        if clip_stats:
+            sup["robust_clip_stats"] = clip_stats
+    global_loss_cfg["supervised"] = sup
+    model = build_model_from_name(
+        model_name="global_mlp",
+        input_dim=ctx.cond_scaled.shape[1],
+        grid_shape=(rt.h, rt.w),
+        model_cfg=dict(cfg.get("model_cfg", {})),
+        seed=ctx.global_seed + ctx.model_idx,
+        phi_mode=str(ctx.profile_lock.get("phi_mode", "direct")),
+        out_channels=len(ctx.y_vars),
+        output_keys=ctx.y_vars,
+    )
+    y_flat = ctx.y_scaled.reshape(ctx.n_cases, -1)
+    out = rt.trainer.run_global(
+        model,
+        ctx.cond_scaled[ctx.tr],
+        y_flat[ctx.tr],
+        ctx.cond_scaled[ctx.va],
+        y_flat[ctx.va],
+        epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
+        lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
+        physics_cfg=ctx.physics_cfg,
+        loss_cfg=global_loss_cfg,
+        curriculum_cfg=ctx.curriculum_cfg,
+        supervised_mask=rt.supervised_mask,
+        supervised_distance=rt.supervised_distance,
+        batch_size_cases=batch_size_cases,
+        shuffle_cases=shuffle_cases,
+        seed=ctx.global_seed + ctx.model_idx,
+        grad_scale_cfg=grad_scale_cfg,
+        layer_lr_multiplier=layer_lr_multiplier,
+        grad_clip_norm=grad_clip_norm,
+        grad_clip_cfg=grad_clip_cfg,
+        output_head_refresh_cfg=output_head_refresh_cfg,
+        selection_cfg=dict(cfg.get("selection", {})),
+    )
+    history = out.history
+    steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
+    rt.extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
+    return TrainLaneResult(
+        model=model,
+        history=history,
+        pred_eval=ctx.transforms.inverse_field_dict(model.predict_fields(ctx.cond_scaled[ctx.te])),
+        true_eval=_to_true_eval(ctx.y, ctx.te, ctx.y_vars),
+        eval_vars=list(ctx.y_vars),
+    )
+
+
+def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
+    ctx = rt.ctx
+    train_cfg = rt.train_cfg
+    cfg = _resolve_family_train_cfg(train_cfg, model_name=rt.model_name)
+    pod_model_type = str(rt.model_name).strip().lower()
+    train_key = f"train.{pod_model_type}"
+    pod_target_family = _resolve_unet_target_family(
+        cfg.get("target_family", "allvars"),
+        cfg_key=f"{train_key}.target_family",
+    )
+    pod_target_vars = _resolve_unet_target_vars_for_family(
+        family=pod_target_family,
+        raw_target_vars=cfg.get("target_vars"),
+        available=ctx.y_vars,
+        cfg_key=f"{train_key}.target_vars",
+    )
+    basis_cfg_effective = _validate_pod_deeponet_experimental_contract(
+        model_name=pod_model_type,
+        y_vars=ctx.y_vars,
+        target_family=pod_target_family,
+        target_vars=pod_target_vars,
+        model_cfg=dict(cfg.get("model_cfg", {})),
+        selection_cfg=dict(cfg.get("selection", {})),
+    )
+    pod_descriptor_vec, pod_descriptor_meta = _resolve_pod_descriptor_and_latent_contract(
+        input_mode=rt.input_mode_effective,
+        adapter_mode=rt.structure_adapter_mode_effective,
+        descriptor_profile=ctx.structure_descriptor_profile_effective,
+        latent_profile=ctx.structure_latent_profile_effective,
+        descriptor_pack=ctx.structure_descriptor_pack,
+        latent_pack=ctx.latent_feature_pack,
+    )
+    rt.extra_artifacts.update(dict(pod_descriptor_meta))
+    pod_target_indices = [ctx.y_vars.index(v) for v in pod_target_vars]
+    cond_train = np.asarray(ctx.cond_scaled[ctx.tr], dtype=np.float32)
+    cond_val = np.asarray(ctx.cond_scaled[ctx.va], dtype=np.float32)
+    cond_test = np.asarray(ctx.cond_scaled[ctx.te], dtype=np.float32)
+    if pod_descriptor_vec is not None:
+        desc_train = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_train.shape[0], axis=0).astype(np.float32)
+        desc_val = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_val.shape[0], axis=0).astype(np.float32)
+        desc_test = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_test.shape[0], axis=0).astype(np.float32)
+        cond_train = np.concatenate([cond_train, desc_train], axis=1).astype(np.float32)
+        cond_val = np.concatenate([cond_val, desc_val], axis=1).astype(np.float32)
+        cond_test = np.concatenate([cond_test, desc_test], axis=1).astype(np.float32)
+    pod_y_train = np.asarray(ctx.y_scaled[ctx.tr][:, pod_target_indices], dtype=np.float32)
+    pod_basis_bundle = fit_pod_basis_from_targets(
+        pod_y_train,
+        output_keys=list(pod_target_vars),
+        requested_rank=int(basis_cfg_effective["rank"]),
+        center=bool(basis_cfg_effective["center"]),
+        per_var=bool(basis_cfg_effective["per_var"]),
+    )
+    pod_model_cfg = normalize_pod_deeponet_model_cfg(
+        dict(cfg.get("model_cfg", {})),
+        model_type=pod_model_type,
+    )
+    model = build_model_from_name(
+        model_name=rt.model_name,
+        input_dim=int(cond_train.shape[1]),
+        grid_shape=(rt.h, rt.w),
+        model_cfg=pod_model_cfg,
+        seed=ctx.global_seed + ctx.model_idx,
+        phi_mode=str(ctx.profile_lock.get("phi_mode", "direct")),
+        out_channels=len(pod_target_vars),
+        output_keys=pod_target_vars,
+        pod_basis_bundle=pod_basis_bundle,
+    )
+    pod_selection_cfg = dict(cfg.get("selection", {}))
+    pod_selection_cfg["weights"] = _resolve_mainline_selection_weights(
+        selection_cfg=pod_selection_cfg,
+        target_vars=pod_target_vars,
+        cfg_prefix=train_key,
+    )
+    pod_optimizer_cfg = dict(cfg.get("optimizer", {}))
+    grid_like_cfg = dict(train_cfg.get("unet_like", {}))
+    batch_size_cases = int(grid_like_cfg.get("batch_size_cases", 0))
+    shuffle_cases = bool(grid_like_cfg.get("shuffle_cases", True))
+    out = rt.trainer.run_unet(
+        model,
+        cond_train,
+        pod_y_train,
+        cond_val,
+        np.asarray(ctx.y_scaled[ctx.va][:, pod_target_indices], dtype=np.float32),
+        epochs=int(cfg.get("epochs", train_cfg.get("epochs", 20))),
+        lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
+        physics_cfg={"enabled": False},
+        loss_cfg=copy.deepcopy(rt.loss_cfg or {}),
+        curriculum_cfg=ctx.curriculum_cfg,
+        supervised_mask=rt.supervised_mask,
+        supervised_distance=rt.supervised_distance,
+        optimizer_contract=rt.optimizer_contract,
+        unet_optimizer_cfg=pod_optimizer_cfg,
+        batch_size_cases=batch_size_cases,
+        shuffle_cases=shuffle_cases,
+        seed=ctx.global_seed + ctx.model_idx,
+        selection_cfg=pod_selection_cfg,
+    )
+    history = out.history
+    steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
+    rt.extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
+    _record_model_contract(
+        rt.extra_artifacts,
+        "deeponet_pod",
+        {
             "model_type_effective": pod_model_type,
             "target_family_effective": str(pod_target_family),
             "target_vars_effective": list(pod_target_vars),
@@ -903,7 +1033,9 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
                 "warmup_epochs": int(max(int(pod_optimizer_cfg.get("warmup_epochs", 0)), 0)),
             },
             "model_cfg_effective": dict(pod_model_cfg),
-            DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(pod_descriptor_meta[DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY]),
+            DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(
+                pod_descriptor_meta[DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY]
+            ),
             DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: str(
                 pod_descriptor_meta[DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY]
             ),
@@ -913,166 +1045,182 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: bool(
                 pod_descriptor_meta[DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY]
             ),
-        }
-        pred_features = model.forward_features(cond_test)
-        pred_eval = ctx.transforms.inverse_field_dict(
+        },
+    )
+    pred_features = model.forward_features(cond_test)
+    return TrainLaneResult(
+        model=model,
+        history=history,
+        pred_eval=ctx.transforms.inverse_field_dict(
             {name: np.asarray(pred_features[name], dtype=np.float32) for name in pod_target_vars}
+        ),
+        true_eval=_to_true_eval(ctx.y, ctx.te, pod_target_vars, source_y_vars=ctx.y_vars),
+        eval_vars=list(pod_target_vars),
+    )
+
+
+def _run_grid_torch_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
+    ctx = rt.ctx
+    grid_ctx = replace(
+        ctx,
+        loss_cfg=rt.loss_cfg,
+        supervised_mask=rt.supervised_mask,
+        supervised_distance=rt.supervised_distance,
+    )
+    grid_result = run_grid_torch_train_predict(
+        ctx=grid_ctx,
+        trainer=rt.trainer,
+        train_cfg=rt.train_cfg,
+        optimizer_contract=rt.optimizer_contract,
+        model_name=rt.model_name,
+        cfg=_resolve_family_train_cfg(rt.train_cfg, model_name=rt.model_name),
+        input_mode_effective=rt.input_mode_effective,
+        structure_adapter_mode_effective=rt.structure_adapter_mode_effective,
+        extra_artifacts=rt.extra_artifacts,
+    )
+    return TrainLaneResult(
+        model=grid_result.model,
+        history=grid_result.history,
+        pred_eval=grid_result.pred_eval,
+        true_eval=grid_result.true_eval,
+        eval_vars=grid_result.eval_vars,
+    )
+
+
+def _run_deeponet_plasma_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
+    ctx = rt.ctx
+    train_cfg = rt.train_cfg
+    cfg = dict(train_cfg.get("deeponet_plasma", {}))
+    train_key = "train.deeponet_plasma"
+    deeponet_target_family = _resolve_unet_target_family(
+        cfg.get("target_family", "allvars"),
+        cfg_key=f"{train_key}.target_family",
+    )
+    default_deeponet_vars = list(ctx.y_vars)
+    deeponet_target_vars = (
+        list(default_deeponet_vars)
+        if cfg.get("target_vars") is None
+        else _resolve_target_vars(
+            cfg.get("target_vars"),
+            available=ctx.y_vars,
+            cfg_key=f"{train_key}.target_vars",
         )
-        true_eval = _to_true_eval(ctx.y, ctx.te, pod_target_vars, source_y_vars=ctx.y_vars)
-        eval_vars = list(pod_target_vars)
-    elif model_adapter.name == TRAIN_ADAPTER_GRID_TORCH:
-        grid_ctx = replace(
-            ctx,
-            loss_cfg=loss_cfg,
-            supervised_mask=supervised_mask,
-            supervised_distance=supervised_distance,
-        )
-        grid_result = run_grid_torch_train_predict(
-            ctx=grid_ctx,
-            trainer=trainer,
-            train_cfg=train_cfg,
-            optimizer_contract=optimizer_contract,
-            model_name=model_name,
-            cfg=_resolve_family_train_cfg(train_cfg, model_name=model_name),
-            input_mode_effective=input_mode_effective,
-            structure_adapter_mode_effective=structure_adapter_mode_effective,
-            extra_artifacts=extra_artifacts,
-        )
-        model = grid_result.model
-        history = grid_result.history
-        pred_eval = grid_result.pred_eval
-        true_eval = grid_result.true_eval
-        eval_vars = grid_result.eval_vars
-    elif model_adapter.name == TRAIN_ADAPTER_DEEPONET_PLASMA:
-        cfg = dict(train_cfg.get("deeponet_plasma", {}))
-        train_key = "train.deeponet_plasma"
-        deeponet_target_family = _resolve_unet_target_family(
-            cfg.get("target_family", "allvars"),
-            cfg_key=f"{train_key}.target_family",
-        )
-        default_deeponet_vars = list(ctx.y_vars)
-        deeponet_target_vars = (
-            list(default_deeponet_vars)
-            if cfg.get("target_vars") is None
-            else _resolve_target_vars(
-                cfg.get("target_vars"),
-                available=ctx.y_vars,
-                cfg_key=f"{train_key}.target_vars",
-            )
-        )
-        deeponet_target_indices = [ctx.y_vars.index(v) for v in deeponet_target_vars]
-        input_features_cfg = dict(cfg.get("input_features", {}))
-        deeponet_input_mode = str(input_features_cfg.get("mode", "geom_feature_pack")).strip().lower()
-        if deeponet_input_mode != "geom_feature_pack":
-            raise ValueError(f"{train_key}.input_features.mode must be geom_feature_pack")
-        deeponet_feature_channels = _resolve_coord_feature_channels(input_features_cfg.get("features"))
-        deeponet_selection_cfg = dict(cfg.get("selection", {}))
-        deeponet_optimizer_cfg = dict(cfg.get("optimizer", {}))
-        deeponet_batch_size_cases = int(cfg.get("batch_size_cases", 0))
-        deeponet_shuffle_cases = bool(cfg.get("shuffle_cases", True))
-        strict_mainline = bool(cfg.get("strict_mainline", False))
-        if strict_mainline:
-            _validate_deeponet_mainline_contract(
-                deeponet_cfg=cfg,
-                selection_cfg=deeponet_selection_cfg,
-                loss_cfg=dict(loss_cfg or {}),
-                y_vars=ctx.y_vars,
-                target_family=deeponet_target_family,
-                target_vars=deeponet_target_vars,
-                input_features_mode=deeponet_input_mode,
-                input_feature_channels=deeponet_feature_channels,
-            )
-            if bool(dict(ctx.physics_cfg or {}).get("enabled", False)):
-                raise ValueError("train.physics.enabled must be false for deeponet mainline plain operator")
-        deeponet_selection_cfg["weights"] = _resolve_mainline_selection_weights(
+    )
+    deeponet_target_indices = [ctx.y_vars.index(v) for v in deeponet_target_vars]
+    input_features_cfg = dict(cfg.get("input_features", {}))
+    deeponet_input_mode = str(input_features_cfg.get("mode", "geom_feature_pack")).strip().lower()
+    if deeponet_input_mode != "geom_feature_pack":
+        raise ValueError(f"{train_key}.input_features.mode must be geom_feature_pack")
+    deeponet_feature_channels = _resolve_coord_feature_channels(input_features_cfg.get("features"))
+    deeponet_selection_cfg = dict(cfg.get("selection", {}))
+    deeponet_optimizer_cfg = dict(cfg.get("optimizer", {}))
+    deeponet_batch_size_cases = int(cfg.get("batch_size_cases", 0))
+    deeponet_shuffle_cases = bool(cfg.get("shuffle_cases", True))
+    strict_mainline = bool(cfg.get("strict_mainline", False))
+    if strict_mainline:
+        _validate_deeponet_mainline_contract(
+            deeponet_cfg=cfg,
             selection_cfg=deeponet_selection_cfg,
+            loss_cfg=dict(rt.loss_cfg or {}),
+            y_vars=ctx.y_vars,
+            target_family=deeponet_target_family,
             target_vars=deeponet_target_vars,
-            cfg_prefix=train_key,
+            input_features_mode=deeponet_input_mode,
+            input_feature_channels=deeponet_feature_channels,
         )
-        operator_mode = str(cfg.get("operator_mode", "pde_coupled")).strip().lower()
-        runtime = resolve_deeponet_runtime(
-            ctx,
-            cfg,
-            output_keys=deeponet_target_vars,
-            sensor_feature_names=deeponet_feature_channels,
-            operator_mode=operator_mode,
+        if bool(dict(ctx.physics_cfg or {}).get("enabled", False)):
+            raise ValueError("train.physics.enabled must be false for deeponet mainline plain operator")
+    deeponet_selection_cfg["weights"] = _resolve_mainline_selection_weights(
+        selection_cfg=deeponet_selection_cfg,
+        target_vars=deeponet_target_vars,
+        cfg_prefix=train_key,
+    )
+    operator_mode = str(cfg.get("operator_mode", "pde_coupled")).strip().lower()
+    runtime = resolve_deeponet_runtime(
+        ctx,
+        cfg,
+        output_keys=deeponet_target_vars,
+        sensor_feature_names=deeponet_feature_channels,
+        operator_mode=operator_mode,
+    )
+    model = runtime.model
+    deeponet_feature_source = "geom_feature_pack"
+    deeponet_distance_transform_effective: dict[str, Any] = {"mode": "raw"}
+    rows, source = _build_coord_feature_rows(
+        channels=deeponet_feature_channels,
+        pack=ctx.coord_feature_pack,
+        geom_ctx=ctx.geom_ctx,
+        h=rt.h,
+        w=rt.w,
+    )
+    deeponet_feature_source = str(source)
+    if source != "preprocess_pack":
+        raise ValueError(
+            "deeponet input-feature contract requires preprocessing coord_feature_pack; "
+            f"effective_source={source}"
         )
-        model = runtime.model
-        deeponet_feature_source = "geom_feature_pack"
-        deeponet_distance_transform_effective: dict[str, Any] = {"mode": "raw"}
-        rows, source = _build_coord_feature_rows(
-            channels=deeponet_feature_channels,
-            pack=ctx.coord_feature_pack,
-            geom_ctx=ctx.geom_ctx,
-            h=h,
-            w=w,
-        )
-        deeponet_feature_source = str(source)
-        if source != "preprocess_pack":
-            raise ValueError(
-                "deeponet input-feature contract requires preprocessing coord_feature_pack; "
-                f"effective_source={source}"
-            )
-        distance_transform_cfg = _resolve_distance_transform_cfg(
-            dict(input_features_cfg.get("distance_transform") or {})
-        )
-        distance_transform_cfg_effective, _ = _resolve_distance_transform_effective(
-            distance_transform_cfg,
-            stats=ctx.coord_distance_transform_stats,
-        )
-        rows, deeponet_distance_transform_effective = _apply_distance_transform(
-            rows.astype(np.float32),
-            channels=deeponet_feature_channels,
-            cfg=distance_transform_cfg_effective,
-        )
-        rows, _, _ = _apply_coord_feature_scaling(
-            rows.astype(np.float32),
-            channels=deeponet_feature_channels,
-            coord_feature_scaler_artifact=ctx.coord_feature_scaler,
-        )
-        if hasattr(model, "set_static_spatial_features"):
-            model.set_static_spatial_features(rows.astype(np.float32), channels=list(deeponet_feature_channels))
-        ttrainer = TorchTrainer(ctx.model_dir / "train")
-        stages = resolve_deeponet_stages(
-            cfg,
-            default_epochs=max(1, int(cfg.get("epochs", train_cfg.get("epochs", 2)))),
-            default_lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
-        )
-        deeponet_y_train = ctx.y_scaled[ctx.tr][:, deeponet_target_indices]
-        deeponet_y_val = ctx.y_scaled[ctx.va][:, deeponet_target_indices]
-        out_t = ttrainer.run_deeponet(
-            model=model,
-            cond_train=ctx.cond_scaled[ctx.tr],
-            y_train=deeponet_y_train,
-            cond_val=ctx.cond_scaled[ctx.va],
-            y_val=deeponet_y_val,
-            geom_ctx=ctx.geom_ctx,
-            y_vars=deeponet_target_vars,
-            stages=stages,
-            physics_cfg=ctx.physics_cfg,
-            supervised_targets=runtime.supervised_targets,
-            loss_cfg=loss_cfg,
-            curriculum_cfg=ctx.curriculum_cfg,
-            supervised_mask=supervised_mask,
-            supervised_distance=supervised_distance,
-            optimizer_contract={**dict(optimizer_contract), "deeponet_optimizer": dict(deeponet_optimizer_cfg)},
-            selection_cfg=deeponet_selection_cfg,
-            batch_size_cases=deeponet_batch_size_cases,
-            shuffle_cases=deeponet_shuffle_cases,
-            seed=ctx.global_seed + ctx.model_idx,
-        )
-        history = out_t.history
-        steps_per_epoch = (
-            int(np.ceil(len(ctx.tr) / max(1, deeponet_batch_size_cases))) if deeponet_batch_size_cases > 0 else 1
-        )
-        extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
-        pred = model.predict_fields(ctx.cond_scaled[ctx.te], geom_ctx=ctx.geom_ctx)
-        pred_eval = ctx.transforms.inverse_field_dict({k: v for k, v in pred.items() if k in set(deeponet_target_vars)})
-        if "rho_eff" in pred:
-            pred_eval["rho_eff"] = np.asarray(pred["rho_eff"], dtype=np.float32)
-        true_eval = _to_true_eval(ctx.y, ctx.te, deeponet_target_vars, source_y_vars=ctx.y_vars)
-        extra_artifacts["supervised_targets_enabled"] = bool(runtime.supervised_targets is not None)
-        extra_artifacts["deeponet_contract_effective"] = _build_deeponet_contract_effective(
+    distance_transform_cfg = _resolve_distance_transform_cfg(
+        dict(input_features_cfg.get("distance_transform") or {})
+    )
+    distance_transform_cfg_effective, _ = _resolve_distance_transform_effective(
+        distance_transform_cfg,
+        stats=ctx.coord_distance_transform_stats,
+    )
+    rows, deeponet_distance_transform_effective = _apply_distance_transform(
+        rows.astype(np.float32),
+        channels=deeponet_feature_channels,
+        cfg=distance_transform_cfg_effective,
+    )
+    rows, _, _ = _apply_coord_feature_scaling(
+        rows.astype(np.float32),
+        channels=deeponet_feature_channels,
+        coord_feature_scaler_artifact=ctx.coord_feature_scaler,
+    )
+    if hasattr(model, "set_static_spatial_features"):
+        model.set_static_spatial_features(rows.astype(np.float32), channels=list(deeponet_feature_channels))
+    ttrainer = TorchTrainer(ctx.model_dir / "train")
+    stages = resolve_deeponet_stages(
+        cfg,
+        default_epochs=max(1, int(cfg.get("epochs", train_cfg.get("epochs", 2)))),
+        default_lr=float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
+    )
+    deeponet_y_train = ctx.y_scaled[ctx.tr][:, deeponet_target_indices]
+    deeponet_y_val = ctx.y_scaled[ctx.va][:, deeponet_target_indices]
+    out_t = ttrainer.run_deeponet(
+        model=model,
+        cond_train=ctx.cond_scaled[ctx.tr],
+        y_train=deeponet_y_train,
+        cond_val=ctx.cond_scaled[ctx.va],
+        y_val=deeponet_y_val,
+        geom_ctx=ctx.geom_ctx,
+        y_vars=deeponet_target_vars,
+        stages=stages,
+        physics_cfg=ctx.physics_cfg,
+        supervised_targets=runtime.supervised_targets,
+        loss_cfg=rt.loss_cfg,
+        curriculum_cfg=ctx.curriculum_cfg,
+        supervised_mask=rt.supervised_mask,
+        supervised_distance=rt.supervised_distance,
+        optimizer_contract={**dict(rt.optimizer_contract), "deeponet_optimizer": dict(deeponet_optimizer_cfg)},
+        selection_cfg=deeponet_selection_cfg,
+        batch_size_cases=deeponet_batch_size_cases,
+        shuffle_cases=deeponet_shuffle_cases,
+        seed=ctx.global_seed + ctx.model_idx,
+    )
+    history = out_t.history
+    steps_per_epoch = (
+        int(np.ceil(len(ctx.tr) / max(1, deeponet_batch_size_cases))) if deeponet_batch_size_cases > 0 else 1
+    )
+    rt.extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
+    pred = model.predict_fields(ctx.cond_scaled[ctx.te], geom_ctx=ctx.geom_ctx)
+    pred_eval = ctx.transforms.inverse_field_dict({k: v for k, v in pred.items() if k in set(deeponet_target_vars)})
+    if "rho_eff" in pred:
+        pred_eval["rho_eff"] = np.asarray(pred["rho_eff"], dtype=np.float32)
+    rt.extra_artifacts["supervised_targets_enabled"] = bool(runtime.supervised_targets is not None)
+    _record_model_contract(
+        rt.extra_artifacts,
+        "deeponet",
+        _build_deeponet_contract_effective(
             cfg=cfg,
             train_cfg=train_cfg,
             deeponet_target_family=deeponet_target_family,
@@ -1085,23 +1233,14 @@ def run_model_train_predict(ctx: TrainDispatchContext) -> TrainDispatchResult:
             operator_mode=operator_mode,
             deeponet_distance_transform_effective=deeponet_distance_transform_effective,
             strict_mainline=strict_mainline,
-        )
-        eval_vars = list(deeponet_target_vars)
-    else:
-        raise ValueError(f"Unsupported train adapter: {model_adapter.name}")
-
-    true_eval_metrics = {k: true_eval[k] for k in eval_vars if k in true_eval and k in pred_eval}
-    pred_eval_metrics = {k: pred_eval[k] for k in eval_vars if k in true_eval and k in pred_eval}
-    metrics = rmse_by_var(true_eval_metrics, pred_eval_metrics)
-    r2_scores = r2_by_var(true_eval_metrics, pred_eval_metrics)
-    return TrainDispatchResult(
+        ),
+    )
+    return TrainLaneResult(
         model=model,
         history=history,
         pred_eval=pred_eval,
-        true_eval=true_eval,
-        metrics=metrics,
-        r2_scores=r2_scores,
-        extra_artifacts=extra_artifacts,
+        true_eval=_to_true_eval(ctx.y, ctx.te, deeponet_target_vars, source_y_vars=ctx.y_vars),
+        eval_vars=list(deeponet_target_vars),
     )
 
 

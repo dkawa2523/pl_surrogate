@@ -38,7 +38,7 @@ def test_physics_terms_torch_with_boundary_operator():
     require_torch_runtime()
     torch = require_torch()
     pred = {
-        "log_ne": torch.ones((2, 1, 8, 8), dtype=torch.float32),
+        "density": torch.ones((2, 1, 8, 8), dtype=torch.float32),
         "Te": torch.ones((2, 1, 8, 8), dtype=torch.float32),
         "phi": torch.zeros((2, 1, 8, 8), dtype=torch.float32),
     }
@@ -69,13 +69,13 @@ def test_physics_terms_torch_uses_pred_rho_eff_when_present():
     torch = require_torch()
     phi = torch.zeros((1, 1, 8, 8), dtype=torch.float32)
     pred_zero = {
-        "log_ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        "ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
         "Te": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
         "phi": phi,
         "rho_eff": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
     }
     pred_nonzero = {
-        "log_ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        "ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
         "Te": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
         "phi": phi,
         "rho_eff": torch.ones((1, 1, 8, 8), dtype=torch.float32),
@@ -103,7 +103,7 @@ def test_compose_torch_returns_common_component_keys():
     require_torch_runtime()
     torch = require_torch()
     pred = {
-        "log_ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
+        "ne": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
         "Te": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
         "phi": torch.zeros((1, 1, 8, 8), dtype=torch.float32),
     }
@@ -114,7 +114,7 @@ def test_compose_torch_returns_common_component_keys():
         physics_cfg={
             "enabled": True,
             "terms": {"poisson": {"weight": 0.1}},
-            "symbols": {"density": "log_ne", "temperature": "Te", "potential": "phi"},
+            "symbols": {"density": "ne", "temperature": "Te", "potential": "phi"},
         },
     )
     assert float(total.detach().cpu().item()) >= 0.0

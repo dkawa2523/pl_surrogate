@@ -9,9 +9,9 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.core.input_modes import (
+    DESCRIPTOR_PROFILE_KEY,
+    LATENT_PROFILE_KEY,
     STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
-    STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
-    STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
     build_input_mode_effective_metadata,
 )
 from plasma_surrogate.core.model_input_policy import resolve_effective_input_mode_metadata_for_model
@@ -126,10 +126,10 @@ def run_model_train_eval(ctx: BenchmarkModelContext) -> dict[str, Any]:
             input_mode_effective=str(input_mode_meta.get("input_mode_effective", "")),
             structure_adapter_mode_effective=str(input_mode_meta.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "")),
             structure_descriptor_profile_effective=str(
-                input_mode_meta.get(STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY, "none")
+                input_mode_meta.get(DESCRIPTOR_PROFILE_KEY, "none")
             ),
             structure_latent_profile_effective=str(
-                input_mode_meta.get(STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY, "none")
+                input_mode_meta.get(LATENT_PROFILE_KEY, "none")
             ),
         )
     )

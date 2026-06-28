@@ -130,10 +130,9 @@ def build_physics_cfg(
                 bo_cfg.get("sample_idx_source", "deeponet_task:boundary_operator.query_indices")
             ),
             "supervised_targets_npz": bo_cfg.get("supervised_targets_npz"),
-            "target_coeffs": bo_cfg.get("target_coeffs", {"log_ne": 0.10, "Te": 0.05, "bias": 0.0}),
+            "target_coeffs": bo_cfg.get("target_coeffs", {"density": 0.10, "Te": 0.05, "bias": 0.0}),
             "prior_coeffs": bo_cfg.get("prior_coeffs"),
             "operator_handle": None,
-            "external_operator_handle": None,
             "target_clamp": bo_cfg.get("target_clamp"),
         }
 

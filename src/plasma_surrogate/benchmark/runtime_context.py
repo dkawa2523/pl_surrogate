@@ -279,7 +279,7 @@ def build_benchmark_data_context(
     if ("deeponet_plasma" in profile_lock["models"] or profile_lock["phi_mode"] == "deeponet_poisson") and not deeponet_index:
         raise ValueError(
             "Benchmark profile requires DeepONet sensor/query artifact, but "
-            "preprocessing/sampling/deeponet/sensor_query_index.json is missing."
+            "preprocessing/sampling/deeponet/<task>/sensor_query_index.json is missing."
         )
     if "deeponet_plasma" in profile_lock["models"] and (not deeponet_poisson_index or not deeponet_boundary_index):
         raise ValueError(

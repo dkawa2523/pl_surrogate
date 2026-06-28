@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from plasma_surrogate.core.contracts import validate_runtime_metadata_pair
 from plasma_surrogate.features.structure_feature_registry import (
     list_descriptor_profiles,
     list_feature_profiles,
@@ -49,10 +50,6 @@ DESCRIPTOR_PROFILE_KEY = "descriptor_profile"
 LATENT_PROFILE_KEY = "latent_profile"
 RUNTIME_SCHEMA_HASH_PENDING = "pending"
 
-# Compatibility aliases for model internals that have not yet moved to the
-# plain optional metadata names.
-STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY = DESCRIPTOR_PROFILE_KEY
-STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY = LATENT_PROFILE_KEY
 HAS_STRUCTURE_INPUTS_EFFECTIVE_KEY = "has_structure_inputs_effective"
 DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY = "deeponet_pod_descriptor_dim_effective"
 DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY = "deeponet_pod_descriptor_profile_effective"
@@ -134,6 +131,12 @@ def build_runtime_schema_hashes(schemas: dict[str, Any] | None) -> dict[str, str
         "case_spatial_feature_pack_meta": dict(raw.get("case_spatial_feature_pack_meta", {}) or {}),
         "case_structure_feature_pack_meta": dict(raw.get("case_structure_feature_pack_meta", {}) or {}),
     }
+    descriptor_meta = dict(raw.get("structure_descriptor_pack_meta", {}) or {})
+    if descriptor_meta:
+        feature_payload["structure_descriptor_pack_meta"] = descriptor_meta
+    latent_meta = dict(raw.get("latent_feature_pack_meta", {}) or {})
+    if latent_meta:
+        feature_payload["latent_feature_pack_meta"] = latent_meta
     return {
         TARGET_SCHEMA_HASH_KEY: _stable_hash(target_payload),
         FEATURE_SCHEMA_HASH_KEY: _stable_hash(feature_payload),
@@ -190,6 +193,8 @@ def validate_input_mode_cfg(cfg: dict[str, Any] | None) -> None:
 
     norm = normalize_input_mode_cfg(cfg)
     runtime = dict(norm.get("runtime", {}))
+    if "allow_mode_fallback" in runtime:
+        raise ValueError("runtime.allow_mode_fallback is removed; runtime contracts are strict")
     mode = str(runtime.get("input_mode", DEFAULT_INPUT_MODE))
     if mode not in set(INPUT_MODES):
         raise ValueError(
@@ -300,10 +305,6 @@ def descriptor_latent_metadata_keys() -> tuple[str, ...]:
     return DESCRIPTOR_LATENT_EFFECTIVE_METADATA_KEYS
 
 
-def _missing_marker() -> str:
-    return "<missing>"
-
-
 def validate_runtime_metadata_contract(
     *,
     request_meta: dict[str, Any] | None,
@@ -313,26 +314,12 @@ def validate_runtime_metadata_contract(
 ) -> dict[str, Any]:
     """Validate request/checkpoint runtime metadata and return normalized request metadata."""
 
-    req = dict(request_meta or {})
-    ckpt = dict(checkpoint_meta or {})
-    if not ckpt:
-        return req
-    required = tuple(keys or input_mode_metadata_keys())
-    optional = tuple(key for key in OPTIONAL_RUNTIME_METADATA_KEYS if key in req or key in ckpt)
-    for key in (*required, *optional):
-        if key not in ckpt:
-            raise ValueError(
-                f"{context}: key={key!r}, expected={_missing_marker()}, got={req.get(key)!r}"
-            )
-        if key not in req:
-            raise ValueError(
-                f"{context}: key={key!r}, expected={ckpt.get(key)!r}, got={_missing_marker()}"
-            )
-        if req[key] != ckpt[key]:
-            raise ValueError(
-                f"{context}: key={key!r}, expected={ckpt[key]!r}, got={req[key]!r}"
-            )
-    return req
+    return validate_runtime_metadata_pair(
+        request_meta=request_meta,
+        checkpoint_meta=checkpoint_meta,
+        keys=keys,
+        context=context,
+    )
 
 
 def merge_effective_runtime_metadata(
@@ -414,11 +401,9 @@ __all__ = [
     "RUNTIME_SCHEMA_HASH_PENDING",
     "STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY",
     "STRUCTURE_ADAPTER_MODES",
-    "STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY",
     "STRUCTURE_DESCRIPTOR_PROFILES",
     "STRUCTURE_FEATURE_PROFILE_EFFECTIVE_KEY",
     "STRUCTURE_FEATURE_PROFILES",
-    "STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY",
     "STRUCTURE_LATENT_PROFILES",
     "STRUCTURE_PROVIDER_MODES",
     "TABLE_ONLY",

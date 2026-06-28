@@ -15,7 +15,7 @@ from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 
 
 def _table_plus_structure_meta() -> dict[str, Any]:
-    return build_input_mode_effective_metadata(
+    meta = build_input_mode_effective_metadata(
         {
             "runtime": {
                 "input_mode": "table_plus_structure",
@@ -29,6 +29,9 @@ def _table_plus_structure_meta() -> dict[str, Any]:
             }
         }
     )
+    meta["target_schema_hash"] = "target-schema-test"
+    meta["feature_schema_hash"] = "feature-schema-test"
+    return meta
 
 
 def test_load_checkpoint_input_mode_meta_reads_effective_keys(tmp_path: Path, assert_input_mode_metadata_keys) -> None:

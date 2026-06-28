@@ -1,4 +1,4 @@
-"""Minimal torch DeepONet operator for Cycle 1.6.1."""
+"""Minimal torch DeepONet operator for product training and inference."""
 
 from __future__ import annotations
 

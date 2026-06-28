@@ -9,11 +9,11 @@ import numpy as np
 VALID_TARGET_REGIONS = frozenset({"plasma_only", "all_domain"})
 
 
-def normalize_target_region_by_var(
+def normalize_region_by_var(
     raw: Any,
     *,
     target_vars: list[str] | tuple[str, ...] | set[str] | None = None,
-    key_name: str = "target_region_by_var",
+    key_name: str = "region_by_var",
     reject_unknown: bool = False,
 ) -> dict[str, str]:
     if raw is None:
@@ -36,7 +36,6 @@ def normalize_target_region_by_var(
         raise ValueError(f"{key_name} contains unknown vars: {sorted(unknown)}")
     return out
 
-
 def target_region_for_var(
     region_by_var: dict[str, str] | None,
     var_name: str,
@@ -47,7 +46,7 @@ def target_region_for_var(
     if region == "" and str(default).strip() == "":
         return ""
     if region not in VALID_TARGET_REGIONS:
-        raise ValueError("target_region_by_var values must be one of: plasma_only, all_domain")
+        raise ValueError("region_by_var values must be one of: plasma_only, all_domain")
     return region
 
 

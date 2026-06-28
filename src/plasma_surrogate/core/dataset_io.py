@@ -73,9 +73,15 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
         if source_key == "":
             raise ValueError(f"dataset.targets[{i}].source_key must not be empty")
         value_transform = str(entry.get("value_transform", "identity")).strip().lower()
-        if value_transform not in {"identity", "pow10", "exp10"}:
+        if target_id in {"log_ne", "log_ni"} or source_key in {"log_ne", "log_ni"}:
             raise ValueError(
-                f"dataset.targets[{i}].value_transform must be one of: identity, pow10, exp10; got={value_transform}"
+                f"dataset.targets[{i}] uses removed log-density key {source_key!r}. "
+                "Mainline density targets must use linear ne/ni with value_transform=identity."
+            )
+        if value_transform != "identity":
+            raise ValueError(
+                f"dataset.targets[{i}].value_transform={value_transform!r} is removed from mainline. "
+                "Use linear physical fields with value_transform=identity."
             )
         target_meta: dict[str, Any] = {
             "id": target_id,
@@ -153,28 +159,25 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
                 raise FileNotFoundError(f"fields npz not found for case={case_id}: {npz_path}")
 
             with np.load(npz_path) as data:
-                output_vars = [t["id"] for t in targets]
+                target_ids = [t["id"] for t in targets]
                 resolved_sources = {t["id"]: t["source_key"] for t in targets}
                 transforms = {t["id"]: t["value_transform"] for t in targets}
-                missing_keys = [resolved_sources[k] for k in output_vars if resolved_sources[k] not in data.files]
+                missing_keys = [resolved_sources[k] for k in target_ids if resolved_sources[k] not in data.files]
                 if missing_keys:
                     raise ValueError(f"fields npz missing keys for case={case_id}: {missing_keys}")
                 y: dict[str, np.ndarray] = {}
-                for name in output_vars:
+                for name in target_ids:
                     source_key = resolved_sources[name]
                     arr = _as_hw(data[source_key], key=source_key)
                     transform = str(transforms.get(name, "identity")).strip().lower()
-                    if transform == "identity":
-                        y[name] = arr
-                    elif transform in {"pow10", "exp10"}:
-                        y[name] = np.power(10.0, arr.astype(np.float64)).astype(np.float32)
-                    else:
+                    if transform != "identity":
                         raise ValueError(
-                            "dataset.targets[].value_transform supports only identity|pow10|exp10; "
-                            f"got {transform} for target id={name}"
+                            "dataset.targets[].value_transform supports only identity in mainline; "
+                            f"got {transform!r} for target id={name}"
                         )
+                    y[name] = arr
 
-            first_key = output_vars[0]
+            first_key = target_ids[0]
             shape = tuple(int(v) for v in y[first_key].shape)
             if expected_shape is None:
                 expected_shape = shape

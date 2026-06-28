@@ -127,7 +127,7 @@ class UNetOperatorV2(_TorchGridFieldBaseline):
         activation_name = str(cfg["activation"])
         head_mode = str(cfg["head_mode"])
         widths = [min(width * (2**level), max_width) for level in range(depth)]
-        density_names = {"ne", "ni", "log_ne", "log_ni"}
+        density_names = {"ne", "ni"}
         density_indices = [i for i, name in enumerate(self.output_keys) if str(name) in density_names]
         field_indices = [i for i in range(len(self.output_keys)) if i not in set(density_indices)]
 

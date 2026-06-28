@@ -1,4 +1,4 @@
-"""Physics-aware loss helpers for M3 minimal implementation."""
+"""Physics-aware loss helpers for surrogate training."""
 
 from __future__ import annotations
 
@@ -237,46 +237,45 @@ def _as_batch(arr: np.ndarray, ref: np.ndarray) -> np.ndarray:
 
 
 def boundary_operator_target(
-    log_ne: np.ndarray,
+    density: np.ndarray,
     te: np.ndarray,
     phi: np.ndarray | None = None,
     mode: str = "proxy",
     target_coeffs: dict[str, float] | None = None,
     prior_coeffs: dict[str, float] | None = None,
     operator_handle: Any | None = None,
-    external_operator_handle: Any | None = None,
     target_clamp: tuple[float, float] | None = None,
 ) -> np.ndarray:
     """
     Proxy target for boundary operator prior.
 
-    This keeps Cycle 1.x lightweight while exposing a stable contract:
-    target_phi = c_log_ne * log_ne + c_Te * Te + bias
+    This keeps the product path lightweight while exposing a stable contract:
+    target_phi = c_density * density + c_Te * Te + bias
     """
 
     mode_norm = str(mode).strip().lower()
     coeff = target_coeffs or {}
-    lne = np.asarray(log_ne, dtype=np.float32)
+    dens = np.asarray(density, dtype=np.float32)
     tt = np.asarray(te, dtype=np.float32)
     if mode_norm == "proxy":
-        c_log_ne = float(coeff.get("log_ne", 0.10))
+        c_density = float(coeff.get("density", 0.10))
         c_te = float(coeff.get("Te", 0.05))
         bias = float(coeff.get("bias", 0.0))
-        target = c_log_ne * lne + c_te * tt + bias
+        target = c_density * dens + c_te * tt + bias
     elif mode_norm == "operator_prior":
         if operator_handle is not None:
             if phi is None:
                 raise ValueError("boundary_operator_target(mode=operator_prior) with operator_handle requires phi")
             p = np.asarray(phi, dtype=np.float32)
             if hasattr(operator_handle, "predict_target"):
-                target = operator_handle.predict_target(lne, tt, p)
+                target = operator_handle.predict_target(dens, tt, p)
             elif callable(operator_handle):
-                target = operator_handle(lne, tt, p)
+                target = operator_handle(dens, tt, p)
             else:
-                raise TypeError("operator_handle must be callable or implement predict_target(log_ne, te, phi)")
+                raise TypeError("operator_handle must be callable or implement predict_target(density, te, phi)")
             target = np.asarray(target, dtype=np.float32)
-            if target.shape != lne.shape:
-                raise ValueError(f"operator_handle target shape mismatch: expected {lne.shape}, got {target.shape}")
+            if target.shape != dens.shape:
+                raise ValueError(f"operator_handle target shape mismatch: expected {dens.shape}, got {target.shape}")
         else:
             if phi is None:
                 raise ValueError("boundary_operator_target(mode=operator_prior) requires phi")
@@ -286,27 +285,11 @@ def boundary_operator_target(
             gy, gx = np.gradient(p, axis=(-2, -1), edge_order=1)
             e_n = np.sqrt(gx**2 + gy**2).astype(np.float32)
             prior = prior_coeffs or {}
-            c_log_ne = float(prior.get("log_ne", 0.08))
+            c_density = float(prior.get("density", 0.08))
             c_te = float(prior.get("Te", 0.06))
             c_en = float(prior.get("E_n", 0.04))
             bias = float(prior.get("bias", 0.0))
-            target = c_log_ne * lne + c_te * tt + c_en * e_n + bias
-    elif mode_norm == "external_operator":
-        handle = operator_handle if operator_handle is not None else external_operator_handle
-        if handle is None:
-            raise ValueError("boundary_operator_target(mode=external_operator) requires operator_handle")
-        if phi is None:
-            raise ValueError("boundary_operator_target(mode=external_operator) requires phi")
-        p = np.asarray(phi, dtype=np.float32)
-        if hasattr(handle, "predict_target"):
-            target = handle.predict_target(lne, tt, p)
-        elif callable(handle):
-            target = handle(lne, tt, p)
-        else:
-            raise TypeError("operator_handle must be callable or implement predict_target(log_ne, te, phi)")
-        target = np.asarray(target, dtype=np.float32)
-        if target.shape != lne.shape:
-            raise ValueError(f"external operator target shape mismatch: expected {lne.shape}, got {target.shape}")
+            target = c_density * dens + c_te * tt + c_en * e_n + bias
     else:
         raise ValueError(f"Unknown boundary operator mode: {mode}")
 
@@ -319,29 +302,27 @@ def boundary_operator_target(
 
 def boundary_operator_loss(
     phi: np.ndarray,
-    log_ne: np.ndarray,
+    density: np.ndarray,
     te: np.ndarray,
     mask_band: np.ndarray,
     mode: str = "proxy",
     target_coeffs: dict[str, float] | None = None,
     prior_coeffs: dict[str, float] | None = None,
     operator_handle: Any | None = None,
-    external_operator_handle: Any | None = None,
     target_clamp: tuple[float, float] | None = None,
 ) -> float:
     p = np.asarray(phi, dtype=np.float32)
-    ln = _as_batch(np.asarray(log_ne, dtype=np.float32), p)
+    dens = _as_batch(np.asarray(density, dtype=np.float32), p)
     tt = _as_batch(np.asarray(te, dtype=np.float32), p)
     m = _as_batch(np.asarray(mask_band, dtype=np.float32), p)
     t = boundary_operator_target(
-        ln,
+        dens,
         tt,
         phi=p,
         mode=mode,
         target_coeffs=target_coeffs,
         prior_coeffs=prior_coeffs,
         operator_handle=operator_handle,
-        external_operator_handle=external_operator_handle,
         target_clamp=target_clamp,
     )
     denom = max(float(np.sum(m)), 1.0)
@@ -351,29 +332,27 @@ def boundary_operator_loss(
 
 def boundary_operator_grad(
     phi: np.ndarray,
-    log_ne: np.ndarray,
+    density: np.ndarray,
     te: np.ndarray,
     mask_band: np.ndarray,
     mode: str = "proxy",
     target_coeffs: dict[str, float] | None = None,
     prior_coeffs: dict[str, float] | None = None,
     operator_handle: Any | None = None,
-    external_operator_handle: Any | None = None,
     target_clamp: tuple[float, float] | None = None,
 ) -> np.ndarray:
     p = np.asarray(phi, dtype=np.float32)
-    ln = _as_batch(np.asarray(log_ne, dtype=np.float32), p)
+    dens = _as_batch(np.asarray(density, dtype=np.float32), p)
     tt = _as_batch(np.asarray(te, dtype=np.float32), p)
     m = _as_batch(np.asarray(mask_band, dtype=np.float32), p)
     t = boundary_operator_target(
-        ln,
+        dens,
         tt,
         phi=p,
         mode=mode,
         target_coeffs=target_coeffs,
         prior_coeffs=prior_coeffs,
         operator_handle=operator_handle,
-        external_operator_handle=external_operator_handle,
         target_clamp=target_clamp,
     )
     denom = max(float(np.sum(m)), 1.0)
@@ -384,7 +363,7 @@ def boundary_operator_grad(
 def physics_loss_and_grad(
     phi: np.ndarray,
     cfg: dict[str, Any] | None = None,
-    log_ne: np.ndarray | None = None,
+    density: np.ndarray | None = None,
     te: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray, dict[str, float]]:
     """Return (loss, grad_phi, components) for enabled physics terms."""
@@ -420,33 +399,31 @@ def physics_loss_and_grad(
     bo_enabled = bool(bo_cfg.get("enabled", False))
     boundary_operator_weight = float(bo_cfg.get("weight", 0.0))
     if bo_enabled and boundary_operator_weight > 0.0:
-        if log_ne is None or te is None:
-            raise ValueError("boundary_operator requires log_ne and te tensors")
+        if density is None or te is None:
+            raise ValueError("boundary_operator requires density and te tensors")
         mask_band = bo_cfg.get("mask_band")
         if mask_band is None:
             raise ValueError("boundary_operator requires mask_band")
         bo_loss = boundary_operator_loss(
             phi=phi,
-            log_ne=log_ne,
+            density=density,
             te=te,
             mask_band=np.asarray(mask_band, dtype=np.float32),
             mode=str(bo_cfg.get("mode", "proxy")),
             target_coeffs=bo_cfg.get("target_coeffs"),
             prior_coeffs=bo_cfg.get("prior_coeffs"),
             operator_handle=bo_cfg.get("operator_handle"),
-            external_operator_handle=bo_cfg.get("external_operator_handle"),
             target_clamp=tuple(bo_cfg["target_clamp"]) if bo_cfg.get("target_clamp") is not None else None,
         )
         bo_grad = boundary_operator_grad(
             phi=phi,
-            log_ne=log_ne,
+            density=density,
             te=te,
             mask_band=np.asarray(mask_band, dtype=np.float32),
             mode=str(bo_cfg.get("mode", "proxy")),
             target_coeffs=bo_cfg.get("target_coeffs"),
             prior_coeffs=bo_cfg.get("prior_coeffs"),
             operator_handle=bo_cfg.get("operator_handle"),
-            external_operator_handle=bo_cfg.get("external_operator_handle"),
             target_clamp=tuple(bo_cfg["target_clamp"]) if bo_cfg.get("target_clamp") is not None else None,
         )
         boundary_operator_term = boundary_operator_weight * bo_loss

@@ -64,20 +64,24 @@ def build_casewise_splits(
     }
 
 
-def build_pressure_extrap_split(
+def _build_edge_extrapolation_split(
     case_ids: Sequence[str],
     cond_values: dict[str, dict[str, float]],
     key: str,
     holdout_ratio: float = 0.2,
     val_ratio_within_remain: float = 0.2,
+    direction: str = "high",
 ) -> dict[str, list[str]]:
-    """Build deterministic extrapolation split by holding out high-end cases for a condition key."""
+    """Build deterministic extrapolation split by holding out one edge for a condition key."""
 
     ids = list(case_ids)
     if len(ids) < 3:
         raise ValueError("At least 3 case IDs are required")
     if key == "":
         raise ValueError("split key must not be empty")
+    direction_norm = str(direction).strip().lower()
+    if direction_norm not in {"high", "low"}:
+        raise ValueError("extrapolation direction must be one of: high, low")
     if holdout_ratio <= 0.0 or holdout_ratio >= 1.0:
         raise ValueError("holdout_ratio must be in (0,1)")
     if val_ratio_within_remain <= 0.0 or val_ratio_within_remain >= 1.0:
@@ -85,14 +89,26 @@ def build_pressure_extrap_split(
 
     ranked = sorted(ids, key=lambda cid: float(cond_values[cid][key]))
     n_test = max(1, int(round(len(ids) * holdout_ratio)))
-    test = ranked[-n_test:]
-    remain = ranked[:-n_test]
+    if direction_norm == "low":
+        test = ranked[:n_test]
+        remain = ranked[n_test:]
+    else:
+        test = ranked[-n_test:]
+        remain = ranked[:-n_test]
     n_val = max(1, int(round(len(remain) * val_ratio_within_remain)))
-    val = remain[-n_val:]
-    train = remain[:-n_val]
+    if direction_norm == "low":
+        val = remain[:n_val]
+        train = remain[n_val:]
+    else:
+        val = remain[-n_val:]
+        train = remain[:-n_val]
     if len(train) == 0:
-        train = remain[:1]
-        val = remain[1:]
+        if direction_norm == "low":
+            train = remain[-1:]
+            val = remain[:-1]
+        else:
+            train = remain[:1]
+            val = remain[1:]
     return {"train": train, "val": val, "test": test}
 
 
@@ -100,15 +116,17 @@ def build_extrapolation_split(
     case_ids: Sequence[str],
     cond_values: dict[str, dict[str, float]],
     key: str,
+    direction: str = "high",
     holdout_ratio: float = 0.2,
     val_ratio_within_remain: float = 0.2,
 ) -> dict[str, list[str]]:
-    """Unified extrapolation split entrypoint (wrapper over pressure-style holdout)."""
+    """Build deterministic extrapolation split by holding out high or low condition values."""
 
-    return build_pressure_extrap_split(
+    return _build_edge_extrapolation_split(
         case_ids=case_ids,
         cond_values=cond_values,
         key=key,
+        direction=direction,
         holdout_ratio=holdout_ratio,
         val_ratio_within_remain=val_ratio_within_remain,
     )

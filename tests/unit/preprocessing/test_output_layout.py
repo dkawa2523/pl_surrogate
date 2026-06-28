@@ -42,7 +42,14 @@ def test_preprocess_saves_output_layout_and_train_only_cond_stats(tmp_path: Path
     assert role_schema["role_to_targets"]["density_electron"] == ["ne"]
     assert role_schema["role_to_targets"]["potential"] == ["phi"]
     assert set(role_schema["positive_targets"]) == {"ne", "ni", "Te"}
-    assert (run_dir / "preprocessing" / "split" / "split_pressure_extrap_v1.json").exists()
+    targets_by_id = {str(item["id"]): item for item in role_schema["targets"]}
+    assert targets_by_id["ne"]["role"] == "density_electron"
+    assert targets_by_id["ne"]["field_family"] == "density"
+    assert targets_by_id["Te"]["role"] == "temperature_electron"
+    assert targets_by_id["phi"]["role"] == "potential"
+    assert targets_by_id["phi"]["positive"] is False
+    assert (run_dir / "preprocessing" / "split" / "split_extrap_v1.json").exists()
+    assert not (run_dir / "preprocessing" / "split" / "split_pressure_extrap_v1.json").exists()
     assert (run_dir / "preprocessing" / "scalers" / "xgrid_channel_scalers.json").exists()
     assert (run_dir / "preprocessing" / "sampling" / "pairs" / "phase_wrap_pairs.json").exists()
     assert (run_dir / "preprocessing" / "sampling" / "pairs" / "time_adj_pairs.json").exists()

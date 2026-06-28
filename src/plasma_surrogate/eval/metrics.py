@@ -1,4 +1,4 @@
-"""Evaluation metrics for cycle1."""
+"""Evaluation metrics for the target-driven surrogate mainline."""
 
 from __future__ import annotations
 
@@ -108,7 +108,7 @@ def rmse_masked(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> flo
     m = _broadcast_mask_to_shape(mask, yt, name="rmse_masked")
     active = m > 0.5
     if not np.any(active):
-        return 0.0
+        return float("nan")
     if not (np.all(np.isfinite(yt[active])) and np.all(np.isfinite(yp[active]))):
         return float("nan")
     diff = yt[active] - yp[active]
@@ -141,7 +141,7 @@ def r2_masked(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> float
     m = _broadcast_mask_to_shape(mask, yt, name="r2_masked")
     active = m > 0.5
     if not np.any(active):
-        return 0.0
+        return float("nan")
     yta = yt[active]
     ypa = yp[active]
     if not (np.all(np.isfinite(yta)) and np.all(np.isfinite(ypa))):
@@ -220,17 +220,16 @@ def boundary_band_mask(
 
 
 def boundary_gamma_proxy(
-    log_ne: np.ndarray,
+    density: np.ndarray,
     te: np.ndarray,
     phi: np.ndarray,
     mask_band: np.ndarray,
 ) -> np.ndarray:
-    ln = np.asarray(log_ne, dtype=np.float32)
+    dens = np.asarray(density, dtype=np.float32)
     tt = np.asarray(te, dtype=np.float32)
     p = np.asarray(phi, dtype=np.float32)
     m = np.asarray(mask_band, dtype=np.float32) > 0.5
     gy, gx = np.gradient(p, edge_order=1)
     e_mag = np.sqrt(gx**2 + gy**2).astype(np.float32)
-    ne = np.power(10.0, np.clip(ln, -6.0, 6.0)).astype(np.float32)
-    gamma = ne * np.sqrt(np.maximum(tt, 0.0) + 1e-6) * e_mag
+    gamma = dens * np.sqrt(np.maximum(tt, 0.0) + 1e-6) * e_mag
     return gamma[m].astype(np.float32)

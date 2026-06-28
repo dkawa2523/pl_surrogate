@@ -38,7 +38,7 @@ def runtime_table_plus_structure(
 
 def csv_npz_targets_three_field_example() -> list[dict[str, str]]:
     return [
-        {"id": "ne", "source_key": "log_ne", "value_transform": "pow10"},
+        {"id": "ne", "source_key": "ne", "value_transform": "identity"},
         {"id": "Te", "source_key": "Te", "value_transform": "identity"},
         {"id": "phi", "source_key": "phi", "value_transform": "identity"},
     ]

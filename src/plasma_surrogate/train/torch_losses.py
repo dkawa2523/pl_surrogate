@@ -167,7 +167,7 @@ def boundary_operator_loss_torch(
     If provided, loss is evaluated only on the selected flattened points.
     """
     torch = require_torch()
-    ln = _as_bchw(pred_fields.get("log_density", pred_fields.get("log_ne")))
+    density = _as_bchw(pred_fields.get("density"))
     te = _as_bchw(pred_fields.get("temperature", pred_fields.get("Te")))
     phi = _as_bchw(pred_fields.get("potential", pred_fields.get("phi")))
     if mask_band is None:
@@ -177,7 +177,7 @@ def boundary_operator_loss_torch(
     if sample_idx is not None:
         m = _gather_points(m, sample_idx)
     pred = operator_model.predict_target(
-        log_ne=ln,
+        density=density,
         te=te,
         phi=phi,
         cond=cond_vec,
@@ -194,9 +194,9 @@ def boundary_operator_loss_torch(
     else:
         # operator-prior: compare against a simple Bohm-like proxy
         if sample_idx is not None:
-            tgt = 0.10 * _gather_points(ln, sample_idx) + 0.05 * _gather_points(te, sample_idx)
+            tgt = 0.10 * _gather_points(density, sample_idx) + 0.05 * _gather_points(te, sample_idx)
         else:
-            tgt = 0.10 * ln + 0.05 * te
+            tgt = 0.10 * density + 0.05 * te
     diff = (pred - tgt) * m
     denom = torch.clamp(m.sum(), min=1.0)
     return (diff * diff).sum() / denom

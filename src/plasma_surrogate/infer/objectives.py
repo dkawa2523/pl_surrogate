@@ -28,7 +28,6 @@ class ObjectiveEvaluation:
     feasible: bool
     violated_constraints: list[str]
     objective_mode: str
-    objective_key: str
     constraint_violation_total: float = 0.0
     term_values: dict[str, float] = field(default_factory=dict)
     term_contributions: dict[str, float] = field(default_factory=dict)
@@ -79,22 +78,15 @@ def _reject_legacy_keys(cfg: dict[str, Any]) -> None:
         )
 
 
-def objective_identity_from_config(objective_cfg: dict[str, Any] | None = None) -> tuple[str, str]:
-    """Return the deprecated objective_key alias and product objective mode."""
+def objective_mode_from_config(objective_cfg: dict[str, Any] | None = None) -> str:
+    """Return the validated product objective mode."""
 
     cfg = _dict_or_empty(objective_cfg)
     _reject_legacy_keys(cfg)
     mode = str(cfg.get("mode", "weighted_sum")).strip().lower() or "weighted_sum"
-    terms = cfg.get("terms")
-    if terms is None:
-        return "uniformity", mode
-    if isinstance(terms, list) and len(terms) == 1:
-        try:
-            key = str(dict(terms[0] or {}).get("key", "uniformity") or "uniformity").strip()
-        except (TypeError, ValueError):
-            key = "uniformity"
-        return key or "uniformity", mode
-    return "weighted_sum", mode
+    if mode != "weighted_sum":
+        raise ValueError("objective.mode must be: weighted_sum")
+    return mode
 
 
 def _term_transform(value: float, transform: str) -> float:
@@ -217,10 +209,8 @@ def evaluate_objective(
 
     feasible, violated, constraint_values, violation_total = _evaluate_constraints(result, constraints_cfg)
     search_value = float(objective_value) + 1.0e6 * float(violation_total)
-    objective_key = terms[0]["key"] if len(terms) == 1 else "weighted_sum"
     parts = {
         "objective_total": float(objective_value),
-        "objective_main": float(objective_value),
     }
     for key, contribution in term_contributions.items():
         parts[f"objective_term_{key}"] = float(contribution)
@@ -230,7 +220,6 @@ def evaluate_objective(
         feasible=feasible,
         violated_constraints=violated,
         objective_mode="weighted_sum",
-        objective_key=str(objective_key),
         constraint_violation_total=float(violation_total),
         term_values=term_values,
         term_contributions=term_contributions,
@@ -239,4 +228,4 @@ def evaluate_objective(
     )
 
 
-__all__ = ["ObjectiveEvaluation", "evaluate_objective", "objective_identity_from_config"]
+__all__ = ["ObjectiveEvaluation", "evaluate_objective", "objective_mode_from_config"]

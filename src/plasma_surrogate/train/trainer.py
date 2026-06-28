@@ -1,4 +1,4 @@
-"""Cycle1/M3 trainers for baseline models."""
+"""Mainline trainers for baseline surrogate models."""
 
 from __future__ import annotations
 
@@ -16,9 +16,16 @@ from plasma_surrogate.core.spatial_regions import align_bhw_batch, build_region_
 from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
+from plasma_surrogate.train.artifact_writers import (
+    save_numpy_optimization_diagnostics,
+    save_physics_terms,
+    save_resolved_physics,
+    save_training_progress,
+)
 from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy
 from plasma_surrogate.train.losses import laplacian2d
 from plasma_surrogate.train.spatial_features import materialize_case_spatial_batch
+from plasma_surrogate.train.target_contracts import resolve_mainline_selection_weights
 
 
 @dataclass
@@ -97,7 +104,10 @@ def _masked_r2(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> floa
 
 
 def _normalize_unet_selection_mode(raw_mode: Any) -> str:
-    return str(raw_mode).strip().lower()
+    mode = str(raw_mode).strip().lower()
+    if mode == "best_val_data_loss":
+        return "best_val_loss"
+    return mode
 
 
 def _unet_allvars_boundary_balance_score(
@@ -110,7 +120,6 @@ def _unet_allvars_boundary_balance_score(
     weights: dict[str, float],
     boundary_band_px: float,
     boundary_bonus_weight: float = 0.25,
-    target_region_by_var: dict[str, str] | None = None,
 ) -> tuple[float, dict[str, float]]:
     batch_size = int(pred.shape[0])
     if distance_any is None:
@@ -155,7 +164,6 @@ def _unet_allvars_boundary_balance_score(
         y_vars=list(y_vars),
         weights=dict(weights),
         plasma_mask=plasma_mask,
-        target_region_by_var=target_region_by_var,
     )
     parts.update(base_parts)
     if not np.isfinite(base_score):
@@ -738,142 +746,10 @@ def train_one_epoch_unet(
 
 
 class Trainer:
-    """Minimal trainer for cycle1/1.1/3 integration tests and benchmark."""
+    """Mainline trainer for NumPy surrogate training and benchmark workflows."""
 
     def __init__(self, output_dir: str | Path):
         self.store = ArtifactStore(output_dir)
-
-    def _save_physics_terms(self, history: list[dict[str, float]]) -> None:
-        if not history:
-            return
-        header = [
-            "epoch",
-            "train_phys_loss",
-            "train_poisson_loss",
-            "train_boundary_loss",
-            "train_boundary_operator_loss",
-            "train_rho_loss",
-        ]
-        rows = [
-            [
-                h.get("epoch", 0.0),
-                h.get("train_phys_loss", 0.0),
-                h.get("train_poisson_loss", 0.0),
-                h.get("train_boundary_loss", 0.0),
-                h.get("train_boundary_operator_loss", 0.0),
-                h.get("train_rho_loss", 0.0),
-            ]
-            for h in history
-        ]
-        self.store.save_csv("scalars/physics_terms.csv", header, rows)
-
-    def _save_optimization_diagnostics(self, rows: list[dict[str, float]]) -> None:
-        if not rows:
-            return
-        base_header = [
-            "epoch",
-            "grad_l2_total",
-            "active_weight_ratio",
-            "step_rel_hidden_mean",
-            "step_rel_output",
-            "step_rel_output_to_hidden",
-            "grad_scale_applied",
-            "grad_norm_pre_scale",
-            "grad_norm_post_scale",
-            "grad_norm_post_clip",
-            "clip_ratio",
-            "effective_clip_flag",
-            "stagnation_flag",
-            "head_refresh_applied",
-            "head_design_cond",
-            "chamber_band_effective_ratio",
-            "outside_boundary_sample_ratio",
-            "boundary_inside_sample_ratio",
-            "boundary_weight_effective_ratio",
-            "distance_transform_mode",
-            "loss_boundary_in",
-            "loss_deep_plasma",
-            "region_balance_applied",
-            "field_reg_loss_inside",
-            "field_reg_loss_boundary",
-            "field_reg_points_inside",
-            "field_reg_points_boundary",
-            "selection_valid_flag",
-            "selected_epoch_score",
-            "selected_epoch_flag",
-        ]
-        dynamic_grad = sorted(
-            {
-                str(k)
-                for row in rows
-                for k in row.keys()
-                if str(k).startswith("grad_l2_") and str(k) != "grad_l2_total"
-            }
-        )
-        dynamic_selection = sorted(
-            {
-                str(k)
-                for row in rows
-                for k in row.keys()
-                if str(k).startswith("selection_score_")
-            }
-        )
-        header = (
-            ["epoch", "grad_l2_total"]
-            + dynamic_grad
-            + [k for k in base_header if k not in {"epoch", "grad_l2_total"}]
-            + [k for k in dynamic_selection if k not in set(base_header)]
-        )
-        data = [[r.get(k, 0.0) for k in header] for r in rows]
-        self.store.save_csv("scalars/optimization_diagnostics.csv", header, data)
-
-    def _save_training_progress(
-        self,
-        *,
-        history: list[dict[str, float]],
-        diagnostics_rows: list[dict[str, float]],
-        total_epochs: int,
-        elapsed_seconds: float,
-        best_epoch: int | None = None,
-        best_score: float | None = None,
-    ) -> None:
-        if not history:
-            return
-        header = list(history[0].keys())
-        rows = [[h.get(k, "") for k in header] for h in history]
-        self.store.save_csv("scalars/metrics_partial.csv", header, rows)
-
-        latest = dict(history[-1])
-        latest["epoch_completed"] = int(latest.get("epoch", len(history) - 1))
-        latest["epochs_completed"] = int(len(history))
-        latest["total_epochs"] = int(total_epochs)
-        latest["elapsed_seconds"] = float(elapsed_seconds)
-        if best_epoch is not None:
-            latest["best_epoch_so_far"] = int(best_epoch)
-        if best_score is not None and np.isfinite(float(best_score)):
-            latest["best_score_so_far"] = float(best_score)
-        self.store.save_json("scalars/progress_latest.json", latest)
-
-        if diagnostics_rows:
-            diag_header = list(diagnostics_rows[0].keys())
-            diag_rows = [[row.get(k, "") for k in diag_header] for row in diagnostics_rows]
-            self.store.save_csv("scalars/optimization_diagnostics_partial.csv", diag_header, diag_rows)
-
-    def _save_resolved_physics(self, physics_cfg: dict[str, Any] | None) -> None:
-        cfg = dict(physics_cfg or {})
-        self.store.save_json(
-            "resolved_physics.json",
-            {
-                "enabled": bool(cfg.get("enabled", False)),
-                "resolved_terms": list(cfg.get("resolved_terms", [])),
-                "boundary_operator": {
-                    "enabled": bool(cfg.get("boundary_operator", {}).get("enabled", False)),
-                    "weight": float(cfg.get("boundary_operator", {}).get("weight", 0.0)),
-                    "mode": str(cfg.get("boundary_operator", {}).get("mode", "proxy")),
-                    "primary_qoi_key": str(cfg.get("boundary_operator", {}).get("primary_qoi_key", "Gamma_i")),
-                },
-            },
-        )
 
     def run_global(
         self,
@@ -897,8 +773,13 @@ class Trainer:
         grad_clip_norm: float = 0.0,
         grad_clip_cfg: dict[str, Any] | None = None,
         output_head_refresh_cfg: dict[str, Any] | None = None,
+        selection_cfg: dict[str, Any] | None = None,
     ) -> TrainOutput:
-        self._save_resolved_physics(physics_cfg)
+        save_resolved_physics(
+            store=self.store,
+            physics_cfg=physics_cfg,
+            boundary_operator_default_mode="proxy",
+        )
         y_train_field = y_train.reshape(y_train.shape[0], model.out_channels, *model.grid_shape).astype(np.float32)
         y_val_field = y_val.reshape(y_val.shape[0], model.out_channels, *model.grid_shape).astype(np.float32)
         history: list[dict[str, float]] = []
@@ -908,6 +789,25 @@ class Trainer:
         refresh_enabled = bool(refresh_cfg.get("enabled", False))
         refresh_every = int(max(int(refresh_cfg.get("every_n_epochs", 5)), 1))
         refresh_ridge = float(max(float(refresh_cfg.get("ridge", 1e-4)), 0.0))
+        selection_cfg = dict(selection_cfg or {})
+        selection_mode = _normalize_unet_selection_mode(selection_cfg.get("mode", "last"))
+        if selection_mode not in {"last", "best_val_allvars_balance", "best_val_loss"}:
+            raise ValueError(
+                "train.global_mlp.selection.mode must be one of: last, best_val_allvars_balance, best_val_loss"
+            )
+        selection_eval_every = int(max(int(selection_cfg.get("eval_every_n_epochs", 2)), 1))
+        selection_warmup = int(max(int(selection_cfg.get("warmup_epochs", 5)), 0))
+        y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
+        selection_weights = resolve_mainline_selection_weights(
+            selection_cfg=selection_cfg,
+            target_vars=list(y_vars),
+            cfg_prefix="train.global_mlp",
+        )
+        best_state = None
+        best_score = float("-inf")
+        best_loss = float("inf")
+        best_epoch = -1
+        selection_valid = selection_mode == "last"
         for epoch in range(epochs):
             epoch_physics_cfg = resolve_epoch_scaled_physics(
                 physics_cfg,
@@ -963,6 +863,45 @@ class Trainer:
                     )[0]
                 )
             val_loss = val_data_loss + val_phys_loss
+            val_balance_score = float("nan")
+            should_eval_selection = (
+                selection_mode == "best_val_allvars_balance"
+                and epoch >= selection_warmup
+                and ((epoch - selection_warmup) % selection_eval_every == 0)
+            )
+            if selection_mode == "best_val_loss" and np.isfinite(float(val_loss)) and float(val_loss) < best_loss:
+                best_loss = float(val_loss)
+                best_score = float(best_loss)
+                best_epoch = int(epoch)
+                best_state = _clone_model_state_numpy(model)
+                selection_valid = True
+            if should_eval_selection:
+                if supervised_mask is None:
+                    plasma_mask = np.ones(
+                        (int(val_fields.shape[0]), int(val_fields.shape[2]), int(val_fields.shape[3])),
+                        dtype=bool,
+                    )
+                else:
+                    plasma_mask = (
+                        align_bhw_batch(
+                            supervised_mask,
+                            batch_size=int(val_fields.shape[0]),
+                            key="supervised_mask",
+                        )
+                        > 0.5
+                    )
+                val_balance_score, _parts = allvars_plasma_balance_score(
+                    pred=np.asarray(val_fields, dtype=np.float32),
+                    target=np.asarray(y_val_field, dtype=np.float32),
+                    y_vars=list(y_vars),
+                    weights=selection_weights,
+                    plasma_mask=plasma_mask,
+                )
+                if np.isfinite(val_balance_score) and float(val_balance_score) > float(best_score):
+                    best_score = float(val_balance_score)
+                    best_epoch = int(epoch)
+                    best_state = _clone_model_state_numpy(model)
+                    selection_valid = True
             history.append(
                 {
                     "epoch": float(epoch),
@@ -976,6 +915,14 @@ class Trainer:
                     "val_loss": float(val_loss),
                     "val_data_loss": float(val_data_loss),
                     "val_phys_loss": float(val_phys_loss),
+                    "val_balance_score": float(val_balance_score),
+                    "selection_valid_flag": 1.0 if selection_valid else 0.0,
+                    "selected_epoch_flag": 0.0,
+                    "selected_epoch_score": float(
+                        best_loss
+                        if selection_mode == "best_val_loss" and best_epoch >= 0
+                        else (best_score if best_epoch >= 0 else 0.0)
+                    ),
                 }
             )
             diagnostics_rows.append(
@@ -995,14 +942,40 @@ class Trainer:
                     "stagnation_flag": 0.0,
                     "head_refresh_applied": float(head_refresh_applied),
                     "head_design_cond": float(head_design_cond),
+                    "selection_valid_flag": 1.0 if selection_valid else 0.0,
+                    "selected_epoch_flag": 0.0,
+                    "selected_epoch_score": float(
+                        best_loss
+                        if selection_mode == "best_val_loss" and best_epoch >= 0
+                        else (best_score if best_epoch >= 0 else 0.0)
+                    ),
                 }
+            )
+
+        selected_epoch_effective = int(best_epoch if best_epoch >= 0 else (len(history) - 1))
+        if selection_mode in {"best_val_allvars_balance", "best_val_loss"} and best_state is not None:
+            _restore_model_state_numpy(model, best_state)
+        if selection_mode in {"best_val_allvars_balance", "best_val_loss"} and best_state is None:
+            selection_valid = False
+        for row in history:
+            row["selected_epoch_flag"] = 1.0 if int(row.get("epoch", -1)) == selected_epoch_effective else 0.0
+            row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
+            row["selection_mode_effective"] = selection_mode
+            row["selected_epoch_score"] = float(
+                best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0)
+            )
+        for row in diagnostics_rows:
+            row["selected_epoch_flag"] = 1.0 if int(row.get("epoch", -1)) == selected_epoch_effective else 0.0
+            row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
+            row["selected_epoch_score"] = float(
+                best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0)
             )
 
         header = list(history[0].keys()) if history else ["epoch", "train_loss", "val_loss"]
         rows = [[h[k] for k in header] for h in history]
         self.store.save_csv("scalars/metrics.csv", header, rows)
-        self._save_physics_terms(history)
-        self._save_optimization_diagnostics(diagnostics_rows)
+        save_physics_terms(store=self.store, history=history)
+        save_numpy_optimization_diagnostics(store=self.store, rows=diagnostics_rows)
         return TrainOutput(history=history, model=model)
 
     def run_unet(
@@ -1033,7 +1006,11 @@ class Trainer:
         selection_target_override: np.ndarray | None = None,
         selection_pred_additive: np.ndarray | None = None,
     ) -> TrainOutput:
-        self._save_resolved_physics(physics_cfg)
+        save_resolved_physics(
+            store=self.store,
+            physics_cfg=physics_cfg,
+            boundary_operator_default_mode="proxy",
+        )
         history: list[dict[str, float]] = []
         diagnostics_rows: list[dict[str, float]] = []
         contract = dict(optimizer_contract or {})
@@ -1050,9 +1027,9 @@ class Trainer:
         patience_epochs = int(max(int(fail_fast_cfg.get("patience_epochs", 10)), 1))
         selection_cfg = dict(selection_cfg or {})
         selection_mode = _normalize_unet_selection_mode(selection_cfg.get("mode", "last"))
-        if selection_mode not in {"last", "best_val_allvars_balance"}:
+        if selection_mode not in {"last", "best_val_allvars_balance", "best_val_loss"}:
             raise ValueError(
-                "train.unet.selection.mode must be one of: last, best_val_allvars_balance"
+                "train.unet.selection.mode must be one of: last, best_val_allvars_balance, best_val_loss"
             )
         selection_eval_every = int(max(int(selection_cfg.get("eval_every_n_epochs", 2)), 1))
         selection_warmup = int(max(int(selection_cfg.get("warmup_epochs", 5)), 0))
@@ -1095,6 +1072,7 @@ class Trainer:
             unet_opt_effective = dict(unet_opt)
         best_state = None
         best_score = float("-inf")
+        best_loss = float("inf")
         best_epoch = -1
         selection_valid = selection_mode == "last"
         best_score_parts: dict[str, float] = {}
@@ -1179,6 +1157,13 @@ class Trainer:
                 and epoch >= selection_warmup
                 and ((epoch - selection_warmup) % selection_eval_every == 0)
             )
+            if selection_mode == "best_val_loss" and np.isfinite(float(val_total)) and float(val_total) < best_loss:
+                best_loss = float(val_total)
+                best_score = float(best_loss)
+                best_epoch = int(epoch)
+                best_state = _clone_model_state_numpy(model)
+                selection_valid = True
+                best_score_parts = {}
             if should_eval_selection:
                 target_for_selection = (
                     np.asarray(selection_target_override, dtype=np.float32)
@@ -1197,9 +1182,6 @@ class Trainer:
                     weights=selection_allvars_weights,
                     boundary_band_px=selection_band_px,
                     boundary_bonus_weight=0.0,
-                    target_region_by_var=dict(
-                        dict(dict(loss_cfg or {}).get("supervised", {})).get("target_region_by_var", {})
-                    ),
                 )
                 val_balance_score = float(score)
                 selection_score_te = float(parts.get("r2_Te_plasma", float("nan")))
@@ -1273,7 +1255,8 @@ class Trainer:
                         "selected_epoch_flag": 0.0,
                     }
                 )
-            self._save_training_progress(
+            save_training_progress(
+                store=self.store,
                 history=history,
                 diagnostics_rows=diagnostics_rows,
                 total_epochs=int(epochs),
@@ -1290,11 +1273,11 @@ class Trainer:
                     break
 
         selected_epoch_effective = int(best_epoch if best_epoch >= 0 else (len(history) - 1))
-        if selection_mode == "best_val_allvars_balance" and best_state is not None:
+        if selection_mode in {"best_val_allvars_balance", "best_val_loss"} and best_state is not None:
             _restore_model_state_numpy(model, best_state)
         for h in history:
             h["selected_epoch_flag"] = 1.0 if int(h["epoch"]) == selected_epoch_effective else 0.0
-            h["selected_epoch_score"] = float(best_score if best_epoch >= 0 else 0.0)
+            h["selected_epoch_score"] = float(best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0))
             h["selection_valid_flag"] = 1.0 if selection_valid else 0.0
             h["selection_mode_effective"] = selection_mode
             h["unet_optimizer_effective"] = str(unet_opt_effective.get("type", "none"))
@@ -1304,7 +1287,7 @@ class Trainer:
         for row in diagnostics_rows:
             row["selected_epoch_flag"] = 1.0 if int(row["epoch"]) == selected_epoch_effective else 0.0
             row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
-            row["selected_epoch_score"] = float(best_score if best_epoch >= 0 else 0.0)
+            row["selected_epoch_score"] = float(best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0))
             if int(row["epoch"]) == selected_epoch_effective and best_epoch >= 0:
                 row["selection_score_Te"] = float(best_score_parts.get("r2_Te_plasma", 0.0))
                 row["selection_score_phi"] = float(best_score_parts.get("r2_phi_plasma", 0.0))
@@ -1312,9 +1295,9 @@ class Trainer:
         header = list(history[0].keys()) if history else ["epoch", "train_loss", "val_loss"]
         rows = [[h[k] for k in header] for h in history]
         self.store.save_csv("scalars/metrics.csv", header, rows)
-        self._save_physics_terms(history)
+        save_physics_terms(store=self.store, history=history)
         if diagnostics_enabled:
-            self._save_optimization_diagnostics(diagnostics_rows)
+            save_numpy_optimization_diagnostics(store=self.store, rows=diagnostics_rows)
         return TrainOutput(history=history, model=model)
 
 

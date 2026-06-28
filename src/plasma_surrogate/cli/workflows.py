@@ -16,11 +16,11 @@ from plasma_surrogate.core.model_families import COND_ONLY_TORCH_MODELS, GRID_TO
 from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.data_cleaning_audit import run_data_audit
 from plasma_surrogate.core.input_modes import (
+    DESCRIPTOR_PROFILE_KEY,
     GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
     INPUT_MODE_EFFECTIVE_KEY,
     STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
-    STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
-    STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+    LATENT_PROFILE_KEY,
     attach_runtime_schema_hashes,
     build_input_mode_effective_metadata,
     load_checkpoint_metadata_with_input_mode,
@@ -30,12 +30,9 @@ from plasma_surrogate.core.model_input_policy import resolve_effective_input_mod
 from plasma_surrogate.core.physics_contract import build_physics_cfg
 from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.data.geometry_provider import build_geometry_provider
-from plasma_surrogate.eval.metrics_builder import (
-    build_eval_metrics_payload,
-    build_region_metrics,
-    build_single_case_physics_metrics,
-    build_viz_tables_payload,
-)
+from plasma_surrogate.eval.core_metrics import build_region_metrics
+from plasma_surrogate.eval.payloads import build_eval_metrics_payload, build_viz_tables_payload
+from plasma_surrogate.eval.physics_metrics import build_single_case_physics_metrics
 from plasma_surrogate.infer.engine import InferenceEngine
 from plasma_surrogate.infer.engine_builder import build_inference_engine
 from plasma_surrogate.infer.cases import InferenceCase, parse_batch_cases, parse_single_case
@@ -112,7 +109,7 @@ def _build_inference_engine_from_bundle(
     model_cfg = cfg.get("model", {})
     inf_cfg = cfg.get("inference", {})
     ood_cfg = dict(inf_cfg.get("ood", {"poisson_residual_limit": 1e2}) or {})
-    for key in ("qoi", "postprocess"):
+    for key in ("qoi", "postprocess", "diagnostics"):
         if key in inf_cfg:
             ood_cfg[key] = dict(inf_cfg.get(key, {}) or {})
     resolved_model_name = str(model_name or model_cfg.get("name", "unet"))
@@ -221,23 +218,12 @@ def _resolve_physics_cfg(cfg: dict[str, Any], dataset_root: Path) -> dict[str, A
 
 
 def _resolve_optimize_backend(opt_cfg: dict[str, Any]) -> str:
+    if "sampler" in opt_cfg:
+        raise ValueError("inference.optimize.sampler is removed; use inference.optimize.backend")
     backend = opt_cfg.get("backend")
     if backend is not None:
         return str(backend)
-    legacy_sampler = opt_cfg.get("sampler")
-    if legacy_sampler is None:
-        return "random"
-    sampler = str(legacy_sampler).strip().lower()
-    if sampler == "random":
-        return "random"
-    if sampler == "optuna_grid":
-        return "optuna"
-    if sampler == "csv":
-        return "csv"
-    raise ValueError(
-        "Unsupported inference.optimize.sampler. "
-        "Use backend='random|optuna|csv|two_stage' (legacy sampler supports random|optuna_grid|csv)."
-    )
+    return "random"
 
 
 def _load_target_role_schema(run_dir: Path) -> dict[str, Any]:
@@ -313,8 +299,9 @@ def _inference_case_summary_row(*, role: str, case: InferenceCase, result: Any) 
         "uniformity": _summary_float(qoi.get("uniformity")),
         "boundary_gamma_uniformity": _summary_float(qoi.get("boundary_gamma_uniformity")),
         "poisson_residual_norm": _summary_float(diagnostics.get("poisson_residual_norm")),
-        "bc_phi_mae": _summary_float(diagnostics.get("bc_phi_mae")),
+        "bc_potential_mae": _summary_float(diagnostics.get("bc_potential_mae")),
         "boundary_operator_proxy_loss": _summary_float(diagnostics.get("boundary_operator_proxy_loss")),
+        "physics_diagnostics_available": bool(diagnostics.get("physics_diagnostics_available", False)),
         "cond": dict(case.cond),
         "geom": dict(case.geom),
         "axis": dict(case.axis),
@@ -347,8 +334,9 @@ def _write_inference_case_summaries(run_dir: Path, rows: list[dict[str, Any]]) -
         "uniformity",
         "boundary_gamma_uniformity",
         "poisson_residual_norm",
-        "bc_phi_mae",
+        "bc_potential_mae",
         "boundary_operator_proxy_loss",
+        "physics_diagnostics_available",
     ]
     csv_rows = [["" if row.get(key) is None else row.get(key, "") for key in csv_header] for row in rows]
     csv_path = store.save_csv("cases_summary.csv", csv_header, csv_rows)
@@ -580,7 +568,7 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
             "model_cfg": dict(model_cfg),
         }
     else:
-        raise ValueError(f"Unsupported model.name for cycle1: {model_name}")
+        raise ValueError(f"Unsupported model.name for mainline train workflow: {model_name}")
 
     dispatch = run_model_train_predict(
         TrainDispatchContext(
@@ -630,10 +618,10 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
                 input_mode_meta_effective.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "")
             ),
             structure_descriptor_profile_effective=str(
-                input_mode_meta_effective.get(STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY, "none")
+                input_mode_meta_effective.get(DESCRIPTOR_PROFILE_KEY, "none")
             ),
             structure_latent_profile_effective=str(
-                input_mode_meta_effective.get(STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY, "none")
+                input_mode_meta_effective.get(LATENT_PROFILE_KEY, "none")
             ),
         )
     )
@@ -860,7 +848,6 @@ def run_evaluate(config_path: str | Path) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     if metrics_path.exists():
         payload = dict(json.loads(metrics_path.read_text(encoding="utf-8")))
-    ckpt_meta_path = run_dir / "checkpoints" / "meta.json"
     model_name = normalize_model_name(dict(ctx.cfg.get("model", {})).get("name", "global_mlp"))
     bundle = ctx.bundle
     input_mode_meta = build_input_mode_effective_metadata(ctx.cfg)
@@ -906,7 +893,7 @@ def run_pipeline(config_path: str | Path) -> dict[str, Any]:
         if fn is None:
             raise ValueError(f"pipeline.stages contains unsupported stage: {stage}")
         outputs[key] = fn(config_path)
-    run_dir = Path(str(cfg.get("run_dir", "runs/cycle1")))
+    run_dir = Path(str(cfg.get("run_dir", "runs/mainline")))
     _write_stage_manifest(
         run_dir=run_dir,
         stage="pipeline",
@@ -922,7 +909,7 @@ def run_viz(config_path: str | Path) -> dict[str, Any]:
     with Path(config_path).open("r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f) or {}
 
-    run_dir = Path(cfg.get("run_dir", "runs/cycle1"))
+    run_dir = Path(cfg.get("run_dir", "runs/mainline"))
     viz = VizRunner(run_dir / "viz")
     target_role_schema = _load_target_role_schema(run_dir)
 
@@ -1004,22 +991,38 @@ def run_viz(config_path: str | Path) -> dict[str, Any]:
                 table_payload["diag_header"],
                 table_payload["diag_rows"],
             )
-            labels = [str(r["case_key"]) for r in diag_rows[:20]]
-            resid_vals = [float(r["poisson_residual_norm"]) for r in diag_rows[:20]]
-            bc_vals = [float(r["bc_phi_mae"]) for r in diag_rows[:20]]
-            resid_map_vals = [float(r["poisson_residual_map_l2"]) for r in diag_rows[:20]]
-            plots.append(str(viz.plot_metric_bar(labels, resid_vals, "poisson_residual", rel_path="plots/poisson_residual_bar.png")))
-            plots.append(str(viz.plot_metric_bar(labels, bc_vals, "bc_phi_mae", rel_path="plots/bc_phi_mae_bar.png")))
-            plots.append(
-                str(
-                    viz.plot_metric_bar(
-                        labels,
-                        resid_map_vals,
-                        "poisson_residual_map_l2",
-                        rel_path="plots/poisson_residual_map_l2_bar.png",
-                    )
+            plot_rows = [
+                r
+                for r in diag_rows[:20]
+                if bool(r.get("physics_diagnostics_available", True))
+                and np.isfinite(float(r.get("poisson_residual_norm", float("nan"))))
+            ]
+            if plot_rows:
+                labels = [str(r["case_key"]) for r in plot_rows]
+                resid_vals = [float(r["poisson_residual_norm"]) for r in plot_rows]
+                bc_vals = [float(r["bc_potential_mae"]) for r in plot_rows]
+                plots.append(
+                    str(viz.plot_metric_bar(labels, resid_vals, "poisson_residual", rel_path="plots/poisson_residual_bar.png"))
                 )
-            )
+                plots.append(
+                    str(viz.plot_metric_bar(labels, bc_vals, "bc_potential_mae", rel_path="plots/bc_potential_mae_bar.png"))
+                )
+                map_rows = [
+                    r
+                    for r in plot_rows
+                    if np.isfinite(float(r.get("poisson_residual_map_l2", float("nan"))))
+                ]
+                if map_rows:
+                    plots.append(
+                        str(
+                            viz.plot_metric_bar(
+                                [str(r["case_key"]) for r in map_rows],
+                                [float(r["poisson_residual_map_l2"]) for r in map_rows],
+                                "poisson_residual_map_l2",
+                                rel_path="plots/poisson_residual_map_l2_bar.png",
+                            )
+                        )
+                    )
 
         if region_rows:
             table_payload = build_viz_tables_payload(diag_rows=diag_rows, region_rows=region_rows)

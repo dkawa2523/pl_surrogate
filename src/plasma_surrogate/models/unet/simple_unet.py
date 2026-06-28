@@ -125,12 +125,12 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         if output_heads_mode not in {"shared", "split_density_field"}:
             raise ValueError("train.unet.model_cfg.output_heads.mode must be one of: shared, split_density_field")
         if output_heads_mode == "split_density_field":
-            allowed = {"ne", "ni", "log_ne", "log_ni", "Te", "phi"}
+            allowed = {"ne", "ni", "Te", "phi"}
             missing = [name for name in self.output_keys if name not in allowed]
             if missing:
                 raise ValueError(
                     "train.unet.model_cfg.output_heads.mode=split_density_field supports "
-                    f"only [ne, ni, log_ne, log_ni, Te, phi], got unsupported keys: {missing}"
+                    f"only [ne, ni, Te, phi], got unsupported keys: {missing}"
                 )
 
         class _ConvUNetDepth1Backbone(nn.Module):
@@ -259,8 +259,6 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                 name_to_tensor = {
                     "ne": density[:, 0:1],
                     "ni": density[:, 1:2],
-                    "log_ne": density[:, 0:1],
-                    "log_ni": density[:, 1:2],
                     "Te": field[:, 0:1],
                     "phi": field[:, 1:2],
                 }
@@ -269,7 +267,7 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                     if name not in name_to_tensor:
                         raise ValueError(
                             "split_density_field head requires output_keys among "
-                            f"[ne, ni, log_ne, log_ni, Te, phi], got {output_keys}"
+                            f"[ne, ni, Te, phi], got {output_keys}"
                         )
                     ordered.append(name_to_tensor[name])
                 out = torch.cat(ordered, dim=1)

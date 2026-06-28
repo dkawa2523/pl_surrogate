@@ -118,7 +118,7 @@ def test_unetpp_attn_mainline_accepts_valid_dynamic_allvars(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == set(custom_vars)
-    contract = out.extra_artifacts.get("unet_contract_effective", {})
+    contract = out.extra_artifacts.get("model_contracts", {}).get("unet", {})
     assert contract.get("target_family_effective") == "allvars"
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}
 
@@ -129,4 +129,13 @@ def test_unetpp_attn_rejects_non_shared_head(tmp_path: Path) -> None:
     cfg["model_cfg"]["output_heads"] = {"mode": "split_density_field"}
     ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
     with pytest.raises(ValueError, match="output_heads.mode must be shared"):
+        run_model_train_predict(ctx)
+
+
+def test_unetpp_attn_rejects_removed_product_loss_key(tmp_path: Path) -> None:
+    ctx = _ctx(tmp_path)
+    ctx.loss_cfg = {"supervised": {"type": "mse", "target_region_by_var": {"ne": "all_domain"}}}
+    ctx.run_cfg = {"train": {"unetpp_attn": _valid_cfg(ctx.y_vars)}}
+
+    with pytest.raises(ValueError, match="target_region_by_var"):
         run_model_train_predict(ctx)

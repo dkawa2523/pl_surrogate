@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy
+from plasma_surrogate.train.loss_contract import REMOVED_SUPERVISED_KEYS
 from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
 
 
@@ -147,128 +148,27 @@ def test_compose_supervised_numpy_masked_huber_returns_dynamic_target_grads():
     assert all(grads[name].shape == pred[name].shape for name in pred)
 
 
-def test_compose_supervised_numpy_region_balance_tracks_region_components():
-    pred = {
-        "electron_density": np.array([[[1.0], [3.0], [5.0], [7.0]]], dtype=np.float32),
-        "plasma_potential": np.array([[[1.0], [1.0], [1.0], [1.0]]], dtype=np.float32),
-    }
-    target = {name: np.zeros_like(value) for name, value in pred.items()}
-    mask = np.ones((1, 4, 1), dtype=np.float32)
-    distance = np.array([[[0.5], [1.5], [12.0], [14.0]]], dtype=np.float32)
+@pytest.mark.parametrize(
+    "removed_key",
+    REMOVED_SUPERVISED_KEYS,
+)
+def test_compose_supervised_numpy_rejects_research_supervised_keys(removed_key):
+    pred = {"electron_density": np.ones((1, 2, 2), dtype=np.float32)}
+    target = {"electron_density": np.zeros((1, 2, 2), dtype=np.float32)}
 
-    loss, grads, per_var = compose_supervised_numpy(
-        pred,
-        target,
-        y_order=["electron_density", "plasma_potential"],
-        loss_cfg={
-            "supervised": {
-                "type": "mse",
-                "region_balance": {
-                    "enabled": True,
-                    "boundary_in_px": 2.0,
-                    "deep_plasma_px": 10.0,
-                    "vars": ["electron_density"],
-                    "weight_boundary_in": 0.6,
-                    "weight_deep_plasma": 0.4,
-                },
-            }
-        },
-        mask=mask,
-        distance_any=distance,
-    )
-
-    assert np.isfinite(loss)
-    assert np.isfinite(np.sum(grads["plasma_potential"]))
-    assert per_var["__region_balance_applied__"] == pytest.approx(1.0)
-    assert "__region_boundary_in__" in per_var
-    assert "__region_deep_plasma__" in per_var
-
-
-def test_compose_supervised_numpy_positive_penalty_accepts_arbitrary_target_name():
-    pred = {
-        "electron_density": np.array([[[-1.0]]], dtype=np.float32),
-        "plasma_potential": np.array([[[-1.0]]], dtype=np.float32),
-    }
-    target = {name: np.zeros_like(value) for name, value in pred.items()}
-
-    base_loss, base_grads, _ = compose_supervised_numpy(
-        pred,
-        target,
-        y_order=["electron_density", "plasma_potential"],
-        loss_cfg={"supervised": {"type": "mse"}},
-        mask=np.ones((1, 1), dtype=np.float32),
-    )
-    pos_loss, pos_grads, per_var = compose_supervised_numpy(
-        pred,
-        target,
-        y_order=["electron_density", "plasma_potential"],
-        loss_cfg={
-            "supervised": {
-                "type": "mse",
-                "positive_penalty": {
-                    "enabled": True,
-                    "vars": ["electron_density"],
-                    "floor": 0.0,
-                    "lambda": 0.5,
-                },
-            }
-        },
-        mask=np.ones((1, 1), dtype=np.float32),
-    )
-
-    assert pos_loss > base_loss
-    assert np.mean(np.abs(pos_grads["electron_density"])) > np.mean(np.abs(base_grads["electron_density"]))
-    assert np.allclose(pos_grads["plasma_potential"], base_grads["plasma_potential"], atol=1e-6)
-    assert per_var["__positive_penalty__"] > 0.0
-
-
-def test_compose_supervised_numpy_spatial_consistency_multiscale_runs():
-    pred = {
-        "electron_density": np.array(
-            [[[0.0, 2.0, 0.0, 2.0], [0.0, 2.0, 0.0, 2.0], [0.0, 2.0, 0.0, 2.0], [0.0, 2.0, 0.0, 2.0]]],
-            dtype=np.float32,
+    with pytest.raises(ValueError, match=removed_key):
+        compose_supervised_numpy(
+            pred,
+            target,
+            y_order=["electron_density"],
+            loss_cfg={"supervised": {"type": "mse", removed_key: {"enabled": True}}},
+            mask=np.ones((2, 2), dtype=np.float32),
         )
-    }
-    target = {
-        "electron_density": np.array(
-            [[[0.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0], [0.0, 1.0, 0.0, 1.0]]],
-            dtype=np.float32,
-        )
-    }
-    mask = np.ones((1, 4, 4), dtype=np.float32)
-    distance = np.ones((1, 4, 4), dtype=np.float32)
-
-    loss, grads, per_var = compose_supervised_numpy(
-        pred,
-        target,
-        y_order=["electron_density"],
-        loss_cfg={
-            "supervised": {
-                "type": "mse",
-                "mask": "plasma_only",
-                "spatial_consistency": {
-                    "enabled": True,
-                    "vars": ["electron_density"],
-                    "mode": "grad_huber",
-                    "lambda": 0.1,
-                    "delta": 1.0,
-                    "apply_region": "plasma_only",
-                    "multiscale": {"enabled": True, "scales": [1, 2], "scale_weights": [1.0, 0.5]},
-                },
-            }
-        },
-        mask=mask,
-        distance_any=distance,
-    )
-
-    assert np.isfinite(loss)
-    assert np.all(np.isfinite(grads["electron_density"]))
-    assert per_var["__spatial_consistency__"] > 0.0
 
 
-def test_compose_supervised_numpy_protocol_v2_spatial_consistency_multiscale_runs():
+def test_compose_supervised_numpy_protocol_v2_uses_standard_loss_only():
     loss_cfg = resolve_loss_protocol(
-        {"protocol": "plasma_surrogate_v2", "supervised": {"positive_penalty": {"enabled": False}}},
+        {"protocol": "plasma_surrogate_v2"},
         target_role_schema={
             "targets": [
                 {
@@ -304,60 +204,14 @@ def test_compose_supervised_numpy_protocol_v2_spatial_consistency_multiscale_run
 
     assert np.isfinite(loss)
     assert np.all(np.isfinite(grads["electron_density"]))
-    assert per_var["__spatial_consistency__"] > 0.0
-
-
-def test_compose_supervised_numpy_target_region_by_var_all_domain_includes_chamber():
-    pred = {"magnetic_field": np.zeros((1, 2, 2), dtype=np.float32)}
-    target = {"magnetic_field": np.array([[[0.0, 0.0], [2.0, 2.0]]], dtype=np.float32)}
-    mask = np.array([[1.0, 1.0], [0.0, 0.0]], dtype=np.float32)
-
-    plasma_loss, _, plasma_per_var = compose_supervised_numpy(
-        pred,
-        target,
-        y_order=["magnetic_field"],
-        loss_cfg={"supervised": {"type": "mse"}},
-        mask=mask,
-    )
-    all_loss, _, all_per_var = compose_supervised_numpy(
-        pred,
-        target,
-        y_order=["magnetic_field"],
-        loss_cfg={"supervised": {"type": "mse", "target_region_by_var": {"magnetic_field": "all_domain"}}},
-        mask=mask,
-    )
-
-    assert plasma_loss == pytest.approx(0.0)
-    assert plasma_per_var["magnetic_field"] == pytest.approx(0.0)
-    assert all_loss > 0.0
-    assert all_per_var["magnetic_field"] > plasma_per_var["magnetic_field"]
-
-
-def test_compose_supervised_numpy_target_region_by_var_rejects_unknown_or_bad_region():
-    pred = {"magnetic_field": np.zeros((1, 1, 1), dtype=np.float32)}
-    target = {"magnetic_field": np.zeros((1, 1, 1), dtype=np.float32)}
-
-    with pytest.raises(ValueError, match="target_region_by_var contains unknown vars"):
-        compose_supervised_numpy(
-            pred,
-            target,
-            y_order=["magnetic_field"],
-            loss_cfg={"supervised": {"target_region_by_var": {"other": "all_domain"}}},
-        )
-    with pytest.raises(ValueError, match="target_region_by_var values"):
-        compose_supervised_numpy(
-            pred,
-            target,
-            y_order=["magnetic_field"],
-            loss_cfg={"supervised": {"target_region_by_var": {"magnetic_field": "coil_near"}}},
-        )
+    assert "__spatial_consistency__" not in per_var
 
 
 def test_compose_supervised_removed_region_weighting_rejects():
     pred = {"plasma_potential": np.ones((1, 2, 2), dtype=np.float32)}
     target = {"plasma_potential": np.zeros((1, 2, 2), dtype=np.float32)}
 
-    with pytest.raises(ValueError, match="supervised.region_weighting is removed"):
+    with pytest.raises(ValueError, match="region_weighting"):
         compose_supervised_numpy(
             pred,
             target,

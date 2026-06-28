@@ -172,7 +172,7 @@ class PlasmaHead:
             )
         elif self.mode == "deeponet_poisson":
             if deeponet_head is None:
-                raise NotImplementedError("deeponet_poisson head is not implemented in Cycle 1.4 without deeponet_head")
+                raise NotImplementedError("deeponet_poisson head requires deeponet_head")
             if cond_vec is None:
                 raise ValueError("deeponet_poisson requires cond_vec for deeponet_head prediction")
             cond_arr = np.asarray(cond_vec, dtype=np.float32)

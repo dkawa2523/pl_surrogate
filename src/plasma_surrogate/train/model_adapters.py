@@ -27,9 +27,16 @@ class ModelAdapter:
     name: str
     model_names: tuple[str, ...]
     config_key: str
+    runner_name: str
 
     def matches(self, model_name: Any) -> bool:
         return normalize_model_name(model_name) in self.model_names
+
+    def run(self, ctx: Any) -> Any:
+        from plasma_surrogate.train import model_dispatch
+
+        runner = getattr(model_dispatch, self.runner_name)
+        return runner(ctx, adapter=self)
 
 
 MODEL_ADAPTERS: tuple[ModelAdapter, ...] = (
@@ -37,21 +44,25 @@ MODEL_ADAPTERS: tuple[ModelAdapter, ...] = (
         name=TRAIN_ADAPTER_GLOBAL_MLP,
         model_names=("global_mlp",),
         config_key="global_mlp",
+        runner_name="_run_global_mlp_train_predict",
     ),
     ModelAdapter(
         name=TRAIN_ADAPTER_POD_DEEPONET,
         model_names=tuple(POD_DEEPONET_FAMILY_MODELS),
         config_key="deeponet_pod",
+        runner_name="_run_pod_deeponet_train_predict",
     ),
     ModelAdapter(
         name=TRAIN_ADAPTER_GRID_TORCH,
         model_names=tuple(GRID_TORCH_MODELS),
         config_key="model_name",
+        runner_name="_run_grid_torch_adapter_train_predict",
     ),
     ModelAdapter(
         name=TRAIN_ADAPTER_DEEPONET_PLASMA,
         model_names=("deeponet_plasma",),
         config_key="deeponet_plasma",
+        runner_name="_run_deeponet_plasma_train_predict",
     ),
 )
 

@@ -15,7 +15,7 @@ from plasma_surrogate.data.geometry_provider import PROVIDER_MODE_FIXED, PROVIDE
 from plasma_surrogate.infer.objectives import (
     ObjectiveEvaluation,
     evaluate_objective,
-    objective_identity_from_config,
+    objective_mode_from_config,
 )
 
 _PART_KEY_RE = re.compile(r"^part\.[A-Za-z0-9_\-]+\.(tx|ty|scale_x|scale_y|rotation_deg|fillet)$")
@@ -148,14 +148,18 @@ class OptimizeResult:
     trials: list[dict[str, Any]]
     backend: str = "random"
     backend_cfg: dict[str, Any] = field(default_factory=dict)
-    objective_key: str = "uniformity"
     objective_mode: str = "weighted_sum"
-    best_objective_value: float | None = None
-    best_search_value: float | None = None
-    best_feasible: bool = True
-    best_violated_constraints: list[str] = field(default_factory=list)
+    objective_value: float | None = None
+    search_value: float | None = None
+    feasible: bool = True
+    violated_constraints: list[str] = field(default_factory=list)
+    constraint_violation_total: float | None = None
     output_cfg: dict[str, Any] = field(default_factory=dict)
     invalid_trial_count: int = 0
+
+    @property
+    def status(self) -> str:
+        return "succeeded" if self.objective_value is not None and np.isfinite(float(self.objective_value)) else "failed"
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -187,7 +191,6 @@ def _trial_record(
         "objective_value": float(evaluation.objective_value),
         "search_value": float(evaluation.search_value),
         "objective_mode": str(evaluation.objective_mode),
-        "objective_key": str(evaluation.objective_key),
         "feasible": bool(evaluation.feasible),
         "violated_constraints": list(evaluation.violated_constraints),
         "constraint_violation_total": float(evaluation.constraint_violation_total),
@@ -274,8 +277,9 @@ def _best_trial(trials: list[dict[str, Any]]) -> dict[str, Any]:
     if not trials:
         return {"cond": {}, "geom_param": {}, "objective_value": float("inf"), "feasible": False}
     feasible = [t for t in trials if bool(t.get("feasible", False))]
-    pool = feasible if feasible else list(trials)
-    return min(pool, key=_trial_objective_value)
+    finite_search = [t for t in trials if np.isfinite(_trial_search_value(t))]
+    pool = feasible if feasible else finite_search if finite_search else list(trials)
+    return min(pool, key=_trial_search_value)
 
 
 def _evaluate_candidate(
@@ -302,7 +306,13 @@ def _evaluate_candidate(
             _trial_error_record(cond=cond, geom_param=geom_param, error=exc),
             True,
         )
-    evaluation = evaluate_objective(result, objective_cfg=objective_cfg, constraints_cfg=constraints_cfg)
+    try:
+        evaluation = evaluate_objective(result, objective_cfg=objective_cfg, constraints_cfg=constraints_cfg)
+    except ValueError as exc:
+        return (
+            _trial_error_record(cond=cond, geom_param=geom_param, error=exc),
+            True,
+        )
     invalid = not np.isfinite(float(evaluation.objective_value))
     return _trial_record(cond=cond, geom_param=geom_param, evaluation=evaluation, result=result), invalid
 
@@ -317,20 +327,20 @@ def _result_from_trials(
     invalid_trial_count: int,
 ) -> OptimizeResult:
     best = _best_trial(trials)
-    best_objective_value = _trial_objective_value(best)
-    best_search_value = _trial_search_value(best)
-    objective_key, objective_mode = objective_identity_from_config(objective_cfg)
+    objective_value = _trial_objective_value(best)
+    search_value = _trial_search_value(best)
+    objective_mode = objective_mode_from_config(objective_cfg)
     return OptimizeResult(
         best_cond=dict(best.get("cond", {}) or {}),
         best_geom_param=dict(best.get("geom_param", {}) or {}),
-        best_objective_value=float(best_objective_value),
-        best_search_value=float(best_search_value),
-        best_feasible=bool(best.get("feasible", False)),
-        best_violated_constraints=[str(v) for v in list(best.get("violated_constraints", []) or [])],
+        objective_value=float(objective_value),
+        search_value=float(search_value),
+        feasible=bool(best.get("feasible", False)),
+        violated_constraints=[str(v) for v in list(best.get("violated_constraints", []) or [])],
+        constraint_violation_total=_float_or_none(best.get("constraint_violation_total")),
         trials=trials,
         backend=backend,
         backend_cfg=dict(backend_cfg or {}),
-        objective_key=str(best.get("objective_key", objective_key) or objective_key),
         objective_mode=str(best.get("objective_mode", objective_mode) or objective_mode),
         output_cfg=dict(output_cfg),
         invalid_trial_count=int(invalid_trial_count),

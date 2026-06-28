@@ -119,7 +119,7 @@ def test_ffno_mainline_accepts_valid_dynamic_allvars(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == set(custom_vars)
-    contract = out.extra_artifacts.get("ffno_contract_effective", {})
+    contract = out.extra_artifacts.get("model_contracts", {}).get("ffno", {})
     assert contract.get("target_family_effective") == "allvars"
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}
 
@@ -144,6 +144,6 @@ def test_ffno_mainline_accepts_target_subset(
     out = run_model_train_predict(ctx)
 
     assert set(out.metrics.keys()) == {"density", "temperature"}
-    contract = out.extra_artifacts.get("ffno_contract_effective", {})
+    contract = out.extra_artifacts.get("model_contracts", {}).get("ffno", {})
     assert contract.get("target_vars_effective") == ["density", "temperature"]
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}

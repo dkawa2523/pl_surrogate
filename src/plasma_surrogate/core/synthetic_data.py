@@ -1,4 +1,4 @@
-"""Synthetic dataset builder for cycle1 end-to-end commands."""
+"""Synthetic dataset builder for mainline end-to-end commands."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ class SyntheticDataset:
 
 
 def synthetic_target_metadata() -> list[dict[str, Any]]:
-    """Metadata for the built-in synthetic compatibility fixture."""
+    """Metadata for the built-in synthetic fixture."""
 
     return [
         {

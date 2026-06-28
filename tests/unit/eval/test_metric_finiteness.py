@@ -34,6 +34,15 @@ def test_masked_metrics_return_nan_when_active_prediction_is_nonfinite() -> None
     assert math.isnan(r2_masked(y_true, y_pred, mask))
 
 
+def test_masked_metrics_return_nan_when_mask_has_no_active_points() -> None:
+    y_true = np.ones((2, 2), dtype=np.float32)
+    y_pred = np.ones((2, 2), dtype=np.float32)
+    mask = np.zeros((2, 2), dtype=np.float32)
+
+    assert math.isnan(rmse_masked(y_true, y_pred, mask))
+    assert math.isnan(r2_masked(y_true, y_pred, mask))
+
+
 def test_finite_pair_stats_counts_masked_nonfinite_values() -> None:
     y_true = np.ones((2, 2), dtype=np.float32)
     y_pred = np.ones((2, 2), dtype=np.float32)

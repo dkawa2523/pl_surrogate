@@ -170,6 +170,15 @@ class RunBundleLoader:
         if case_structure_pack_rel:
             case_structure_pack_path = run_path / "preprocessing" / case_structure_pack_rel
             case_structure_pack_meta_path = case_structure_pack_path.parent / f"{case_structure_pack_path.stem}_meta.json"
+        deeponet_root = run_path / "preprocessing" / "sampling" / "deeponet"
+        deeponet_default_index = cls._load_json_if_exists(deeponet_root / "default" / "sensor_query_index.json")
+        deeponet_default_meta = cls._load_json_if_exists(deeponet_root / "default" / "index_meta.json")
+        deeponet_poisson_index = cls._load_json_if_exists(deeponet_root / "poisson_head" / "sensor_query_index.json")
+        deeponet_poisson_meta = cls._load_json_if_exists(deeponet_root / "poisson_head" / "index_meta.json")
+        deeponet_boundary_index = cls._load_json_if_exists(deeponet_root / "boundary_operator" / "sensor_query_index.json")
+        deeponet_boundary_meta = cls._load_json_if_exists(deeponet_root / "boundary_operator" / "index_meta.json")
+        deeponet_index = deeponet_default_index or deeponet_poisson_index or deeponet_boundary_index
+        deeponet_index_meta = deeponet_default_meta or deeponet_poisson_meta or deeponet_boundary_meta
 
         schemas = {
             "cond_schema": cls._load_json_if_exists(run_path / "preprocessing" / "schema" / "cond_schema.json"),
@@ -179,27 +188,13 @@ class RunBundleLoader:
             "target_role_schema": cls._load_json_if_exists(
                 run_path / "preprocessing" / "schema" / "target_role_schema.json"
             ),
-            "deeponet_index": cls._load_json_if_exists(
-                run_path / "preprocessing" / "sampling" / "deeponet" / "sensor_query_index.json"
-            ),
-            "deeponet_index_meta": cls._load_json_if_exists(
-                run_path / "preprocessing" / "sampling" / "deeponet" / "index_meta.json"
-            ),
-            "deeponet_task_hashes": cls._load_json_if_exists(
-                run_path / "preprocessing" / "sampling" / "deeponet" / "task_hashes.json"
-            ),
-            "deeponet_poisson_head_index": cls._load_json_if_exists(
-                run_path / "preprocessing" / "sampling" / "deeponet" / "poisson_head" / "sensor_query_index.json"
-            ),
-            "deeponet_poisson_head_meta": cls._load_json_if_exists(
-                run_path / "preprocessing" / "sampling" / "deeponet" / "poisson_head" / "index_meta.json"
-            ),
-            "deeponet_boundary_operator_index": cls._load_json_if_exists(
-                run_path / "preprocessing" / "sampling" / "deeponet" / "boundary_operator" / "sensor_query_index.json"
-            ),
-            "deeponet_boundary_operator_meta": cls._load_json_if_exists(
-                run_path / "preprocessing" / "sampling" / "deeponet" / "boundary_operator" / "index_meta.json"
-            ),
+            "deeponet_index": deeponet_index,
+            "deeponet_index_meta": deeponet_index_meta,
+            "deeponet_task_hashes": cls._load_json_if_exists(deeponet_root / "task_hashes.json"),
+            "deeponet_poisson_head_index": deeponet_poisson_index,
+            "deeponet_poisson_head_meta": deeponet_poisson_meta,
+            "deeponet_boundary_operator_index": deeponet_boundary_index,
+            "deeponet_boundary_operator_meta": deeponet_boundary_meta,
             "cond_stats": cls._load_json_if_exists(run_path / "preprocessing" / "stats" / "cond_stats.json"),
             "y_stats": cls._load_json_if_exists(run_path / "preprocessing" / "stats" / "y_stats.json"),
             "runtime_schema_hashes": cls._load_json_if_exists(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -44,6 +45,107 @@ GRID_CHECKPOINT_MODEL_TYPES = frozenset(
         "coord_mlp_pod_residual",
     }
 )
+
+
+@dataclass(frozen=True)
+class CheckpointSpec:
+    backend_default: str | None = None
+    allowed_backends: tuple[str, ...] = ()
+    backend_error: str = ""
+    impl_key: str = ""
+    allowed_impl_versions: tuple[str, ...] = ()
+    impl_error: str = ""
+
+
+def _validate_checkpoint_spec(meta: dict[str, Any], spec: CheckpointSpec) -> tuple[str | None, str | None]:
+    backend: str | None = None
+    if spec.allowed_backends:
+        backend = str(meta.get("backend", spec.backend_default or "")).strip().lower()
+        if backend not in set(spec.allowed_backends):
+            raise ValueError(spec.backend_error)
+    impl: str | None = None
+    if spec.impl_key:
+        impl = str(meta.get(spec.impl_key, "")).strip().lower()
+        if impl not in {str(v).strip().lower() for v in spec.allowed_impl_versions}:
+            raise ValueError(spec.impl_error)
+    return backend, impl
+
+
+_CHECKPOINT_SPECS: dict[str, CheckpointSpec] = {
+    "unet_operator_v2": CheckpointSpec(
+        backend_default="torch",
+        allowed_backends=("torch",),
+        backend_error="legacy numpy UNet operator v2 checkpoints are no longer supported",
+        impl_key="unet_operator_v2_impl_version",
+        allowed_impl_versions=("unet_operator_v2_v1",),
+        impl_error="legacy UNet operator v2 checkpoint format is not supported",
+    ),
+    "fno": CheckpointSpec(
+        backend_default="numpy",
+        allowed_backends=("torch",),
+        backend_error="legacy numpy FNO checkpoints are no longer supported",
+        impl_key="fno_impl_version",
+        allowed_impl_versions=("spectral_v2",),
+        impl_error="legacy FNO checkpoint format is not supported",
+    ),
+    "ffno": CheckpointSpec(
+        backend_default="torch",
+        allowed_backends=("torch",),
+        backend_error="legacy numpy FFNO checkpoints are no longer supported",
+        impl_key="fno_impl_version",
+        allowed_impl_versions=("factorized_separable_1d_v1", "factorized_separable_1d_v2_local_skip"),
+        impl_error="legacy FFNO checkpoint format is not supported",
+    ),
+    "u_no": CheckpointSpec(
+        backend_default="torch",
+        allowed_backends=("torch",),
+        backend_error="legacy numpy U-NO checkpoints are no longer supported",
+        impl_key="uno_impl_version",
+        allowed_impl_versions=("uno_lite_v1",),
+        impl_error="legacy U-NO checkpoint format is not supported",
+    ),
+    "cno": CheckpointSpec(
+        backend_default="torch",
+        allowed_backends=("torch",),
+        backend_error="legacy numpy CNO checkpoints are no longer supported",
+        impl_key="cno_impl_version",
+        allowed_impl_versions=("cno_lite_v1",),
+        impl_error="legacy CNO checkpoint format is not supported",
+    ),
+    "cno_operator_unet": CheckpointSpec(
+        backend_default="torch",
+        allowed_backends=("torch",),
+        backend_error="legacy numpy CNO operator U-Net checkpoints are no longer supported",
+        impl_key="cno_operator_unet_impl_version",
+        allowed_impl_versions=("cno_operator_unet_v1",),
+        impl_error="legacy CNO operator U-Net checkpoint format is not supported",
+    ),
+    "geom_deeponet_siren": CheckpointSpec(
+        backend_default="torch",
+        allowed_backends=("torch",),
+        backend_error="legacy numpy geom_deeponet_siren checkpoints are no longer supported",
+        impl_key="geom_deeponet_siren_impl_version",
+        allowed_impl_versions=("geom_deeponet_siren_v1",),
+        impl_error="legacy geom_deeponet_siren checkpoint format is not supported",
+    ),
+    "coord_mlp_pod_residual": CheckpointSpec(
+        impl_key="coord_mlp_impl_version",
+        allowed_impl_versions=(COORD_MLP_POD_RESIDUAL_IMPL_VERSION,),
+        impl_error=(
+            "legacy coord_mlp_pod_residual checkpoint format is not supported; "
+            f"expected coord_mlp_impl_version={COORD_MLP_POD_RESIDUAL_IMPL_VERSION}"
+        ),
+    ),
+    "coord_mlp": CheckpointSpec(
+        impl_key="coord_mlp_impl_version",
+        allowed_impl_versions=("v4_siren_branch_balanced",),
+        impl_error=(
+            "legacy coord_mlp checkpoint format is not supported; "
+            "expected coord_mlp_impl_version=v4_siren_branch_balanced; "
+            "retrain or re-export checkpoint with current code"
+        ),
+    ),
+}
 
 
 def _model_output_keys(model: Any) -> list[str]:
@@ -333,12 +435,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "unet_operator_v2":
-        backend = str(meta.get("backend", "torch")).strip().lower()
-        if backend != "torch":
-            raise ValueError("legacy numpy UNet operator v2 checkpoints are no longer supported")
-        impl = str(meta.get("unet_operator_v2_impl_version", "")).strip().lower()
-        if impl not in {"unet_operator_v2_v1"}:
-            raise ValueError("legacy UNet operator v2 checkpoint format is not supported")
+        backend, _ = _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["unet_operator_v2"])
         return UNetOperatorV2(
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
@@ -356,12 +453,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "fno":
-        backend = str(meta.get("backend", "numpy")).strip().lower()
-        if backend != "torch":
-            raise ValueError("legacy numpy FNO checkpoints are no longer supported")
-        impl = str(meta.get("fno_impl_version", "")).strip().lower()
-        if impl not in {"spectral_v2"}:
-            raise ValueError("legacy FNO checkpoint format is not supported")
+        backend, _ = _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["fno"])
         return FNOBaseline(
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
@@ -376,12 +468,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "ffno":
-        backend = str(meta.get("backend", "torch")).strip().lower()
-        if backend != "torch":
-            raise ValueError("legacy numpy FFNO checkpoints are no longer supported")
-        impl = str(meta.get("fno_impl_version", "")).strip().lower()
-        if impl not in {"factorized_separable_1d_v1", "factorized_separable_1d_v2_local_skip"}:
-            raise ValueError("legacy FFNO checkpoint format is not supported")
+        backend, _ = _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["ffno"])
         return FFNOBaseline(
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
@@ -396,12 +483,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "u_no":
-        backend = str(meta.get("backend", "torch")).strip().lower()
-        if backend != "torch":
-            raise ValueError("legacy numpy U-NO checkpoints are no longer supported")
-        impl = str(meta.get("uno_impl_version", "")).strip().lower()
-        if impl not in {"uno_lite_v1"}:
-            raise ValueError("legacy U-NO checkpoint format is not supported")
+        backend, _ = _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["u_no"])
         return UNOBaseline(
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
@@ -416,12 +498,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "cno":
-        backend = str(meta.get("backend", "torch")).strip().lower()
-        if backend != "torch":
-            raise ValueError("legacy numpy CNO checkpoints are no longer supported")
-        impl = str(meta.get("cno_impl_version", "")).strip().lower()
-        if impl not in {"cno_lite_v1"}:
-            raise ValueError("legacy CNO checkpoint format is not supported")
+        backend, _ = _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["cno"])
         return CNOBaseline(
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
@@ -435,12 +512,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "cno_operator_unet":
-        backend = str(meta.get("backend", "torch")).strip().lower()
-        if backend != "torch":
-            raise ValueError("legacy numpy CNO operator U-Net checkpoints are no longer supported")
-        impl = str(meta.get("cno_operator_unet_impl_version", "")).strip().lower()
-        if impl not in {"cno_operator_unet_v1"}:
-            raise ValueError("legacy CNO operator U-Net checkpoint format is not supported")
+        backend, _ = _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["cno_operator_unet"])
         return CNOOperatorUNet(
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
@@ -456,12 +528,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "geom_deeponet_siren":
-        backend = str(meta.get("backend", "torch")).strip().lower()
-        if backend != "torch":
-            raise ValueError("legacy numpy geom_deeponet_siren checkpoints are no longer supported")
-        impl = str(meta.get("geom_deeponet_siren_impl_version", "")).strip().lower()
-        if impl not in {"geom_deeponet_siren_v1"}:
-            raise ValueError("legacy geom_deeponet_siren checkpoint format is not supported")
+        backend, _ = _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["geom_deeponet_siren"])
         return GeomDeepONetSIREN(
             input_dim=int(meta["input_dim"]),
             grid_shape=tuple(meta["grid_shape"]),
@@ -478,12 +545,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
         )
 
     if model_type == "coord_mlp_pod_residual":
-        impl_version = str(meta.get("coord_mlp_impl_version", "")).strip().lower()
-        if impl_version != COORD_MLP_POD_RESIDUAL_IMPL_VERSION:
-            raise ValueError(
-                "legacy coord_mlp_pod_residual checkpoint format is not supported; "
-                f"expected coord_mlp_impl_version={COORD_MLP_POD_RESIDUAL_IMPL_VERSION}"
-            )
+        _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["coord_mlp_pod_residual"])
         if weights is None:
             raise ValueError("coord_mlp_pod_residual checkpoint loading requires weights.npz")
         basis_bundle = _pod_basis_bundle_from_grid_weights(meta, weights)
@@ -500,13 +562,7 @@ def load_grid_checkpoint_model(meta: dict[str, Any], weights: Any | None = None)
             backend=str(meta.get("backend", "torch")),
         )
 
-    impl_version = str(meta.get("coord_mlp_impl_version", "")).strip().lower()
-    if impl_version != "v4_siren_branch_balanced":
-        raise ValueError(
-            "legacy coord_mlp checkpoint format is not supported; "
-            "expected coord_mlp_impl_version=v4_siren_branch_balanced; "
-            "retrain or re-export checkpoint with current code"
-        )
+    _validate_checkpoint_spec(meta, _CHECKPOINT_SPECS["coord_mlp"])
     _, model_cfg = _normalize_coord_mlp_model_cfg(
         model_name=model_type,
         raw_cfg=dict(meta.get("model_cfg", {})),

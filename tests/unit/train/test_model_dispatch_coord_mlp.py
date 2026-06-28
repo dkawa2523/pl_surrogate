@@ -147,7 +147,7 @@ def test_coord_mlp_siren_accepts_valid_dynamic_allvars(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == set(custom_vars)
-    contract = out.extra_artifacts.get("coord_mlp_contract_effective", {})
+    contract = out.extra_artifacts.get("model_contracts", {}).get("coord_mlp", {})
     assert contract.get("target_family_effective") == "allvars"
     assert contract.get("model_type_effective") == "coord_mlp_siren"
     assert contract.get("selection_mode_effective") == "best_val_allvars_balance"

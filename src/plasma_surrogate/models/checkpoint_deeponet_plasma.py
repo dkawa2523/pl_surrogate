@@ -106,7 +106,7 @@ def load_deeponet_plasma_checkpoint_model(meta: dict[str, Any]) -> Any | None:
     if isinstance(bo_meta, dict):
         bo = BoundaryOperatorTorch(
             primary_qoi_key=str(bo_meta.get("primary_qoi_key", "Gamma_i")),
-            w_log_ne=float(bo_meta.get("w_log_ne", 0.08)),
+            w_density=float(bo_meta.get("w_density", 0.08)),
             w_te=float(bo_meta.get("w_te", 0.06)),
             w_en=float(bo_meta.get("w_en", 0.04)),
             bias=float(bo_meta.get("bias", 0.0)),

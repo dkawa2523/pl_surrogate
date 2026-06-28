@@ -12,11 +12,11 @@ import numpy as np
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.input_modes import (
     DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY,
+    DESCRIPTOR_PROFILE_KEY,
     GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY,
     INPUT_MODE_EFFECTIVE_KEY,
-    STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
     STRUCTURE_FEATURE_PROFILE_EFFECTIVE_KEY,
-    STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+    LATENT_PROFILE_KEY,
     TABLE_ONLY,
     TABLE_PLUS_STRUCTURE,
     attach_runtime_schema_hashes,
@@ -42,14 +42,10 @@ from plasma_surrogate.preprocessing.sampling import (
     build_point_pools,
     build_time_adjacent_pairs,
 )
+from plasma_surrogate.preprocessing.report import PreprocessReportBuilder
 from plasma_surrogate.preprocessing.scalers import ScalerFactory, fit_scalers_train_only
 from plasma_surrogate.preprocessing.schema import AxisSchema, ChannelMap, CondSchema
-from plasma_surrogate.preprocessing.split import build_casewise_splits, build_pressure_extrap_split
-from plasma_surrogate.preprocessing.split import (
-    build_extrapolation_split,
-    build_interpolation_overlap_split_with_status,
-    build_interpolation_split,
-)
+from plasma_surrogate.preprocessing.split_plan import SplitPlanBuilder
 from plasma_surrogate.train.spatial_features import (
     ICP_PART_SDF_CHANNELS,
     ICP_PART_SDF_LITE_CASE_CHANNELS,
@@ -315,8 +311,33 @@ class PreprocessOutput:
     hashes: dict[str, str]
 
 
+@dataclass(frozen=True)
+class PreprocessArtifacts:
+    output_layout: dict[str, Any]
+    target_role_schema: dict[str, Any]
+    channel_map: dict[str, Any]
+    coord_feature_pack_meta: dict[str, Any]
+    static_spatial_feature_pack_meta: dict[str, Any]
+    case_structure_feature_pack_meta: dict[str, Any]
+    structure_descriptor_pack_meta: dict[str, Any]
+    latent_feature_pack_meta: dict[str, Any]
+
+    def runtime_schema_payload(self) -> dict[str, Any]:
+        return {
+            "output_layout": self.output_layout,
+            "target_role_schema": self.target_role_schema,
+            "channel_map": self.channel_map,
+            "coord_feature_pack_meta": self.coord_feature_pack_meta,
+            "static_spatial_feature_pack_meta": self.static_spatial_feature_pack_meta,
+            "case_spatial_feature_pack_meta": {},
+            "case_structure_feature_pack_meta": self.case_structure_feature_pack_meta,
+            "structure_descriptor_pack_meta": self.structure_descriptor_pack_meta,
+            "latent_feature_pack_meta": self.latent_feature_pack_meta,
+        }
+
+
 class PreprocessRunner:
-    """Minimal implementation for cycle1 preprocessing outputs."""
+    """Preprocessing runner that writes the shared mainline artifacts."""
 
     def __init__(
         self,
@@ -329,6 +350,7 @@ class PreprocessRunner:
         self.cfg = cfg
         self.output_dir = Path(output_dir)
         self.store = ArtifactStore(self.output_dir)
+        self.report_builder = PreprocessReportBuilder(self.store)
         self.runtime_cfg = dict(runtime_cfg or {})
         self.runtime_input_mode_meta = dict(runtime_input_mode_meta or {})
         if self.runtime_cfg:
@@ -379,7 +401,7 @@ class PreprocessRunner:
     def _resolve_runtime_descriptor_profile(self) -> str:
         profile = str(
             self.runtime_input_mode_meta.get(
-                STRUCTURE_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
+                DESCRIPTOR_PROFILE_KEY,
                 dict(self.runtime_cfg.get("structure", {})).get("descriptor_profile", "none"),
             )
         ).strip().lower()
@@ -388,7 +410,7 @@ class PreprocessRunner:
     def _resolve_runtime_latent_profile(self) -> str:
         profile = str(
             self.runtime_input_mode_meta.get(
-                STRUCTURE_LATENT_PROFILE_EFFECTIVE_KEY,
+                LATENT_PROFILE_KEY,
                 dict(self.runtime_cfg.get("structure", {})).get("latent_profile", "none"),
             )
         ).strip().lower()
@@ -497,6 +519,47 @@ class PreprocessRunner:
         )
         return list(validate_coord_feature_channels(coord_feature_channels_raw))
 
+    def _save_split_artifacts(
+        self,
+        *,
+        split: dict[str, Any],
+        split_interp_marginal: dict[str, Any],
+        split_interp_overlap: dict[str, Any],
+        split_interp: dict[str, Any],
+        split_extrap: dict[str, Any],
+        split_structure_holdout: dict[str, Any],
+    ) -> None:
+        self.store.save_json("split/split_random_v1.json", split)
+        self.store.save_json("split/split_interp_marginal_v1.json", split_interp_marginal)
+        self.store.save_json("split/split_interp_overlap_v1.json", split_interp_overlap)
+        self.store.save_json("split/split_interp_v1.json", split_interp)
+        self.store.save_json("split/split_extrap_v1.json", split_extrap)
+        self.store.save_json("split/split_structure_holdout_v1.json", split_structure_holdout)
+
+    def _save_schema_artifacts(
+        self,
+        *,
+        cond_schema: CondSchema,
+        axis_schema: AxisSchema,
+        channel_map_payload: dict[str, Any],
+        output_layout_payload: dict[str, Any],
+        target_role_schema_payload: dict[str, Any],
+    ) -> None:
+        self.store.save_json("schema/cond_schema.json", cond_schema.to_dict())
+        self.store.save_json("schema/axis_schema.json", axis_schema.to_dict())
+        self.store.save_json("schema/channel_map.json", channel_map_payload)
+        self.store.save_json("schema/output_layout.json", output_layout_payload)
+        self.store.save_json("schema/target_role_schema.json", target_role_schema_payload)
+
+    def _save_runtime_schema_hashes(
+        self,
+        *,
+        artifacts: PreprocessArtifacts,
+    ) -> dict[str, str]:
+        runtime_schema_hashes = build_runtime_schema_hashes(artifacts.runtime_schema_payload())
+        self.store.save_json("validation/runtime_schema_hashes.json", runtime_schema_hashes)
+        return runtime_schema_hashes
+
     def run(
         self,
         cases: list[dict[str, Any]],
@@ -504,62 +567,21 @@ class PreprocessRunner:
         target_metadata: list[dict[str, Any]] | None = None,
     ) -> PreprocessOutput:
         split_cfg = self.cfg.get("split", {})
-        ratios = split_cfg.get("ratios", [0.7, 0.15, 0.15])
-        split_groups = [str(c.get("split_group", c["case_id"])) for c in cases]
-        split = build_casewise_splits(
-            [c["case_id"] for c in cases],
-            split_groups=split_groups,
-            seed=int(split_cfg.get("seed", 0)),
-            ratios=tuple(ratios),
-        )
-        split_structure_holdout = split
-
         cond_order = list(self.cfg.get("cond_order", []))
         if not cond_order:
             cond_order = sorted(cases[0]["cond"].keys())
         cond_schema = CondSchema(order=cond_order)
         axis_schema = AxisSchema.from_dict(self.cfg.get("axis_schema", {"mode": "steady"}))
-        cond_by_case = {c["case_id"]: c["cond"] for c in cases}
-        extrap_key = str(split_cfg.get("pressure_extrap_key", cond_order[0]))
-        split_extrap = build_pressure_extrap_split(
-            [c["case_id"] for c in cases],
-            cond_values=cond_by_case,
-            key=extrap_key,
-            holdout_ratio=float(split_cfg.get("pressure_extrap_holdout_ratio", 0.2)),
-            val_ratio_within_remain=float(split_cfg.get("pressure_extrap_val_ratio", 0.2)),
-        )
-        interp_mode = str(split_cfg.get("interp_mode", "marginal")).strip().lower()
-        if interp_mode not in {"marginal", "overlap"}:
-            raise ValueError("split.interp_mode must be one of: marginal, overlap")
-        split_interp_marginal = build_interpolation_split(
-            [c["case_id"] for c in cases],
-            cond_values=cond_by_case,
-            keys=cond_order,
-            seed=int(split_cfg.get("seed", 0)),
-            ratios=tuple(ratios),
-            mode="marginal",
-        )
-        split_interp_overlap_status = build_interpolation_overlap_split_with_status(
-            [c["case_id"] for c in cases],
-            cond_values=cond_by_case,
-            keys=cond_order,
-            seed=int(split_cfg.get("seed", 0)),
-            ratios=tuple(ratios),
-        )
-        split_interp_overlap = dict(split_interp_overlap_status["split"])
-        overlap_feasible = bool(split_interp_overlap_status.get("feasible", True))
-        overlap_reason = str(split_interp_overlap_status.get("reason", ""))
-        if interp_mode == "overlap" and not overlap_feasible:
-            raise ValueError(f"split.interp_mode=overlap is not feasible: {overlap_reason or 'unknown'}")
-        split_interp = split_interp_overlap if interp_mode == "overlap" else split_interp_marginal
-        split_extrap_v1 = build_extrapolation_split(
-            [c["case_id"] for c in cases],
-            cond_values=cond_by_case,
-            key=extrap_key,
-            holdout_ratio=float(split_cfg.get("pressure_extrap_holdout_ratio", 0.2)),
-            val_ratio_within_remain=float(split_cfg.get("pressure_extrap_val_ratio", 0.2)),
-        )
-
+        split_plan = SplitPlanBuilder(split_cfg).build(cases=cases, cond_order=cond_order)
+        split = split_plan.random
+        split_interp_marginal = split_plan.interp_marginal
+        split_interp_overlap = split_plan.interp_overlap
+        split_interp = split_plan.interp
+        split_extrap = split_plan.extrap
+        split_structure_holdout = split_plan.structure_holdout
+        extrap_cfg = dict(split_cfg.get("extrapolation", {}) or {})
+        extrap_key = str(extrap_cfg.get("key", cond_order[0]))
+        extrap_direction = str(extrap_cfg.get("direction", "high")).strip().lower()
         cond_matrix = []
         for c in cases:
             base = cond_schema.encode(c["cond"])
@@ -628,13 +650,12 @@ class PreprocessRunner:
             "casewise": split,
             "structure_holdout": split_structure_holdout,
             "interp": split_interp,
-            "extrap": split_extrap_v1,
-            "pressure_extrap": split_extrap,
+            "extrap": split_extrap,
         }
         if scaler_fit_split not in split_for_scalers_by_name:
             raise ValueError(
                 "preprocessing.scalers.fit_split must be one of: "
-                "random, interp, extrap, pressure_extrap, structure_holdout"
+                "random, interp, extrap, structure_holdout"
             )
         split_for_scalers = split_for_scalers_by_name[scaler_fit_split]
         case_to_idx = {c["case_id"]: i for i, c in enumerate(cases)}
@@ -680,15 +701,14 @@ class PreprocessRunner:
         )
         patches = build_patch_index(geom.mask_plasma.shape, (4, 4), (2, 2))
 
-        self.store.save_json("split/split_random_v1.json", split)
-        self.store.save_json("split/split_interp_marginal_v1.json", split_interp_marginal)
-        self.store.save_json("split/split_interp_overlap_v1.json", split_interp_overlap)
-        self.store.save_json("split/split_interp_v1.json", split_interp)
-        self.store.save_json("split/split_pressure_extrap_v1.json", split_extrap)
-        self.store.save_json("split/split_extrap_v1.json", split_extrap_v1)
-        self.store.save_json("split/split_structure_holdout_v1.json", split_structure_holdout)
-        self.store.save_json("schema/cond_schema.json", cond_schema.to_dict())
-        self.store.save_json("schema/axis_schema.json", axis_schema.to_dict())
+        self._save_split_artifacts(
+            split=split,
+            split_interp_marginal=split_interp_marginal,
+            split_interp_overlap=split_interp_overlap,
+            split_interp=split_interp,
+            split_extrap=split_extrap,
+            split_structure_holdout=split_structure_holdout,
+        )
         featurization_root = self.cfg.get("featurization_root")
         x_grid = None
         channel_names: list[str] = []
@@ -715,7 +735,6 @@ class PreprocessRunner:
                 }
             )
         channel_map_payload = channel_map.to_dict()
-        self.store.save_json("schema/channel_map.json", channel_map_payload)
         sample_shape = np.asarray(cases[0]["y"][y_vars[0]], dtype=np.float32).shape
         output_layout_payload = {
             "order": "C",
@@ -723,8 +742,13 @@ class PreprocessRunner:
             "vars": y_vars,
         }
         target_role_schema_payload = build_target_role_schema(target_metadata, y_vars=y_vars)
-        self.store.save_json("schema/output_layout.json", output_layout_payload)
-        self.store.save_json("schema/target_role_schema.json", target_role_schema_payload)
+        self._save_schema_artifacts(
+            cond_schema=cond_schema,
+            axis_schema=axis_schema,
+            channel_map_payload=channel_map_payload,
+            output_layout_payload=output_layout_payload,
+            target_role_schema_payload=target_role_schema_payload,
+        )
         cond_scaler_payload = transforms.cond_scaler.to_dict()
         cond_scaler_payload["cond_dim"] = transforms.cond_dim
         cond_scaler_payload["fit_policy"] = transforms.fit_policy
@@ -1140,12 +1164,7 @@ class PreprocessRunner:
         if task_cfgs:
             deeponet_root = self.output_dir / "sampling" / "deeponet"
             deeponet_root.mkdir(parents=True, exist_ok=True)
-            if "default" in task_cfgs:
-                legacy_task = "default"
-            elif "poisson_head" in task_cfgs:
-                legacy_task = "poisson_head"
-            else:
-                legacy_task = sorted(task_cfgs.keys())[0]
+            primary_task = "default" if "default" in task_cfgs else sorted(task_cfgs.keys())[0]
             for task_name, task_payload in sorted(task_cfgs.items()):
                 payload, meta, sensor_coords, query_coords = _build_task_payload(task_name, task_payload)
                 task_hash = hash_json(
@@ -1163,14 +1182,8 @@ class PreprocessRunner:
                 self.store.save_json(f"sampling/deeponet/{task_name}/index_meta.json", meta)
                 np.save(task_dir / "sensor_coords.npy", sensor_coords.astype(np.float32))
                 np.save(task_dir / "query_coords.npy", query_coords.astype(np.float32))
-
-                # Keep legacy single-task paths for backward compatibility.
-                if task_name == legacy_task:
+                if task_name == primary_task:
                     deeponet_index_meta = meta
-                    self.store.save_json("sampling/deeponet/sensor_query_index.json", payload)
-                    self.store.save_json("sampling/deeponet/index_meta.json", meta)
-                    np.save(deeponet_root / "sensor_coords.npy", sensor_coords.astype(np.float32))
-                    np.save(deeponet_root / "query_coords.npy", query_coords.astype(np.float32))
                     deeponet_index_hash = task_hash
 
             self.store.save_json("sampling/deeponet/task_hashes.json", deeponet_task_hashes)
@@ -1199,8 +1212,13 @@ class PreprocessRunner:
         split_hash = hash_json(
             {
                 "split_random": split,
-                "split_pressure_extrap": split_extrap,
-                "split_extrap": split_extrap_v1,
+                "split_extrap": split_extrap,
+                "split_extrapolation_cfg": {
+                    "key": extrap_key,
+                    "direction": extrap_direction,
+                    "holdout_ratio": float(extrap_cfg.get("holdout_ratio", 0.2)),
+                    "val_ratio": float(extrap_cfg.get("val_ratio", 0.2)),
+                },
                 "split_structure_holdout": split_structure_holdout,
                 "scaler_fit_split": scaler_fit_split,
             }
@@ -1266,93 +1284,61 @@ class PreprocessRunner:
             "latent_feature_dim": 0,
             DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: False,
         }
-        runtime_schema_hashes = build_runtime_schema_hashes(
-            {
-                "output_layout": output_layout_payload,
-                "target_role_schema": target_role_schema_payload,
-                "channel_map": channel_map_payload,
-                "coord_feature_pack_meta": coord_feature_pack_meta_payload,
-                "static_spatial_feature_pack_meta": case_spatial_meta if case_spatial_feature_enabled else {},
-                "case_spatial_feature_pack_meta": {},
-                "case_structure_feature_pack_meta": case_spatial_meta if case_spatial_feature_enabled else {},
-                "structure_descriptor_pack_meta": {},
-                "latent_feature_pack_meta": {},
-            }
+        preprocess_artifacts = PreprocessArtifacts(
+            output_layout=output_layout_payload,
+            target_role_schema=target_role_schema_payload,
+            channel_map=channel_map_payload,
+            coord_feature_pack_meta=coord_feature_pack_meta_payload,
+            static_spatial_feature_pack_meta=case_spatial_meta if case_spatial_feature_enabled else {},
+            case_structure_feature_pack_meta=case_spatial_meta if case_spatial_feature_enabled else {},
+            structure_descriptor_pack_meta=descriptor_artifact_meta if descriptor_profile != "none" else {},
+            latent_feature_pack_meta=latent_artifact_meta if latent_profile != "none" else {},
+        )
+        runtime_schema_hashes = self._save_runtime_schema_hashes(
+            artifacts=preprocess_artifacts,
         )
         self.runtime_input_mode_meta = attach_runtime_schema_hashes(
             self.runtime_input_mode_meta,
             schema_hashes=runtime_schema_hashes,
         )
-        self.store.save_json("validation/runtime_schema_hashes.json", runtime_schema_hashes)
 
-        report_payload = {
-            "status": "ok",
-            "n_cases": len(cases),
-            "coord_grid_source": coord_source_applied,
-            "coord_grid_source_requested": coord_source_requested,
-            "coord_grid_source_applied": coord_source_applied,
-            "coord_grid_contract_status": coord_contract_status,
-            "distance_signed_negative_ratio": negative_ratio,
-            "distance_contract_status": distance_contract_status,
-            "coord_value_range_raw": {
-                "x": [float(np.min(coord_rows[:, 0])), float(np.max(coord_rows[:, 0]))],
-                "y": [float(np.min(coord_rows[:, 1])), float(np.max(coord_rows[:, 1]))],
-            },
-            "coord_value_range_scaled": {
-                "zscore": {
-                    "x": [float(np.min(coord_rows_z[:, 0])), float(np.max(coord_rows_z[:, 0]))],
-                    "y": [float(np.min(coord_rows_z[:, 1])), float(np.max(coord_rows_z[:, 1]))],
-                },
-                "minmax": {
-                    "x": [float(np.min(coord_rows_mm[:, 0])), float(np.max(coord_rows_mm[:, 0]))],
-                    "y": [float(np.min(coord_rows_mm[:, 1])), float(np.max(coord_rows_mm[:, 1]))],
-                },
-            },
-            "coord_scaler_status": "ok",
-            "scaler_fit_split": scaler_fit_split,
-            "scaler_fit_train_case_count": int(len(train_indices)),
-            "density_value_transform_effective": {
-                name: str(dict(target_transforms_cfg.get(name, {})).get("value_transform", "identity"))
-                for name in ("ne", "ni")
-                if name in set(y_vars)
-            },
-            "coord_features_enabled": bool(coord_features_enabled),
-            "coord_feature_channels": coord_feature_channels,
-            "coord_feature_pack_path": (
-                "" if case_spatial_feature_enabled else (coord_feature_rel_path if coord_features_enabled else "")
-            ),
-            "coord_feature_scaling_enabled": bool(coord_features_scaling_enabled),
-            "coord_feature_scaling_mode": str(coord_features_scaling_mode),
-            "case_spatial_pack_used": bool(case_spatial_feature_enabled),
-            "case_spatial_feature_storage": "split_static_case" if case_spatial_feature_enabled else "",
-            "case_spatial_feature_pack_path": "",
-            "case_spatial_feature_pack_meta_path": case_spatial_feature_meta_rel,
-            "case_spatial_feature_shape": case_spatial_feature_shape,
-            "static_spatial_feature_pack_path": (
-                static_spatial_feature_rel_path if case_spatial_feature_enabled else ""
-            ),
-            "static_spatial_feature_pack_meta_path": static_spatial_feature_meta_rel,
-            "static_spatial_feature_shape": static_spatial_feature_shape,
-            "case_structure_feature_pack_path": (
-                case_structure_feature_rel_path if case_spatial_feature_enabled else ""
-            ),
-            "case_structure_feature_pack_meta_path": case_structure_feature_meta_rel,
-            "case_structure_feature_shape": case_structure_feature_shape,
-            "distance_transform_stats_path": "scalers/distance_transform_stats.json",
-            "distance_transform_stats_enabled": bool(distance_stats_enabled),
-            "distance_transform_tau_auto": {
-                "signed_tanh_tau_auto": float(signed_tanh_tau_auto),
-                "proximity_tau_auto": float(proximity_tau_auto),
-            },
-            "distance_transform_quantiles": {
-                "signed_quantile": float(signed_q_raw),
-                "proximity_quantile": float(proximity_q_raw),
-            },
-            **descriptor_artifact_meta,
-            **latent_artifact_meta,
-        }
-        report_payload.update(self.runtime_input_mode_meta)
-        self.store.save_json("validation/report.json", report_payload)
+        self.report_builder.save(
+            cases=cases,
+            coord_source_applied=coord_source_applied,
+            coord_source_requested=coord_source_requested,
+            coord_contract_status=coord_contract_status,
+            negative_ratio=negative_ratio,
+            distance_contract_status=distance_contract_status,
+            coord_rows=coord_rows,
+            coord_rows_z=coord_rows_z,
+            coord_rows_mm=coord_rows_mm,
+            scaler_fit_split=scaler_fit_split,
+            train_indices=train_indices,
+            target_transforms_cfg=target_transforms_cfg,
+            y_vars=y_vars,
+            coord_features_enabled=coord_features_enabled,
+            coord_feature_channels=coord_feature_channels,
+            coord_feature_rel_path=coord_feature_rel_path,
+            coord_features_scaling_enabled=coord_features_scaling_enabled,
+            coord_features_scaling_mode=coord_features_scaling_mode,
+            case_spatial_feature_enabled=case_spatial_feature_enabled,
+            case_spatial_feature_meta_rel=case_spatial_feature_meta_rel,
+            case_spatial_feature_shape=case_spatial_feature_shape,
+            static_spatial_feature_rel_path=static_spatial_feature_rel_path,
+            static_spatial_feature_meta_rel=static_spatial_feature_meta_rel,
+            static_spatial_feature_shape=static_spatial_feature_shape,
+            case_structure_feature_rel_path=case_structure_feature_rel_path,
+            case_structure_feature_meta_rel=case_structure_feature_meta_rel,
+            case_structure_feature_shape=case_structure_feature_shape,
+            distance_stats_enabled=distance_stats_enabled,
+            signed_tanh_tau_auto=signed_tanh_tau_auto,
+            proximity_tau_auto=proximity_tau_auto,
+            signed_q_raw=signed_q_raw,
+            proximity_q_raw=proximity_q_raw,
+            descriptor_artifact_meta=descriptor_artifact_meta,
+            latent_artifact_meta=latent_artifact_meta,
+            runtime_input_mode_meta=self.runtime_input_mode_meta,
+        )
 
         return PreprocessOutput(
             split=split,

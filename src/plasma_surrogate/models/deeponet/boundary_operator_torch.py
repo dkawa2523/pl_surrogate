@@ -14,7 +14,7 @@ class BoundaryOperatorTorch:
     def __init__(
         self,
         primary_qoi_key: str = "Gamma_i",
-        w_log_ne: float = 0.08,
+        w_density: float = 0.08,
         w_te: float = 0.06,
         w_en: float = 0.04,
         bias: float = 0.0,
@@ -25,7 +25,7 @@ class BoundaryOperatorTorch:
         self._torch = torch
         self.device = _resolve_torch_device(torch)
         self.primary_qoi_key = str(primary_qoi_key)
-        self.w_log_ne = torch.nn.Parameter(torch.tensor(float(w_log_ne), dtype=torch.float32, device=self.device))
+        self.w_density = torch.nn.Parameter(torch.tensor(float(w_density), dtype=torch.float32, device=self.device))
         self.w_te = torch.nn.Parameter(torch.tensor(float(w_te), dtype=torch.float32, device=self.device))
         self.w_en = torch.nn.Parameter(torch.tensor(float(w_en), dtype=torch.float32, device=self.device))
         self.bias = torch.nn.Parameter(torch.tensor(float(bias), dtype=torch.float32, device=self.device))
@@ -36,7 +36,7 @@ class BoundaryOperatorTorch:
                 p.requires_grad_(False)
 
     def parameters(self):
-        return [self.w_log_ne, self.w_te, self.w_en, self.bias]
+        return [self.w_density, self.w_te, self.w_en, self.bias]
 
     def to(self, device):
         self.device = device
@@ -53,7 +53,7 @@ class BoundaryOperatorTorch:
     def to_meta(self) -> dict[str, Any]:
         out = {
             "primary_qoi_key": self.primary_qoi_key,
-            "w_log_ne": float(self.w_log_ne.detach().cpu().item()),
+            "w_density": float(self.w_density.detach().cpu().item()),
             "w_te": float(self.w_te.detach().cpu().item()),
             "w_en": float(self.w_en.detach().cpu().item()),
             "bias": float(self.bias.detach().cpu().item()),
@@ -65,7 +65,7 @@ class BoundaryOperatorTorch:
 
     def state_dict_numpy(self) -> dict[str, np.ndarray]:
         return {
-            "w_log_ne": np.array([float(self.w_log_ne.detach().cpu().item())], dtype=np.float32),
+            "w_density": np.array([float(self.w_density.detach().cpu().item())], dtype=np.float32),
             "w_te": np.array([float(self.w_te.detach().cpu().item())], dtype=np.float32),
             "w_en": np.array([float(self.w_en.detach().cpu().item())], dtype=np.float32),
             "bias": np.array([float(self.bias.detach().cpu().item())], dtype=np.float32),
@@ -73,9 +73,9 @@ class BoundaryOperatorTorch:
 
     def load_state_dict_numpy(self, weights: dict[str, np.ndarray]) -> None:
         torch = self._torch
-        if "w_log_ne" in weights:
-            self.w_log_ne.data.copy_(
-                torch.as_tensor(float(np.asarray(weights["w_log_ne"]).reshape(-1)[0]), device=self.device)
+        if "w_density" in weights:
+            self.w_density.data.copy_(
+                torch.as_tensor(float(np.asarray(weights["w_density"]).reshape(-1)[0]), device=self.device)
             )
         if "w_te" in weights:
             self.w_te.data.copy_(torch.as_tensor(float(np.asarray(weights["w_te"]).reshape(-1)[0]), device=self.device))
@@ -114,7 +114,7 @@ class BoundaryOperatorTorch:
 
     def predict_target(
         self,
-        log_ne: Any,
+        density: Any,
         te: Any,
         phi: Any,
         cond: Any | None = None,
@@ -125,7 +125,7 @@ class BoundaryOperatorTorch:
         del cond, geom_ctx
         torch = self._torch
         key = str(primary_qoi_key or self.primary_qoi_key)
-        ln = self._as_bm1(log_ne, sample_idx=sample_idx)
+        dens = self._as_bm1(density, sample_idx=sample_idx)
         tt = self._as_bm1(te, sample_idx=sample_idx)
         p_full = self._as_bm1(phi, sample_idx=None)
         if sample_idx is not None:
@@ -133,8 +133,8 @@ class BoundaryOperatorTorch:
             e_mag = self._as_bm1(self._grad_mag(p_full), sample_idx=sample_idx)
         else:
             p = p_full
-            e_mag = self._grad_mag(p).to(dtype=torch.float32, device=ln.device)
-        out = self.w_log_ne * ln + self.w_te * tt + self.w_en * e_mag + self.bias
+            e_mag = self._grad_mag(p).to(dtype=torch.float32, device=dens.device)
+        out = self.w_density * dens + self.w_te * tt + self.w_en * e_mag + self.bias
         if self.clamp is not None:
             out = torch.clamp(out, self.clamp[0], self.clamp[1])
         return {key: out}
