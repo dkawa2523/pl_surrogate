@@ -56,6 +56,7 @@ class BenchmarkModelContext:
     coord_distance_transform_stats: dict[str, Any] | None = None
     structure_descriptor_pack: dict[str, Any] | None = None
     latent_feature_pack: dict[str, Any] | None = None
+    case_ids: list[str] | None = None
     input_mode_meta: dict[str, Any] | None = None
 
 
@@ -121,6 +122,7 @@ def run_model_train_eval(ctx: BenchmarkModelContext) -> dict[str, Any]:
             coord_distance_transform_stats=dict(ctx.coord_distance_transform_stats or {}),
             structure_descriptor_pack=ctx.structure_descriptor_pack,
             latent_feature_pack=ctx.latent_feature_pack,
+            case_ids=list(ctx.case_ids) if ctx.case_ids is not None else None,
             input_mode_effective=str(input_mode_meta.get("input_mode_effective", "")),
             structure_adapter_mode_effective=str(input_mode_meta.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "")),
             structure_descriptor_profile_effective=str(

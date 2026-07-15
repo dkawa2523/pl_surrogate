@@ -39,6 +39,18 @@ def test_group_options_default_is_metadata_only() -> None:
     assert model.output_heads_effective["group_options"] == {"electrostatic": {"head": "default"}}
 
 
+def test_group_options_accepts_spatial_refine() -> None:
+    model = _configure(
+        {
+            "mode": "role_grouped",
+            "group_options": {"density": {"head": "spatial_refine"}},
+        }
+    )
+
+    assert model.output_head_group_options == {"density": {"head": "spatial_refine"}}
+    assert model.output_heads_effective["group_options"] == {"density": {"head": "spatial_refine"}}
+
+
 def test_group_options_reject_poisson_hybrid_until_implemented() -> None:
     with pytest.raises(ValueError, match="not implemented yet"):
         _configure(

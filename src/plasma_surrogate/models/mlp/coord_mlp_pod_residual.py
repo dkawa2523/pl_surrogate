@@ -6,6 +6,11 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.models._auxiliary_losses import (
+    coefficient_aux_loss_diagnostics,
+    coefficient_aux_loss_tensor,
+    project_masked_pod_coefficients_torch,
+)
 from plasma_surrogate.models._torch_spatial_common import (
     _load_state_dict_numpy_torch,
     _resolve_batched_spatial_features,
@@ -259,6 +264,8 @@ class CoordMLPPODResidual:
 
     model_type = "coord_mlp_pod_residual"
     coord_mlp_impl_version = COORD_MLP_POD_RESIDUAL_IMPL_VERSION
+    requires_spatial_features = True
+    requires_scaled_spatial_features = True
 
     def __init__(
         self,
@@ -462,15 +469,239 @@ class CoordMLPPODResidual:
             fields.append(field_flat.reshape(int(coeff_norm_t.shape[0]), *self.grid_shape))
         return self.torch.stack(fields, dim=1)
 
-    def _project_target_coeff_norm_torch(self, target_t):
+    def _projection_mask_torch(self, supervised_mask: Any | None, target_t):
+        if supervised_mask is None:
+            if bool(self.torch.any(~self.torch.isfinite(target_t)).detach().cpu().item()):
+                raise ValueError("coord_mlp_pod_residual target_raw must contain only finite values")
+            return None
+        mask = self.torch.as_tensor(supervised_mask, dtype=self.torch.float32, device=target_t.device)
+        if mask.ndim == 2:
+            mask = mask[None, ...]
+        if mask.ndim == 4 and int(mask.shape[1]) == 1:
+            mask = mask[:, 0]
+        if mask.ndim != 3:
+            raise ValueError(
+                "coord_mlp_pod_residual supervised_mask must be [H,W], [B,H,W], or [B,1,H,W]"
+            )
+        if int(mask.shape[0]) == 1 and int(target_t.shape[0]) > 1:
+            mask = mask.expand(int(target_t.shape[0]), -1, -1)
+        expected = (int(target_t.shape[0]), *self.grid_shape)
+        if tuple(int(value) for value in mask.shape) != expected:
+            raise ValueError(
+                "coord_mlp_pod_residual supervised_mask mismatch: "
+                f"expected={expected}, got={tuple(mask.shape)}"
+            )
+        if bool(self.torch.any(~self.torch.isfinite(mask)).detach().cpu().item()):
+            raise ValueError("coord_mlp_pod_residual supervised_mask must contain only finite values")
+        active = mask > 0.0
+        invalid = active[:, None, :, :] & ~self.torch.isfinite(target_t)
+        if bool(self.torch.any(invalid).detach().cpu().item()):
+            raise ValueError("coord_mlp_pod_residual target_raw is non-finite inside supervised_mask")
+        return active.reshape(int(target_t.shape[0]), -1)
+
+    def _project_target_coeff_norm_torch(self, target_t, *, supervised_mask: Any | None = None):
+        active_flat = self._projection_mask_torch(supervised_mask, target_t)
         chunks = []
         for var_idx, name in enumerate(self.basis_keys):
             flat = target_t[:, var_idx].reshape(int(target_t.shape[0]), -1)
             centered = flat - self._mean_tensor(name).reshape(1, -1)
             basis_t = self._basis_tensor(name).reshape(int(self.basis_rank_by_var[name]), -1)
-            coeff_raw = self.torch.matmul(centered, basis_t.t())
+            coeff_raw = project_masked_pod_coefficients_torch(
+                centered,
+                basis_t,
+                active_mask=active_flat,
+            )
             chunks.append(coeff_raw / self._coeff_std_tensor(name).reshape(1, -1))
         return self.torch.cat(chunks, dim=1)
+
+    def _resolve_coeff_loss_weight(self, loss_cfg: dict[str, Any] | None) -> float:
+        weight = float(self.model_cfg["coeff_loss_weight"])
+        if isinstance(loss_cfg, dict):
+            weight = float(
+                dict(loss_cfg.get("coord_mlp_pod_residual", {})).get("coeff_loss_weight", weight)
+            )
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError("coord_mlp_pod_residual coeff_loss_weight must be finite and >= 0")
+        return float(weight)
+
+    def _cached_coeff_loss_tensor(
+        self,
+        target_raw: np.ndarray,
+        *,
+        supervised_mask: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
+    ):
+        if self._torch_last_coeff_norm is None:
+            raise RuntimeError("CoordMLPPODResidual auxiliary loss requires a cached training forward")
+        target_arr = np.asarray(target_raw, dtype=np.float32)
+        if target_arr.ndim != 4:
+            raise ValueError(f"coord_mlp_pod_residual target_raw must be [B,C,H,W], got {target_arr.shape}")
+        if int(target_arr.shape[1]) != len(self.basis_keys):
+            raise ValueError(
+                "coord_mlp_pod_residual target_raw channel mismatch: "
+                f"expected {len(self.basis_keys)}, got {target_arr.shape[1]}"
+            )
+        if int(target_arr.shape[0]) != int(self._torch_last_coeff_norm.shape[0]):
+            raise ValueError(
+                "coord_mlp_pod_residual target_raw batch mismatch: "
+                f"expected {int(self._torch_last_coeff_norm.shape[0])}, got {int(target_arr.shape[0])}"
+            )
+        if tuple(int(v) for v in target_arr.shape[2:]) != tuple(self.grid_shape):
+            raise ValueError(
+                "coord_mlp_pod_residual target_raw grid mismatch: "
+                f"expected {self.grid_shape}, got {target_arr.shape[2:]}"
+            )
+        target_t = self.torch.as_tensor(target_arr, dtype=self.torch.float32, device=self.device)
+        coeff_target = self._project_target_coeff_norm_torch(
+            target_t,
+            supervised_mask=supervised_mask,
+        )
+        return coefficient_aux_loss_tensor(
+            self._torch_last_coeff_norm,
+            coeff_target,
+            basis_keys=self.basis_keys,
+            coeff_slices=self._coeff_slices,
+            loss_cfg=loss_cfg,
+        )
+
+    def auxiliary_loss_diagnostics(
+        self,
+        target_raw: np.ndarray,
+        *,
+        supervised_mask: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
+    ) -> dict[str, float]:
+        """Inspect cached coefficient loss without changing caches or gradients."""
+
+        weight = self._resolve_coeff_loss_weight(loss_cfg)
+        with self.torch.no_grad():
+            coeff_loss, by_target, by_group = self._cached_coeff_loss_tensor(
+                target_raw,
+                supervised_mask=supervised_mask,
+                loss_cfg=loss_cfg,
+            )
+            coeff_loss_value = float(coeff_loss.detach().cpu().item())
+        return coefficient_aux_loss_diagnostics(
+            coeff_loss=coeff_loss_value,
+            coeff_loss_weight=weight,
+            coeff_loss_by_target={
+                name: float(value.detach().cpu().item()) for name, value in by_target.items()
+            },
+            coeff_loss_by_group={
+                name: float(value.detach().cpu().item()) for name, value in by_group.items()
+            },
+        )
+
+    def evaluate_auxiliary_losses(
+        self,
+        cond: np.ndarray,
+        target_raw: np.ndarray,
+        *,
+        spatial_features: np.ndarray | None = None,
+        supervised_mask: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
+    ) -> dict[str, float]:
+        """Evaluate coefficient supervision without touching training state.
+
+        Unlike :meth:`auxiliary_loss_diagnostics`, this validation-time API
+        predicts fresh coefficients from ``cond`` and therefore does not
+        require, consume, or replace a cached training forward.
+        """
+
+        weight = self._resolve_coeff_loss_weight(loss_cfg)
+        cond_arr = np.asarray(cond, dtype=np.float32)
+        if cond_arr.ndim == 1:
+            cond_arr = cond_arr[None, :]
+        if cond_arr.ndim != 2:
+            raise ValueError(
+                "coord_mlp_pod_residual cond must be [B,input_dim], "
+                f"got {cond_arr.shape}"
+            )
+        if int(cond_arr.shape[0]) < 1:
+            raise ValueError("coord_mlp_pod_residual cond batch must be non-empty")
+        if int(cond_arr.shape[1]) != int(self.input_dim):
+            raise ValueError(
+                "coord_mlp_pod_residual cond feature mismatch: "
+                f"expected {self.input_dim}, got {cond_arr.shape[1]}"
+            )
+        if not bool(np.isfinite(cond_arr).all()):
+            raise ValueError("coord_mlp_pod_residual cond must contain only finite values")
+
+        target_arr = np.asarray(target_raw, dtype=np.float32)
+        if target_arr.ndim != 4:
+            raise ValueError(
+                "coord_mlp_pod_residual target_raw must be [B,C,H,W], "
+                f"got {target_arr.shape}"
+            )
+        if int(target_arr.shape[0]) != int(cond_arr.shape[0]):
+            raise ValueError(
+                "coord_mlp_pod_residual target_raw batch mismatch: "
+                f"expected {cond_arr.shape[0]}, got {target_arr.shape[0]}"
+            )
+        if int(target_arr.shape[1]) != len(self.basis_keys):
+            raise ValueError(
+                "coord_mlp_pod_residual target_raw channel mismatch: "
+                f"expected {len(self.basis_keys)}, got {target_arr.shape[1]}"
+            )
+        if tuple(int(v) for v in target_arr.shape[2:]) != tuple(self.grid_shape):
+            raise ValueError(
+                "coord_mlp_pod_residual target_raw grid mismatch: "
+                f"expected {self.grid_shape}, got {target_arr.shape[2:]}"
+            )
+
+        # Spatial features do not enter the coefficient head, but validating
+        # them here keeps this public evaluation entry point consistent with
+        # the model's complete input contract.
+        self._resolve_spatial_features(cond_arr, spatial_features)
+
+        cached_out = self._torch_last_out
+        cached_coeff_norm = self._torch_last_coeff_norm
+        module_modes = [(module, bool(module.training)) for module in self.net.modules()]
+        try:
+            self.net.eval()
+            with self.torch.no_grad():
+                cond_t = self.torch.as_tensor(
+                    cond_arr,
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                target_t = self.torch.as_tensor(
+                    target_arr,
+                    dtype=self.torch.float32,
+                    device=self.device,
+                )
+                latent_t = self.net.encode_cond(cond_t)
+                coeff_pred_t = self.net.predict_coeff_norm(latent_t, self.basis_keys)
+                coeff_target_t = self._project_target_coeff_norm_torch(
+                    target_t,
+                    supervised_mask=supervised_mask,
+                )
+                coeff_loss, by_target, by_group = coefficient_aux_loss_tensor(
+                    coeff_pred_t,
+                    coeff_target_t,
+                    basis_keys=self.basis_keys,
+                    coeff_slices=self._coeff_slices,
+                    loss_cfg=loss_cfg,
+                )
+                coeff_loss_value = float(coeff_loss.detach().cpu().item())
+                target_values = {
+                    name: float(value.detach().cpu().item()) for name, value in by_target.items()
+                }
+                group_values = {
+                    name: float(value.detach().cpu().item()) for name, value in by_group.items()
+                }
+        finally:
+            for module, was_training in module_modes:
+                module.training = was_training
+            self._torch_last_out = cached_out
+            self._torch_last_coeff_norm = cached_coeff_norm
+
+        return coefficient_aux_loss_diagnostics(
+            coeff_loss=coeff_loss_value,
+            coeff_loss_weight=weight,
+            coeff_loss_by_target=target_values,
+            coeff_loss_by_group=group_values,
+        )
 
     def forward_raw(
         self,
@@ -540,6 +771,7 @@ class CoordMLPPODResidual:
         weight_decay: float = 0.0,
         apply_step: bool = True,
         target_raw: np.ndarray | None = None,
+        supervised_mask: np.ndarray | None = None,
         loss_cfg: dict[str, Any] | None = None,
     ) -> dict[str, float]:
         del weight_decay
@@ -558,28 +790,23 @@ class CoordMLPPODResidual:
         for p in params:
             if p.grad is not None:
                 p.grad.zero_()
-        coeff_loss_weight = float(self.model_cfg["coeff_loss_weight"])
-        if isinstance(loss_cfg, dict):
-            coeff_loss_weight = float(
-                dict(loss_cfg.get("coord_mlp_pod_residual", {})).get("coeff_loss_weight", coeff_loss_weight)
-            )
+        coeff_loss_weight = self._resolve_coeff_loss_weight(loss_cfg)
         use_coeff_loss = bool(target_raw is not None and coeff_loss_weight > 0.0)
+        coeff_loss = None
+        coeff_loss_by_target: dict[str, Any] = {}
+        coeff_loss_by_group: dict[str, Any] = {}
+        if target_raw is not None:
+            coeff_loss, coeff_loss_by_target, coeff_loss_by_group = self._cached_coeff_loss_tensor(
+                target_raw,
+                supervised_mask=supervised_mask,
+                loss_cfg=loss_cfg,
+            )
         self._torch_last_out.backward(grad_t, retain_graph=use_coeff_loss)
         coeff_loss_val = 0.0
-        if use_coeff_loss:
-            target_arr = np.asarray(target_raw, dtype=np.float32)
-            if target_arr.ndim != 4:
-                raise ValueError(f"coord_mlp_pod_residual target_raw must be [B,C,H,W], got {target_arr.shape}")
-            if int(target_arr.shape[1]) != len(self.basis_keys):
-                raise ValueError(
-                    "coord_mlp_pod_residual target_raw channel mismatch: "
-                    f"expected {len(self.basis_keys)}, got {target_arr.shape[1]}"
-                )
-            target_t = self.torch.as_tensor(target_arr, dtype=self.torch.float32, device=self.device)
-            coeff_target = self._project_target_coeff_norm_torch(target_t)
-            coeff_loss = self.torch.mean((self._torch_last_coeff_norm - coeff_target) ** 2)
-            (float(coeff_loss_weight) * coeff_loss).backward()
+        if coeff_loss is not None:
             coeff_loss_val = float(coeff_loss.detach().cpu().item())
+        if use_coeff_loss and coeff_loss is not None:
+            (float(coeff_loss_weight) * coeff_loss).backward()
         step_hidden = 0.0
         step_out = 0.0
         if bool(apply_step):
@@ -603,7 +830,18 @@ class CoordMLPPODResidual:
         return {
             "step_rel_hidden_mean": float(step_hidden),
             "step_rel_output": float(step_out),
-            "coeff_loss": float(coeff_loss_val),
+            **coefficient_aux_loss_diagnostics(
+                coeff_loss=coeff_loss_val,
+                coeff_loss_weight=coeff_loss_weight,
+                coeff_loss_by_target={
+                    name: float(value.detach().cpu().item())
+                    for name, value in coeff_loss_by_target.items()
+                },
+                coeff_loss_by_group={
+                    name: float(value.detach().cpu().item())
+                    for name, value in coeff_loss_by_group.items()
+                },
+            ),
         }
 
     def state_dict_numpy(self) -> dict[str, np.ndarray]:

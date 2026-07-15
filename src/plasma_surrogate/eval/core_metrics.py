@@ -27,6 +27,8 @@ from plasma_surrogate.eval.quality_score import (
     build_surrogate_quality_components,
     finite_mean,
     inf_if_nonfinite,
+    quality_score_protocol_metadata,
+    resolve_quality_score_protocol,
     target_std_for_score,
 )
 from plasma_surrogate.eval.sanity_checks import build_metric_validity_flags
@@ -155,10 +157,14 @@ def build_benchmark_eval_row(
     quality_score_cfg: dict[str, Any] | None = None,
     target_role_schema: dict[str, Any] | None = None,
     target_scalers: dict[str, Any] | None = None,
+    target_transforms: dict[str, Any] | None = None,
     output_vars: list[str] | None = None,
     extended_diagnostics_enabled: bool = False,
 ) -> dict[str, Any]:
     r2_scores = dict(r2_scores or {})
+    quality_protocol = resolve_quality_score_protocol(quality_score_cfg)
+    quality_score_cfg_effective = dict(quality_protocol["effective_config"])
+    quality_protocol_meta = quality_score_protocol_metadata(quality_protocol)
     paired_eval_keys = list(set(pred_eval.keys()) & set((true_eval or {}).keys()))
     target_vars_effective = [str(v) for v in list(target_vars_for_score or [])]
     core_eval_keys = list(paired_eval_keys)
@@ -345,7 +351,7 @@ def build_benchmark_eval_row(
         poisson_residual_penalty=poisson_residual_penalty,
         boundary_residual_penalty=boundary_residual_penalty,
         positive_target_negative_ratio_penalty=positive_target_negative_ratio_penalty,
-        quality_score_cfg=quality_score_cfg,
+        quality_score_cfg=quality_score_cfg_effective,
     )
     spatial_huber_components = build_spatial_huber_quality_components(
         true_eval=true_eval,
@@ -354,7 +360,9 @@ def build_benchmark_eval_row(
         distance_any=distance_any,
         target_vars=score_keys_for_quality,
         target_scalers=target_scalers,
-        cfg=quality_score_cfg,
+        target_transforms=target_transforms,
+        target_role_schema=target_role_schema,
+        cfg=quality_score_cfg_effective,
     )
     if spatial_huber_components:
         quality_components.update(spatial_huber_components)
@@ -387,12 +395,14 @@ def build_benchmark_eval_row(
         "quality_components": _json_dump_compact(quality_components),
         "validity_flags": _json_dump_compact(validity_flags),
         "target_metrics_invalid_vars": "|".join(str(v) for v in validity_flags["invalid_target_vars"]),
+        **quality_protocol_meta,
         **quality_components,
     }
     row: dict[str, Any] = {
         "model_id": model_id,
         "surrogate_quality_score": float(quality_components.get("surrogate_quality_score", float("nan"))),
         "target_metrics_valid": bool(validity_flags["target_metrics_valid"]),
+        **quality_protocol_meta,
         "_diagnostics": diagnostics,
     }
     positive_columns, positive_violation_rate, positive_negative_min = positive_diagnostic_columns(

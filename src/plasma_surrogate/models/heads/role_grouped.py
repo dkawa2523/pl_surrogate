@@ -13,7 +13,9 @@ OUTPUT_HEAD_MODE_ROLE_GROUPED = "role_grouped"
 OUTPUT_HEAD_MODE_CUSTOM_GROUPS = "custom_groups"
 GROUPED_OUTPUT_HEAD_MODES = frozenset({OUTPUT_HEAD_MODE_ROLE_GROUPED, OUTPUT_HEAD_MODE_CUSTOM_GROUPS})
 OUTPUT_GROUP_HEAD_DEFAULT = "default"
+OUTPUT_GROUP_HEAD_SPATIAL_REFINE = "spatial_refine"
 OUTPUT_GROUP_HEAD_POISSON_HYBRID = "poisson_hybrid"
+OUTPUT_GROUP_HEAD_TYPES = frozenset({OUTPUT_GROUP_HEAD_DEFAULT, OUTPUT_GROUP_HEAD_SPATIAL_REFINE})
 ROLE_GROUPED_OUTPUT_HEAD_MODELS = frozenset(
     {
         "fno",
@@ -130,12 +132,13 @@ def validate_output_head_group_options(
                 f"{cfg_prefix}.model_cfg.output_heads.group_options.{group_name}.head={head!r} "
                 "is a planned optional experiment lane but is not implemented yet; use head='default'"
             )
-        if head != OUTPUT_GROUP_HEAD_DEFAULT:
+        if head not in OUTPUT_GROUP_HEAD_TYPES:
             raise ValueError(
                 f"{cfg_prefix}.model_cfg.output_heads.group_options.{group_name}.head must be "
-                f"{OUTPUT_GROUP_HEAD_DEFAULT!r}; {OUTPUT_GROUP_HEAD_POISSON_HYBRID!r} is planned but unavailable"
+                f"one of {sorted(OUTPUT_GROUP_HEAD_TYPES)}; "
+                f"{OUTPUT_GROUP_HEAD_POISSON_HYBRID!r} is planned but unavailable"
             )
-        normalized[group_name] = {"head": OUTPUT_GROUP_HEAD_DEFAULT}
+        normalized[group_name] = {"head": head}
     return normalized
 
 
@@ -304,22 +307,36 @@ def build_role_grouped_conv2d_head(
     in_channels: int,
     output_keys: list[str],
     target_groups: Mapping[str, TargetGroup],
+    group_options: Mapping[str, Mapping[str, str]] | None = None,
     with_rho_eff_head: bool,
 ):
     nn = torch.nn
     output_order = [str(v) for v in output_keys]
     group_items = list(target_groups.items())
+    group_options_by_name = {str(name): dict(value) for name, value in dict(group_options or {}).items()}
     group_indices: list[list[int]] = []
     for _, group in group_items:
         group_indices.append([output_order.index(str(target)) for target in group.targets])
+
+    def _build_group_head(group_name: str, out_channels: int):
+        head = str(
+            group_options_by_name.get(str(group_name), {}).get("head", OUTPUT_GROUP_HEAD_DEFAULT)
+        ).strip().lower() or OUTPUT_GROUP_HEAD_DEFAULT
+        if head == OUTPUT_GROUP_HEAD_SPATIAL_REFINE:
+            return nn.Sequential(
+                nn.Conv2d(int(in_channels), int(in_channels), kernel_size=3, padding=1),
+                nn.GELU(),
+                nn.Conv2d(int(in_channels), int(out_channels), kernel_size=1),
+            )
+        return nn.Conv2d(int(in_channels), int(out_channels), kernel_size=1)
 
     class _RoleGroupedConv2dHead(nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.group_heads = nn.ModuleDict(
                 {
-                    f"group_{idx}": nn.Conv2d(int(in_channels), len(indices), kernel_size=1)
-                    for idx, indices in enumerate(group_indices)
+                    f"group_{idx}": _build_group_head(group_name, len(indices))
+                    for idx, ((group_name, _group), indices) in enumerate(zip(group_items, group_indices))
                     if indices
                 }
             )
@@ -341,7 +358,12 @@ def build_role_grouped_conv2d_head(
         def step_reference(self):
             if self.group_heads:
                 first_key = next(iter(self.group_heads.keys()))
-                return self.group_heads[first_key].weight
+                head = self.group_heads[first_key]
+                if hasattr(head, "weight"):
+                    return head.weight
+                for module in reversed(list(head.modules())):
+                    if module is not head and hasattr(module, "weight"):
+                        return module.weight
             if self.rho_head is not None:
                 return self.rho_head.weight
             return None
@@ -354,7 +376,9 @@ __all__ = [
     "OUTPUT_HEAD_MODE_CUSTOM_GROUPS",
     "OUTPUT_HEAD_MODE_SHARED",
     "OUTPUT_GROUP_HEAD_DEFAULT",
+    "OUTPUT_GROUP_HEAD_SPATIAL_REFINE",
     "OUTPUT_GROUP_HEAD_POISSON_HYBRID",
+    "OUTPUT_GROUP_HEAD_TYPES",
     "GROUPED_OUTPUT_HEAD_MODES",
     "ROLE_GROUPED_OUTPUT_HEAD_MODELS",
     "build_role_grouped_conv2d_head",

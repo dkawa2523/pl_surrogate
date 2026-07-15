@@ -726,6 +726,9 @@ def _build_coord_mlp_net(
 class CoordMLPTorch:
     """Geometry-aware full-field coordinate decoder family."""
 
+    requires_spatial_features = True
+    requires_scaled_spatial_features = True
+
     def __init__(
         self,
         *,

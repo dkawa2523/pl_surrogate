@@ -94,7 +94,10 @@ def test_infer_coord_mlp_smoke(tmp_path: Path, model_name: str, per_model_cfg: d
             "unet_like": {"batch_size_cases": 4, "shuffle_cases": True},
             model_name: per_model_cfg,
         },
-        "inference": {"single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}}},
+        "inference": {
+            "single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}},
+            "qoi": {"uniformity": {"target": "ne"}},
+        },
     }
     cfg_path = tmp_path / f"{model_name}.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:

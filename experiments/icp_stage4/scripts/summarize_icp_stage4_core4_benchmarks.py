@@ -12,8 +12,21 @@ from typing import Any
 import numpy as np
 import yaml
 
+from icp_stage4_protocol_reliability import assess_protocol_reliability, read_validation_selection
 
-CORE_MODELS = ("global_mlp", "unet", "ffno", "cno_operator_unet")
+
+CORE_MODELS = (
+    "global_mlp",
+    "deeponet_pod",
+    "u_no",
+    "unet",
+    "unetpp",
+    "unetpp_attn",
+    "fno",
+    "ffno",
+    "cno",
+    "cno_operator_unet",
+)
 SIZE_ORDER = ("smoke", "full")
 TARGETS = ("ne", "ni", "Te", "phi")
 SUMMARY_COLUMNS = (
@@ -26,6 +39,16 @@ SUMMARY_COLUMNS = (
     "eval_protocol_reliable",
     "eval_protocol_issue",
     "primary_metric_protocol_reliable",
+    "eval_protocol_mode_effective",
+    "primary_split_effective",
+    "min_primary_test_cases",
+    "min_primary_test_groups",
+    "primary_test_groups",
+    "validation_selection_reliable",
+    "validation_selection_issue",
+    "validation_selection_score",
+    "validation_selected_epoch",
+    "validation_metrics",
     "interp_overlap_fallback_applied",
     "interp_mode_effective",
     "interp_test_cases",
@@ -147,40 +170,24 @@ def _split_test_count(path: Path) -> int | None:
     return int(len(test_ids))
 
 
-def _protocol_summary_from_output(output_dir: Path, *, primary_metric: str) -> dict[str, str]:
-    split_dir = output_dir / "preprocessing" / "split"
-    interp_status = {}
-    status_path = split_dir / "split_interp_status_v1.json"
-    if status_path.exists():
-        try:
-            interp_status = _load_json(status_path)
-        except Exception:
-            interp_status = {}
+def _protocol_summary_from_output(
+    output_dir: Path,
+    *,
+    leaderboard_row: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    return assess_protocol_reliability(output_dir, leaderboard_row=leaderboard_row)
 
-    interp_test_cases = _split_test_count(split_dir / "split_interp_v1.json")
-    extrap_test_cases = _split_test_count(split_dir / "split_extrap_v1.json")
-    structure_holdout_test_cases = _split_test_count(split_dir / "split_structure_holdout_v1.json")
-    issues: list[str] = []
-    if bool(interp_status.get("fallback_applied", False)):
-        issues.append(f"interp_overlap_fallback:{interp_status.get('reason', 'unknown')}")
-    if interp_test_cases is not None and interp_test_cases < 3:
-        issues.append(f"interp_test_too_small:{interp_test_cases}")
 
-    primary_metric_lower = str(primary_metric).strip().lower()
-    primary_uses_interp = ("interp" in primary_metric_lower) or ("dual" in primary_metric_lower)
-    primary_metric_protocol_reliable = bool((not primary_uses_interp) or len(issues) == 0)
-    return {
-        "eval_protocol_reliable": "true" if len(issues) == 0 else "false",
-        "eval_protocol_issue": "|".join(issues),
-        "primary_metric_protocol_reliable": "true" if primary_metric_protocol_reliable else "false",
-        "interp_overlap_fallback_applied": "true" if bool(interp_status.get("fallback_applied", False)) else "false",
-        "interp_mode_effective": str(interp_status.get("applied_mode", "")),
-        "interp_test_cases": "" if interp_test_cases is None else str(interp_test_cases),
-        "extrap_test_cases": "" if extrap_test_cases is None else str(extrap_test_cases),
-        "structure_holdout_test_cases": ""
-        if structure_holdout_test_cases is None
-        else str(structure_holdout_test_cases),
-    }
+def _reliability_intersection(raw: Any, assessed: Any) -> str:
+    """Never allow a legacy/raw true value to override a failed assessment."""
+
+    raw_text = str(raw or "").strip().lower()
+    assessed_text = str(assessed or "").strip().lower()
+    if "false" in {raw_text, assessed_text}:
+        return "false"
+    if raw_text == "true" and assessed_text == "true":
+        return "true"
+    return assessed_text if assessed_text in {"true", "false"} else "false"
 
 
 def _summary_row(*, size: str, model: str, leaderboard: Path) -> dict[str, str]:
@@ -204,22 +211,34 @@ def _summary_row(*, size: str, model: str, leaderboard: Path) -> dict[str, str]:
     primary_finite = math.isfinite(_as_float(raw.get("primary_metric_value")))
     protocol_summary = _protocol_summary_from_output(
         leaderboard.parent,
-        primary_metric=str(raw.get("primary_metric", "")),
+        leaderboard_row=raw,
     )
-    primary_metric_protocol_reliable = str(
-        raw.get(
-            "primary_metric_protocol_reliable",
-            protocol_summary.get("primary_metric_protocol_reliable", "true"),
-        )
-    ).strip().lower()
+    validation_summary = read_validation_selection(
+        leaderboard.parent,
+        model_id=str(raw.get("model_id") or model),
+        primary_split=str(protocol_summary.get("primary_split_effective", "")),
+    )
+    primary_metric_protocol_reliable = _reliability_intersection(
+        raw.get("primary_metric_protocol_reliable"),
+        protocol_summary.get("primary_metric_protocol_reliable"),
+    )
     primary_reliable_raw = str(raw.get("primary_metric_reliable", "")).strip().lower()
     primary_reliable = (
         primary_reliable_raw
         if primary_reliable_raw in {"true", "false"}
         else ("true" if (primary_finite and density_valid) else "false")
     )
-    if primary_metric_protocol_reliable == "false":
+    if primary_metric_protocol_reliable != "true":
         primary_reliable = "false"
+    eval_protocol_reliable = _reliability_intersection(
+        raw.get("eval_protocol_reliable"),
+        protocol_summary.get("eval_protocol_reliable"),
+    )
+    issue_values = [
+        str(raw.get("eval_protocol_issue", "")).strip(),
+        str(protocol_summary.get("eval_protocol_issue", "")).strip(),
+    ]
+    eval_protocol_issue = "|".join(dict.fromkeys(value for value in issue_values if value))
     score_total_finite = math.isfinite(_as_float(raw.get("score_total_dual", raw.get("score_total", ""))))
     row = {key: "" for key in SUMMARY_COLUMNS}
     row.update(
@@ -230,15 +249,19 @@ def _summary_row(*, size: str, model: str, leaderboard: Path) -> dict[str, str]:
             "primary_metric": raw.get("primary_metric", ""),
             "primary_metric_value": raw.get("primary_metric_value", ""),
             "primary_metric_reliable": primary_reliable,
-            "eval_protocol_reliable": raw.get(
-                "eval_protocol_reliable",
-                protocol_summary.get("eval_protocol_reliable", ""),
-            ),
-            "eval_protocol_issue": raw.get("eval_protocol_issue", protocol_summary.get("eval_protocol_issue", "")),
-            "primary_metric_protocol_reliable": raw.get(
-                "primary_metric_protocol_reliable",
-                protocol_summary.get("primary_metric_protocol_reliable", ""),
-            ),
+            "eval_protocol_reliable": eval_protocol_reliable,
+            "eval_protocol_issue": eval_protocol_issue,
+            "primary_metric_protocol_reliable": primary_metric_protocol_reliable,
+            "eval_protocol_mode_effective": protocol_summary.get("eval_protocol_mode_effective", ""),
+            "primary_split_effective": protocol_summary.get("primary_split_effective", ""),
+            "min_primary_test_cases": protocol_summary.get("min_primary_test_cases", ""),
+            "min_primary_test_groups": protocol_summary.get("min_primary_test_groups", ""),
+            "primary_test_groups": protocol_summary.get("primary_test_groups", ""),
+            "validation_selection_reliable": validation_summary.get("validation_selection_reliable", ""),
+            "validation_selection_issue": validation_summary.get("validation_selection_issue", ""),
+            "validation_selection_score": validation_summary.get("validation_selection_score", ""),
+            "validation_selected_epoch": validation_summary.get("validation_selected_epoch", ""),
+            "validation_metrics": validation_summary.get("validation_metrics", ""),
             "interp_overlap_fallback_applied": raw.get(
                 "interp_overlap_fallback_applied",
                 protocol_summary.get("interp_overlap_fallback_applied", ""),

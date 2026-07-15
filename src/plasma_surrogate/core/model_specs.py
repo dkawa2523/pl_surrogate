@@ -49,6 +49,8 @@ class ModelSpec:
     allowed_adapter_modes: tuple[str, ...]
     auto_adapter_mode: str
     requires_structure_pack: bool = False
+    requires_spatial_features: bool = False
+    requires_scaled_spatial_features: bool = False
     grid_torch: bool = False
     cond_only_torch: bool = False
     mainline_geom_pack: bool = False
@@ -65,6 +67,8 @@ def _spec(
     allowed_adapter_modes: Iterable[str],
     auto_adapter_mode: str,
     requires_structure_pack: bool = False,
+    requires_spatial_features: bool | None = None,
+    requires_scaled_spatial_features: bool = False,
     grid_torch: bool = False,
     cond_only_torch: bool = False,
     mainline_geom_pack: bool = False,
@@ -79,6 +83,10 @@ def _spec(
         allowed_adapter_modes=tuple(allowed_adapter_modes),
         auto_adapter_mode=auto_adapter_mode,
         requires_structure_pack=requires_structure_pack,
+        requires_spatial_features=(
+            bool(grid_torch) if requires_spatial_features is None else bool(requires_spatial_features)
+        ),
+        requires_scaled_spatial_features=bool(requires_scaled_spatial_features),
         grid_torch=grid_torch,
         cond_only_torch=cond_only_torch,
         mainline_geom_pack=mainline_geom_pack,
@@ -211,18 +219,23 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         "coord_mlp_fourier",
         family="coord_mlp",
         supported_input_modes=(TABLE_PLUS_STRUCTURE,),
-        allowed_adapter_modes=(ADAPTER_COORD_PACK, ADAPTER_HYBRID_PACK_DESCRIPTOR, ADAPTER_AUTO),
+        # The coordinate-MLP runtime consumes the spatial feature pack only.
+        # Descriptor fusion is a separate, explicit model lane rather than an
+        # adapter name that this implementation would silently ignore.
+        allowed_adapter_modes=(ADAPTER_COORD_PACK, ADAPTER_AUTO),
         auto_adapter_mode=ADAPTER_COORD_PACK,
         requires_structure_pack=True,
+        requires_scaled_spatial_features=True,
         grid_torch=True,
     ),
     "coord_mlp_siren": _spec(
         "coord_mlp_siren",
         family="coord_mlp",
         supported_input_modes=(TABLE_PLUS_STRUCTURE,),
-        allowed_adapter_modes=(ADAPTER_COORD_PACK, ADAPTER_HYBRID_PACK_DESCRIPTOR, ADAPTER_AUTO),
+        allowed_adapter_modes=(ADAPTER_COORD_PACK, ADAPTER_AUTO),
         auto_adapter_mode=ADAPTER_COORD_PACK,
         requires_structure_pack=True,
+        requires_scaled_spatial_features=True,
         grid_torch=True,
         product_status=PRODUCT_STATUS_FIRST_CLASS,
         product_category=PRODUCT_CATEGORY_COORDINATE_OPERATOR,
@@ -232,9 +245,10 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         "coord_mlp_pod_residual",
         family="coord_mlp",
         supported_input_modes=(TABLE_PLUS_STRUCTURE,),
-        allowed_adapter_modes=(ADAPTER_COORD_PACK, ADAPTER_HYBRID_PACK_DESCRIPTOR, ADAPTER_AUTO),
+        allowed_adapter_modes=(ADAPTER_COORD_PACK, ADAPTER_AUTO),
         auto_adapter_mode=ADAPTER_COORD_PACK,
         requires_structure_pack=True,
+        requires_scaled_spatial_features=True,
         grid_torch=True,
     ),
     "u_no": _spec(
@@ -290,14 +304,13 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         "deeponet_plasma",
         family="deeponet_plasma",
         supported_input_modes=(TABLE_PLUS_STRUCTURE,),
-        allowed_adapter_modes=(
-            ADAPTER_COORD_PACK,
-            ADAPTER_DESCRIPTOR_BRANCH,
-            ADAPTER_HYBRID_PACK_DESCRIPTOR,
-            ADAPTER_AUTO,
-        ),
+        # The mainline plasma operator receives local/case spatial rows through
+        # coord_pack.  Its optional set-pooling branch pools those same rows;
+        # it does not consume a structure-descriptor artifact.
+        allowed_adapter_modes=(ADAPTER_COORD_PACK, ADAPTER_AUTO),
         auto_adapter_mode=ADAPTER_COORD_PACK,
         requires_structure_pack=True,
+        requires_spatial_features=True,
         product_status=PRODUCT_STATUS_FIRST_CLASS,
         product_category=PRODUCT_CATEGORY_COORDINATE_OPERATOR,
         benchmark_scope="deeponet_isolated",

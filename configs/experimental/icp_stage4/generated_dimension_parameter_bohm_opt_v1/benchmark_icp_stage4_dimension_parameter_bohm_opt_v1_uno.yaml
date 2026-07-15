@@ -1,0 +1,345 @@
+benchmark:
+  output_dir: runs/icp_stage4_dimension_parameter_v1/uno
+  profile: m7_u_no_experimental
+  seed: 411
+  phi_mode: direct
+  eval:
+    mask_metrics: plasma_only
+    interp_mode: marginal
+    protocol_variant: icp_stage4_dimension_parameter_v1_uno
+    target_family_for_score: allvars
+    target_vars_for_score:
+    - ne
+    - ni
+    - Te
+    - phi
+    primary_metric: test_r2_group_default_plasma
+    objective_mode: min
+    region_bands:
+      mode: fixed_px
+      boundary_in_px: 2.0
+      deep_plasma_px: 10.0
+    spatial_distribution_audit:
+      enabled: true
+      vars: all
+      top_fraction: 0.1
+      plot_worst_cases: 3
+      plot_representative_cases: true
+    quality_score:
+      mode: spatial_huber
+      target_aggregation: uniform_by_target
+      delta: 1.0
+      boundary_alpha: 0.0
+      avgpool_lambda: 0.05
+      gradient_lambda: 0.1
+      multiscale_scales:
+      - 2
+      - 4
+      p90_weight: 0.25
+      worst_weight: 0.1
+  eval_protocol:
+    mode: primary_axis
+    scope: u_no_isolated
+    primary_split: structure_holdout
+    interp_weight: 0.5
+    extrap_weight: 0.5
+    frozen_ref_tag: periodic_global_frozen_v2
+    interp_mode: marginal
+    min_primary_test_cases: 3
+    min_primary_test_groups: 3
+  dataset:
+    type: csv_npz
+    root: data\outputs_icp_stage4_enriched_360_csv_npz_core4_part_lite_v2
+    index_csv: index.csv
+    targets:
+    - id: ne
+      source_key: ne
+      value_transform: identity
+      units: m^-3
+      dtype: float32
+    - id: ni
+      source_key: ni
+      value_transform: identity
+      units: m^-3
+      dtype: float32
+    - id: Te
+      source_key: Te
+      value_transform: identity
+      units: eV
+      dtype: float32
+    - id: phi
+      source_key: phi
+      value_transform: identity
+      units: V
+      dtype: float32
+    cond_columns:
+    - llcoil
+    - rrc
+    - nncoil
+    - rrce
+    - zzc
+    - pp
+    - pp0
+    axis_column: axis
+    fields_npz_column: fields_npz
+    case_id_column: case_id
+    base_case_id_column: base_case_id
+    split_group_column: split_group
+    geometry_root: geometry
+  split:
+    seed: 7
+    ratios:
+    - 0.8
+    - 0.1
+    - 0.1
+    structure_holdout:
+      enabled: true
+      required: true
+      group_key: base_case_id
+  preprocessing:
+    scalers:
+      enforce_target_transforms: true
+      y_fit_policy: plasma_only
+      target_transforms:
+        ne:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        ni:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        Te:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        phi:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+      cond: robust
+      fit_split: structure_holdout
+    distance_contract:
+      require_negative_outside: error
+    coord_grid_contract:
+      require_requested_source: error
+    coord_grid_source: rz_linear
+    coord_features:
+      enabled: true
+      output: features/coord_feature_pack.npz
+      channels_from_profile: geom_v1_mainline
+      distance_transform_stats:
+        enabled: true
+      scaling:
+        enabled: true
+        mode: zscore
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+  train:
+    unet_like:
+      batch_size_cases: 2
+      shuffle_cases: true
+    loss:
+      supervised:
+        type: mse
+        mask: plasma_only
+        nan_region_policy: mask_only
+        normalization: sample_mean
+        target_weights:
+          ne: 1.0
+          ni: 1.0
+          Te: 1.0
+          phi: 1.0
+        physical_weighting:
+          axisymmetric_volume: true
+          density_source: ne
+          density_weighted_targets:
+          - Te
+      multitask:
+        weighting: fixed
+        fixed_weights_by_var:
+          ne: 1.0
+          ni: 1.0
+          Te: 1.0
+          phi: 1.0
+    u_no:
+      epochs: 70
+      lr: 0.0003
+      optimizer:
+        type: adamw
+        lr: 0.0003
+        weight_decay: 0.0001
+        schedule: cosine
+      target_family: allvars
+      target_vars:
+      - ne
+      - ni
+      - Te
+      - phi
+      input_features:
+        mode: geom_feature_pack
+        features:
+        - x
+        - y
+        - mask_plasma
+        - distance_signed
+        - distance_any
+        require_pack: error
+        distance_transform:
+          mode: bounded_auto
+      selection:
+        mode: best_val_loss
+      model_cfg:
+        backend: torch
+        n_modes: 10
+        fno_n_modes: 10
+        uno_cfg:
+          width: 48
+          n_layers: 4
+          dropout: 0.0
+          padding_fraction: 0.08
+          padding_mode: reflect
+      batch_size_cases: 2
+  boundary_operator:
+    primary_qoi_key: Gamma_i
+  physics:
+    enabled: false
+  inference:
+    axis:
+      mode: steady
+      value: 0.0
+    ood:
+      physics:
+        enabled: true
+        symbols:
+          density: ne
+          temperature: Te
+          potential: phi
+    qoi:
+      uniformity:
+        target: ni
+        preferred_targets:
+        - ni
+        - ne
+        - Te
+        region: wafer_near
+        mid_height_band_px: 2
+      bohm_flux:
+        density_target: ni
+        temperature_target: Te
+    postprocess:
+      positive_vars:
+      - ne
+      - ni
+      - Te
+      positive_floor: 1.0e-30
+    optimize:
+      enabled: true
+      backend: optuna
+      n_trials: 192
+      seed: 411
+      space:
+        llcoil:
+        - 0.5457
+        - 1.444
+        rrc:
+        - 2.3979
+        - 9.5068
+        nncoil:
+        - 4.0
+        - 4.0
+        rrce:
+        - 20.3595
+        - 29.3805
+        zzc:
+        - 0.2423
+        - 4.6792
+        pp:
+        - 586.464
+        - 2902.557
+        pp0:
+        - 0.003807
+        - 0.086737
+      geom:
+        geom_id: default
+      backend_cfg:
+        sampler: tpe
+        n_startup_trials: 32
+        multivariate: false
+      objective:
+        mode: weighted_sum
+        terms:
+        - key: bohm_flux_area_cv
+          direction: min
+          weight: 1.0
+      constraints:
+      - key: bohm_flux_area_mean
+        lower: 6.0249874e+16
+      output:
+        save_fields: top_k
+        top_k: 5
+    single:
+      enabled: true
+      case_id: dimension_parameter_reference
+      cond:
+        llcoil: 0.9982
+        rrc: 5.9389
+        nncoil: 4.0
+        rrce: 24.9477
+        zzc: 2.4968
+        pp: 1747.712
+        pp0: 0.017126
+      geom:
+        geom_id: default
+      axis:
+        mode: steady
+        value: 0.0
+  runtime:
+    input_mode: table_plus_structure
+    strict_input_mode: error
+    structure:
+      feature_profile: geom_v1_mainline
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: auto
+      provider_mode: fixed
+  metadata:
+    study: icp_stage4_dimension_parameter_v1
+    case_name: icp_stage4_dimension_parameter_v1_uno
+    comparison_role: dimension_parameter_counterpart_to_coil_sdf
+    representation: scalar_coil_dimensions_plus_fixed_chamber_grid
+    structure_condition_columns:
+    - llcoil
+    - rrc
+    - nncoil
+    - rrce
+    - zzc
+    process_condition_columns:
+    - pp
+    - pp0
+    case_varying_structure_maps: false
+    target_space: physical_linear_zscore
+    training_objective: axisymmetric_volume_and_electron_energy_weighted_mse
+    optimization_study: icp_stage4_dimension_parameter_bohm_opt_v1
+    optimization_case_name: icp_stage4_dimension_parameter_bohm_opt_v1_uno
+    optimization_variables: four_continuous_coil_dimensions_and_pp_pp0
+    fixed_nncoil: 4
+    optimization_objective: wafer_near_axisymmetric_bohm_flux_cv
+    minimum_bohm_flux_area_mean_ratio: 0.8
+runtime:
+  input_mode: table_plus_structure
+  strict_input_mode: error
+  structure:
+    feature_profile: geom_v1_mainline
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: auto
+    provider_mode: fixed

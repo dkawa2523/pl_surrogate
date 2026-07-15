@@ -4,6 +4,7 @@ import pytest
 import numpy as np
 
 from plasma_surrogate.core.torch_backend import require_torch
+from plasma_surrogate.features.structure_feature_registry import FEATURE_PROFILE_CHANNELS
 from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.deeponet.plasma_operator_torch import DeepONetPlasmaOperatorTorch
 
@@ -197,6 +198,63 @@ def test_deeponet_plasma_cond_only_skips_sensor_value_build():
     cond = torch.rand((2, 5), dtype=torch.float32)
     out = model.predict_fields_torch(cond, geom_ctx=geom)
     assert set(out.keys()) == {"ne", "ni", "Te", "phi"}
+
+
+def test_deeponet_plasma_uses_case_aligned_spatial_feature_batches():
+    require_torch_runtime()
+    torch = require_torch()
+    h, w = 4, 5
+    channels = list(FEATURE_PROFILE_CHANNELS["part_lite_v1"])
+    model = DeepONetPlasmaOperatorTorch(
+        cond_dim=3,
+        grid_shape=(h, w),
+        output_keys=["phi"],
+        latent_dim=8,
+        hidden_dim=16,
+        branch_mode="cond_only",
+        sensor_feature_names=channels,
+        seed=23,
+    )
+
+    class _Geom:
+        pass
+
+    geom = _Geom()
+    yy, xx = np.meshgrid(
+        np.linspace(0.0, 1.0, h, dtype=np.float32),
+        np.linspace(0.0, 1.0, w, dtype=np.float32),
+        indexing="ij",
+    )
+    geom.coord_grid = np.stack([xx, yy], axis=0).astype(np.float32)
+    spatial = np.zeros((2, h, w, len(channels)), dtype=np.float32)
+    spatial[..., 0] = xx
+    spatial[..., 1] = yy
+    spatial[..., 2:5] = np.asarray([1.0, -0.25, 0.2], dtype=np.float32)
+    spatial[0, ..., 5:] = 0.0
+    spatial[1, ..., 5:] = 1.0
+    cond = torch.zeros((2, 3), dtype=torch.float32)
+
+    batched = model.predict_fields_torch(cond, geom_ctx=geom, spatial_features=spatial)["phi"]
+    singles = torch.cat(
+        [
+            model.predict_fields_torch(
+                cond[i : i + 1],
+                geom_ctx=geom,
+                spatial_features=spatial[i],
+            )["phi"]
+            for i in range(2)
+        ],
+        dim=0,
+    )
+
+    np.testing.assert_allclose(
+        batched.detach().cpu().numpy(),
+        singles.detach().cpu().numpy(),
+        atol=1.0e-6,
+        rtol=1.0e-6,
+    )
+    assert not torch.allclose(batched[0], batched[1])
+    assert model.query_feature_names == channels[2:]
 
 
 def test_deeponet_plasma_missing_query_features_policy_error_raises():

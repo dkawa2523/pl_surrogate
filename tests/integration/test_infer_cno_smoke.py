@@ -69,7 +69,10 @@ def _cno_dual_mode_cfg(*, run_dir: Path) -> dict:
                 },
             },
         },
-        "inference": {"single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}}},
+        "inference": {
+            "single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}},
+            "qoi": {"uniformity": {"target": "ne"}},
+        },
     }
 
 

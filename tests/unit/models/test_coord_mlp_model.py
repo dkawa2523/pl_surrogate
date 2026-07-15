@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from plasma_surrogate.infer.predictor import InferencePredictor
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import fit_pod_basis_from_targets
@@ -212,6 +213,17 @@ def test_coord_mlp_pod_residual_forward_backward_and_checkpoint_roundtrip(tmp_pa
     cond = np.ones((2, 3), dtype=np.float32)
     pred = model.forward_raw(cond, training=True)
     assert pred.shape == (2, 4, 8, 8)
+    cached_out = model._torch_last_out
+    cached_coeff = model._torch_last_coeff_norm
+    aux_diag = model.auxiliary_loss_diagnostics(
+        np.zeros_like(pred, dtype=np.float32),
+        loss_cfg={"coord_mlp_pod_residual": {"coeff_loss_weight": 0.1}},
+    )
+    assert aux_diag["coeff_loss"] == aux_diag["loss_aux_coeff"]
+    assert aux_diag["loss_aux_coeff_weighted"] == pytest.approx(0.1 * aux_diag["loss_aux_coeff"])
+    assert aux_diag["loss_aux_total"] == aux_diag["loss_aux_coeff_weighted"]
+    assert model._torch_last_out is cached_out
+    assert model._torch_last_coeff_norm is cached_coeff
     diag = model.backward_raw(
         np.ones_like(pred, dtype=np.float32) * 0.01,
         lr=1.0e-3,
@@ -219,6 +231,8 @@ def test_coord_mlp_pod_residual_forward_backward_and_checkpoint_roundtrip(tmp_pa
         loss_cfg={"coord_mlp_pod_residual": {"coeff_loss_weight": 0.1}},
     )
     assert diag["coeff_loss"] >= 0.0
+    for key in ("coeff_loss", "loss_aux_coeff", "loss_aux_coeff_weighted", "loss_aux_total"):
+        assert diag[key] == pytest.approx(aux_diag[key])
 
     ckpt_dir = tmp_path / "coord_mlp_pod_residual_ckpt"
     save_checkpoint(model, ckpt_dir)
@@ -227,6 +241,50 @@ def test_coord_mlp_pod_residual_forward_backward_and_checkpoint_roundtrip(tmp_pa
     loaded.set_static_spatial_features(_spatial_features())
     out = loaded.forward_raw(cond)
     assert out.shape == (2, 4, 8, 8)
+
+
+def test_coord_mlp_pod_residual_capability_routes_product_inference(tmp_path: Path) -> None:
+    require_torch_runtime()
+    model = build_model_from_name(
+        model_name="coord_mlp_pod_residual",
+        input_dim=3,
+        grid_shape=(8, 8),
+        model_cfg=_pod_residual_cfg(),
+        out_channels=4,
+        output_keys=["ne", "ni", "Te", "phi"],
+        unet_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+        pod_basis_bundle=_pod_basis_bundle(),
+    )
+
+    class _FeatureBuilder:
+        def __init__(self) -> None:
+            self.scaling_required = False
+
+        def require_coord_feature_scaling_enabled(self) -> None:
+            self.scaling_required = True
+
+        @staticmethod
+        def resolve_coord_feature_channels(candidate) -> list[str]:
+            return list(candidate.input_feature_channels)
+
+        @staticmethod
+        def build_grid_feature_rows(geom, channels) -> np.ndarray:
+            del geom
+            assert channels == ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
+            return _spatial_features().reshape(-1, len(channels))
+
+    checkpoint = save_checkpoint(model, tmp_path / "pod_residual_inference")
+    loaded = load_checkpoint(checkpoint)
+    feature_builder = _FeatureBuilder()
+    predictor = InferencePredictor(model=loaded, feature_builder=feature_builder)
+    geom = type("Geom", (), {"mask_plasma": np.ones((8, 8), dtype=np.float32)})()
+    fields = predictor.predict_fields(np.ones((3,), dtype=np.float32), geom)
+
+    assert loaded.requires_spatial_features is True
+    assert loaded.requires_scaled_spatial_features is True
+    assert feature_builder.scaling_required is True
+    assert set(fields) == {"ne", "ni", "Te", "phi"}
+    assert all(np.asarray(field).shape == (1, 8, 8) for field in fields.values())
 
 
 def test_coord_mlp_accepts_batched_spatial_features() -> None:

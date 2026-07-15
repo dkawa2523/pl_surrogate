@@ -10,6 +10,7 @@ from plasma_surrogate.core.torch_backend import require_torch
 from plasma_surrogate.models._torch_spatial_common import _resolve_torch_device
 
 POISSON_POTENTIAL_OUTPUT_KEY = "phi"
+POISSON_SENSOR_FEATURE_NAMES = ("rho_eff",)
 
 
 class DeepONetPoissonHeadTorch:
@@ -25,6 +26,7 @@ class DeepONetPoissonHeadTorch:
         self._torch = require_torch()
         self.device = _resolve_torch_device(self._torch)
         self.net = deeponet_poisson
+        self._validate_operator_contract()
         if hasattr(self.net, "to"):
             self.net.to(self.device)
         elif hasattr(self.net, "device"):
@@ -39,6 +41,34 @@ class DeepONetPoissonHeadTorch:
         if self.freeze:
             for p in self.net.parameters():
                 p.requires_grad_(False)
+
+    def _validate_operator_contract(self) -> None:
+        """Fail early unless the wrapped operator represents rho_eff -> phi."""
+
+        sensor_names = tuple(str(v) for v in getattr(self.net, "sensor_feature_names", ()))
+        sensor_dim = getattr(self.net, "sensor_feature_dim", None)
+        if sensor_names != POISSON_SENSOR_FEATURE_NAMES or int(sensor_dim or 0) != 1:
+            raise ValueError(
+                "DeepONet Poisson head requires exactly one sensor feature named "
+                f"'rho_eff'; got names={list(sensor_names)}, dim={sensor_dim}"
+            )
+        query_names = tuple(str(v) for v in getattr(self.net, "query_feature_names", ()))
+        if query_names:
+            raise ValueError(
+                "DeepONet Poisson head query features must be empty because its trunk "
+                f"is coordinate-only; got={list(query_names)}"
+            )
+        output_keys = tuple(str(v) for v in getattr(self.net, "output_keys", ()))
+        if output_keys != (POISSON_POTENTIAL_OUTPUT_KEY,):
+            raise ValueError(
+                "DeepONet Poisson head requires output_keys=['phi']; "
+                f"got={list(output_keys)}"
+            )
+        if str(getattr(self.net, "branch_mode", "")).strip().lower() == "cond_only":
+            raise ValueError(
+                "DeepONet Poisson head branch_mode must consume rho_eff sensors; "
+                "branch_mode='cond_only' is not valid"
+            )
 
     @classmethod
     def from_cache(
@@ -79,7 +109,9 @@ class DeepONetPoissonHeadTorch:
         self.net.eval()
 
     def to_meta(self) -> dict[str, Any]:
+        net_meta = self.net.to_meta() if callable(getattr(self.net, "to_meta", None)) else {}
         return {
+            **dict(net_meta),
             "sensor_indices": [int(v) for v in self.sensor_indices.tolist()],
             "query_indices": [int(v) for v in self.query_indices.tolist()],
             "flatten_order": self.flatten_order,
@@ -119,6 +151,11 @@ class DeepONetPoissonHeadTorch:
         rho = torch.as_tensor(rho_eff, dtype=torch.float32, device=self.device)
         if rho.ndim == 3:
             rho = rho[:, None, ...]
+        if rho.ndim != 4 or int(rho.shape[1]) != 1:
+            raise ValueError(
+                "rho_eff must have shape [B,1,H,W] or [B,H,W]; "
+                f"got={tuple(int(v) for v in rho.shape)}"
+            )
         cond_t = torch.as_tensor(cond_vec, dtype=torch.float32, device=self.device)
         if cond_t.ndim == 1:
             cond_t = cond_t[None, :]
@@ -140,12 +177,17 @@ class DeepONetPoissonHeadTorch:
         x_s = coord_flat[s_idx][None, ...].expand(bsz, -1, -1)
         v_s = rho_flat[:, s_idx, :]
         x_q = coord_flat[q_idx][None, ...].expand(bsz, -1, -1)
-        pred = self.net.forward(sensors={"x": x_s, "v": v_s}, query={"x": x_q}, cond=cond_t)
-        if POISSON_POTENTIAL_OUTPUT_KEY not in pred:
-            first_key = next(iter(pred.keys()))
-            phi_q = pred[first_key]
-        else:
-            phi_q = pred[POISSON_POTENTIAL_OUTPUT_KEY]
+        query_features = torch.empty(
+            (bsz, int(x_q.shape[1]), 0),
+            dtype=x_q.dtype,
+            device=self.device,
+        )
+        pred = self.net.forward(
+            sensors={"x": x_s, "v": v_s},
+            query={"x": x_q, "f": query_features},
+            cond=cond_t,
+        )
+        phi_q = pred[POISSON_POTENTIAL_OUTPUT_KEY]
 
         phi_full = torch.zeros((bsz, h * w, 1), dtype=torch.float32, device=self.device)
         phi_full[:, q_idx, :] = phi_q

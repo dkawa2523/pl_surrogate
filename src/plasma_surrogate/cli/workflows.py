@@ -45,6 +45,7 @@ from plasma_surrogate.pipeline.runtime_context import (
     build_train_context,
 )
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
+from plasma_surrogate.preprocessing.spatial_features import resolve_shared_distance_transform_cfg
 from plasma_surrogate.train.model_dispatch import (
     TrainDispatchContext,
     normalize_model_name,
@@ -52,6 +53,7 @@ from plasma_surrogate.train.model_dispatch import (
     validate_runtime_model_policy,
 )
 from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
+from plasma_surrogate.train.model_artifacts import merge_checkpoint_dispatch_metadata
 from plasma_surrogate.viz.runner import VizRunner
 
 DEFAULT_TASK_SPEC: dict[str, Any] = {}
@@ -116,13 +118,14 @@ def _build_inference_engine_from_bundle(
     resolved_model_name = str(model_name or model_cfg.get("name", "unet"))
     provider_mode = str(effective_input_mode_meta.get(GEOMETRY_PROVIDER_MODE_EFFECTIVE_KEY, "fixed")).strip().lower() or "fixed"
     geometry_provider = build_geometry_provider(dataset_root, provider_mode=provider_mode)
+    spatial_transform_artifacts = bundle.spatial_transform_artifacts_for_checkpoint(checkpoint_meta)
     return build_inference_engine(
         model=bundle.model,
         cond_schema=bundle.cond_schema_obj(),
         axis_schema=bundle.axis_schema_obj(),
         geometry_provider=geometry_provider,
         output_dir=output_dir,
-        transform_bundle=bundle.transform_bundle(),
+        transform_bundle=bundle.transform_bundle_for_checkpoint(checkpoint_meta),
         cond_stats=bundle.schemas.get("cond_stats", {}),
         phi_mode=str(model_cfg.get("phi_mode", "direct")),
         phi_hybrid_steps=int(model_cfg.get("phi_hybrid_steps", 1)),
@@ -130,9 +133,9 @@ def _build_inference_engine_from_bundle(
         ood_cfg=ood_cfg,
         feature_store=feature_store,
         coord_scaler=bundle.transforms.get("coord_scaler", {}),
-        coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
+        coord_feature_scaler=spatial_transform_artifacts["coord_feature_scaler"],
         coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
-        coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
+        coord_distance_transform_stats=spatial_transform_artifacts["distance_transform_stats"],
         input_mode_meta=effective_input_mode_meta,
         checkpoint_meta=dict(checkpoint_meta or {}),
         checkpoint_input_mode_meta=effective_checkpoint_input_mode_meta,
@@ -394,12 +397,21 @@ def run_preprocess(config_path: str | Path) -> dict[str, Any]:
     pre_cfg.setdefault("axis_schema", {"mode": "steady", "harmonics": 1})
     pre_cfg.setdefault("featurization_root", str(run_dir / "featurization"))
     input_mode_meta = build_input_mode_effective_metadata(cfg)
+    preprocess_model_name = normalize_model_name(dict(cfg.get("model", {})).get("name", "global_mlp"))
+    coord_distance_transform_cfg = resolve_shared_distance_transform_cfg(
+        train_cfg=dict(cfg.get("train", {})),
+        model_names=[preprocess_model_name],
+        scaling_enabled=bool(
+            dict(dict(pre_cfg.get("coord_features", {})).get("scaling", {})).get("enabled", False)
+        ),
+    )
 
     pre = PreprocessRunner(
         pre_cfg,
         run_dir / "preprocessing",
         runtime_input_mode_meta=input_mode_meta,
         runtime_cfg=dict(cfg.get("runtime", {})),
+        coord_distance_transform_cfg=coord_distance_transform_cfg,
     )
     output = pre.run(
         cases=dataset.cases,
@@ -636,6 +648,7 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
             coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
             structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
             latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
+            case_ids=[str(case["case_id"]) for case in dataset.cases],
             input_mode_effective=input_mode_effective,
             structure_adapter_mode_effective=str(
                 input_mode_meta_effective.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "")
@@ -695,10 +708,19 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     r2_plasma = dict(eval_payload.get("r2_plasma", {}))
 
     ArtifactStore(run_dir / "eval").save_json("test_metrics.json", eval_payload)
-    checkpoint_input_mode_meta = merge_effective_runtime_metadata(
+    checkpoint_input_mode_meta = merge_checkpoint_dispatch_metadata(
         runtime_meta=input_mode_meta_effective,
         dispatch_meta=dict(dispatch.extra_artifacts or {}),
     )
+    scaler_fit_split = str(
+        dict(bundle.schemas.get("preprocess_report", {}) or {}).get("scaler_fit_split", "")
+    ).strip().lower()
+    protocol_scaler = dict(
+        dict(bundle.transforms.get("protocol_transforms", {}) or {}).get(scaler_fit_split, {}) or {}
+    )
+    if scaler_fit_split and protocol_scaler.get("cond_scaler") and protocol_scaler.get("y_scalers"):
+        checkpoint_input_mode_meta["scaler_fit_split"] = scaler_fit_split
+        checkpoint_input_mode_meta["scaler_train_only"] = True
     save_checkpoint(model, run_dir / "checkpoints", extra_meta=checkpoint_input_mode_meta)
     _write_stage_manifest(
         run_dir=run_dir,
@@ -853,8 +875,12 @@ def run_infer(config_path: str | Path) -> dict[str, Any]:
             "json": str(case_summary_paths[1]),
             "count": len(case_summary_rows),
         }
+    inference_effective_meta = merge_effective_runtime_metadata(
+        runtime_meta=input_mode_meta,
+        dispatch_meta=checkpoint_meta,
+    )
     infer_summary = {
-        **input_mode_meta,
+        **inference_effective_meta,
         "result_keys": sorted(list(results.keys())),
         "inference_case_count": len(case_summary_rows),
     }

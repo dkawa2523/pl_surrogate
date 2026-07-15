@@ -354,6 +354,33 @@ def _sample_uniform(
     return {k: float(rng.uniform(v[0], v[1])) for k, v in space.items()}
 
 
+def _normalize_initial_cond(
+    raw: Any,
+    space: dict[str, tuple[float, float]],
+    *,
+    label: str = "backend_cfg.initial_cond",
+) -> dict[str, float] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{label} must be a mapping with one value per condition search key")
+    expected = set(space)
+    actual = {str(key) for key in raw}
+    if actual != expected:
+        raise ValueError(
+            f"{label} keys must exactly match the condition search space; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
+    out: dict[str, float] = {}
+    for key, bounds in space.items():
+        value = float(raw[key])
+        lo, hi = float(bounds[0]), float(bounds[1])
+        if not np.isfinite(value) or value < lo or value > hi:
+            raise ValueError(f"{label}[{key!r}] must be finite and inside [{lo}, {hi}]; got={value!r}")
+        out[key] = value
+    return out
+
+
 def _shrink_space_around(
     center: dict[str, float],
     space: dict[str, tuple[float, float]],
@@ -387,6 +414,7 @@ class _RandomBackend:
         constraints_cfg: Any = None,
         output_cfg: dict[str, Any] | None = None,
     ) -> OptimizeResult:
+        cfg = dict(backend_cfg or {})
         rng = np.random.default_rng(seed)
         objective = _dict_or_empty(objective_cfg)
         output_norm = _normalize_output_cfg(output_cfg)
@@ -394,7 +422,22 @@ class _RandomBackend:
         trials: list[dict[str, Any]] = []
         invalid_trial_count = 0
 
-        for _ in range(n_trials):
+        initial_cond = _normalize_initial_cond(cfg.get("initial_cond"), space)
+        if initial_cond is not None:
+            record, invalid = _evaluate_candidate(
+                engine,
+                cond=initial_cond,
+                geom_param={},
+                geom_ref=geom_ref,
+                axis=axis,
+                objective_cfg=objective,
+                constraints_cfg=constraints_cfg,
+                save_outputs=save_outputs,
+            )
+            trials.append(record)
+            invalid_trial_count += int(bool(invalid))
+
+        for _ in range(n_trials - len(trials)):
             cond = _sample_uniform(rng, space)
             geom_param = _sample_uniform(rng, geom_space)
             record, invalid = _evaluate_candidate(
@@ -412,7 +455,7 @@ class _RandomBackend:
         return _result_from_trials(
             trials=trials,
             backend="random",
-            backend_cfg=dict(backend_cfg or {}),
+            backend_cfg={**cfg, "effective_sampler": "random"},
             objective_cfg=objective,
             output_cfg=output_norm,
             invalid_trial_count=invalid_trial_count,
@@ -444,16 +487,38 @@ class _OptunaBackend:
         objective_cfg_norm = _dict_or_empty(objective_cfg)
         output_norm = _normalize_output_cfg(output_cfg)
         save_outputs = output_norm["save_fields"] == "all"
-        sampler_name = str(cfg.get("sampler", "tpe"))
+        sampler_name = str(cfg.get("sampler", "tpe")).strip().lower() or "tpe"
+        if sampler_name not in {"random", "tpe", "cmaes"}:
+            raise ValueError("backend_cfg.sampler must be one of: random, tpe, cmaes")
+        initial_cond = _normalize_initial_cond(cfg.get("initial_cond"), space)
         if sampler_name == "random":
             sampler = optuna.samplers.RandomSampler(seed=seed)
-        else:
+        elif sampler_name == "tpe":
             sampler = optuna.samplers.TPESampler(
                 seed=seed,
                 n_startup_trials=int(cfg.get("n_startup_trials", 5)),
                 multivariate=bool(cfg.get("multivariate", False)),
             )
+        else:
+            try:
+                import cmaes  # noqa: F401
+            except ImportError as exc:  # pragma: no cover - environment dependent
+                raise RuntimeError(
+                    "CMA-ES sampler requires the optional 'cmaes' package; install the optuna extra"
+                ) from exc
+            x0_raw = cfg.get("x0", initial_cond)
+            x0 = _normalize_initial_cond(x0_raw, space, label="backend_cfg.x0")
+            sampler = optuna.samplers.CmaEsSampler(
+                x0=x0,
+                sigma0=None if cfg.get("sigma0") is None else float(cfg["sigma0"]),
+                n_startup_trials=int(cfg.get("n_startup_trials", 1)),
+                seed=seed,
+                restart_strategy=None,
+                popsize=None if cfg.get("popsize") is None else int(cfg["popsize"]),
+            )
         study = optuna.create_study(direction="minimize", sampler=sampler)
+        if initial_cond is not None:
+            study.enqueue_trial(initial_cond)
         trials: list[dict[str, Any]] = []
         invalid_trial_count = 0
 
@@ -479,7 +544,7 @@ class _OptunaBackend:
         return _result_from_trials(
             trials=trials,
             backend="optuna",
-            backend_cfg=dict(cfg),
+            backend_cfg={**cfg, "effective_sampler": sampler_name},
             objective_cfg=objective_cfg_norm,
             output_cfg=output_norm,
             invalid_trial_count=invalid_trial_count,

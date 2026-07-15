@@ -91,12 +91,28 @@ def test_dual_axis_row_combines_interp_and_extrap_metrics() -> None:
             "surrogate_quality_score": 1.0,
             "test_r2_ne_plasma": 0.8,
             "test_r2_Te_plasma": 0.6,
+            "validation_selection_value": 0.9,
+            "validation_selection_mode": "max",
+            "validation_selection_reliable": True,
+            "validation_selected_epoch": 154,
+            "target_metrics_valid": True,
+            "scaler_train_only": True,
+            "quality_score_definition_hash": "same-contract",
+            "_diagnostics": {"surrogate_quality_score": 1.0, "quality_component": 0.1},
         },
         "extrap": {
             "model_id": "global_mlp",
             "surrogate_quality_score": 3.0,
             "test_r2_ne_plasma": 0.4,
             "test_r2_Te_plasma": 0.2,
+            "validation_selection_value": 0.5,
+            "validation_selection_mode": "max",
+            "validation_selection_reliable": True,
+            "validation_selected_epoch": 52,
+            "target_metrics_valid": True,
+            "scaler_train_only": True,
+            "quality_score_definition_hash": "same-contract",
+            "_diagnostics": {"surrogate_quality_score": 3.0, "quality_component": 0.3},
         },
     }
 
@@ -109,11 +125,67 @@ def test_dual_axis_row_combines_interp_and_extrap_metrics() -> None:
     )
 
     assert math.isclose(row["surrogate_quality_score"], 2.5)
+    assert math.isclose(row["surrogate_quality_score_dual"], 2.5)
+    assert row["quality_score_dual_reliable"] is True
     assert row["surrogate_quality_score_interp"] == 1.0
     assert row["surrogate_quality_score_extrap"] == 3.0
     assert math.isclose(row["test_r2_plasma_mean_interp"], 0.7)
     assert math.isclose(row["test_r2_plasma_mean_extrap"], 0.3)
     assert math.isclose(row["test_r2_plasma_mean_dual"], 0.4)
+    assert math.isclose(row["validation_selection_value"], 0.6)
+    assert math.isclose(row["validation_selection_value_dual"], 0.6)
+    assert row["validation_selection_mode"] == "max"
+    assert row["validation_selection_reliable"] is True
+    assert row["validation_selected_epoch"] == 154
+    assert row["validation_selected_epoch_interp"] == 154.0
+    assert row["validation_selected_epoch_extrap"] == 52.0
+    assert row["scaler_train_only"] is True
+    assert row["scaler_train_only_interp"] is True
+    assert row["scaler_train_only_extrap"] is True
+    assert "surrogate_quality_score" not in row["_diagnostics"]
+    assert row["_diagnostics"]["surrogate_quality_score_interp"] == 1.0
+    assert row["_diagnostics"]["surrogate_quality_score_extrap"] == 3.0
+
+
+def test_dual_axis_quality_and_validation_fail_closed_when_one_lane_is_invalid() -> None:
+    split_rows = {
+        "interp": {
+            "model_id": "fno",
+            "surrogate_quality_score": 0.1,
+            "test_r2_ne_plasma": 0.9,
+            "validation_selection_value": 0.8,
+            "validation_selection_mode": "max",
+            "validation_selection_reliable": True,
+            "target_metrics_valid": True,
+            "quality_score_definition_hash": "same-contract",
+        },
+        "extrap": {
+            "model_id": "fno",
+            "surrogate_quality_score": 0.9,
+            "test_r2_ne_plasma": 0.2,
+            "validation_selection_value": 0.2,
+            "validation_selection_mode": "max",
+            "validation_selection_reliable": False,
+            "target_metrics_valid": False,
+            "quality_score_definition_hash": "same-contract",
+        },
+    }
+
+    row = BenchmarkRunner._combine_dual_axis_rows(
+        split_rows=split_rows,
+        primary_split="interp",
+        interp_weight=0.5,
+        extrap_weight=0.5,
+        target_vars=["ne"],
+    )
+
+    assert math.isnan(float(row["surrogate_quality_score"]))
+    assert math.isnan(float(row["surrogate_quality_score_dual"]))
+    assert row["quality_score_dual_reliable"] is False
+    assert math.isnan(float(row["validation_selection_value"]))
+    assert math.isnan(float(row["validation_selection_value_dual"]))
+    assert row["validation_selection_reliable"] is False
+    assert row["target_metrics_valid"] is False
 
 
 def test_benchmark_model_result_reports_skip_without_fake_objective() -> None:

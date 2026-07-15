@@ -12,6 +12,7 @@ from typing import Any
 import yaml
 import numpy as np
 
+from plasma_surrogate.core.boundary_distance import boundary_distance_channels_from_loss_cfg
 from plasma_surrogate.benchmark.runtime_context import (
     build_benchmark_data_context,
     resolve_effective_benchmark_cfg,
@@ -22,6 +23,7 @@ from plasma_surrogate.benchmark.eval_diagnostics import (
     resolve_eval_diagnostics_cfg,
     write_eval_diagnostics,
 )
+from plasma_surrogate.benchmark.eval_geometry import materialize_evaluation_spatial_geometry
 from plasma_surrogate.benchmark.manifest import BenchmarkManifestWriter
 from plasma_surrogate.benchmark.metric_tables import save_leaderboard_metric_tables
 from plasma_surrogate.benchmark.planning import BenchmarkPlanBuilder, build_leaderboard_header
@@ -32,7 +34,6 @@ from plasma_surrogate.core.input_modes import (
     attach_runtime_schema_hashes,
     build_input_mode_effective_metadata,
     input_mode_metadata_keys,
-    merge_effective_runtime_metadata,
     runtime_metadata_keys,
 )
 from plasma_surrogate.core.model_families import (
@@ -48,13 +49,20 @@ from plasma_surrogate.core.physics_contract import build_physics_cfg
 from plasma_surrogate.core.physics_numeric import poisson_residual_loss
 from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.eval.core_metrics import build_benchmark_eval_row
+from plasma_surrogate.eval.quality_score import resolve_quality_score_protocol
 from plasma_surrogate.infer.engine import InferenceEngine
 from plasma_surrogate.infer.engine_builder import build_inference_engine
 from plasma_surrogate.infer.optimize import cond_space_from_stats, validate_optimize_geom_contract
 from plasma_surrogate.models.checkpoint import save_checkpoint
 from plasma_surrogate.benchmark.model_dispatch import BenchmarkModelContext, run_model_train_eval
+from plasma_surrogate.benchmark.tuning_selection import (
+    VALIDATION_VALUE_KEY,
+    require_validation_objective,
+    validation_selection_from_history,
+)
 from plasma_surrogate.preprocessing.split import build_group_kfold_splits
-from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
+from plasma_surrogate.train.loss_protocols import loss_protocol_metadata, resolve_loss_protocol
+from plasma_surrogate.train.model_artifacts import merge_checkpoint_dispatch_metadata
 from plasma_surrogate.viz.runner import VizRunner
 
 
@@ -199,6 +207,27 @@ def _release_torch_cuda_cache() -> None:
             torch.cuda.empty_cache()
     except Exception:
         return
+
+
+def _evaluation_case_count(
+    *,
+    pred_eval: dict[str, Any],
+    true_eval: dict[str, Any],
+) -> int:
+    """Return one fail-closed case count shared by evaluation geometry."""
+
+    counts: set[int] = set()
+    for source_name, fields in (("pred_eval", pred_eval), ("true_eval", true_eval)):
+        for name, values in fields.items():
+            arr = np.asarray(values)
+            if arr.ndim < 1:
+                raise ValueError(f"{source_name}[{name!r}] must include a case axis")
+            counts.add(int(arr.shape[0]))
+    if not counts:
+        raise ValueError("benchmark evaluation requires at least one prediction/target field")
+    if len(counts) != 1:
+        raise ValueError(f"benchmark evaluation fields have inconsistent case counts: {sorted(counts)}")
+    return int(next(iter(counts)))
 
 
 def _inject_input_mode_metadata_into_row(
@@ -407,6 +436,9 @@ class BenchmarkProbe:
         metric_mask: np.ndarray | None,
         te_idx: np.ndarray,
         viz: VizRunner,
+        transform_bundle: Any | None = None,
+        coord_feature_scaler: dict[str, Any] | None = None,
+        coord_distance_transform_stats: dict[str, Any] | None = None,
     ) -> BenchmarkProbeResult:
         if not self.enabled():
             return self.skipped("benchmark_probe_disabled")
@@ -445,7 +477,7 @@ class BenchmarkProbe:
             axis_schema=bundle.axis_schema_obj(),
             geometry_provider=context.geom_provider,
             output_dir=model_dir / "inference",
-            transform_bundle=context.transforms,
+            transform_bundle=transform_bundle or context.transforms,
             cond_stats=bundle.schemas.get("cond_stats", {}),
             phi_mode=profile_lock["phi_mode"],
             phi_hybrid_steps=int(self.benchmark_cfg.get("phi_hybrid_steps", 1)),
@@ -453,9 +485,17 @@ class BenchmarkProbe:
             ood_cfg=inference_ood_cfg,
             feature_store=context.feature_store,
             coord_scaler=bundle.transforms.get("coord_scaler", {}),
-            coord_feature_scaler=bundle.transforms.get("coord_feature_scaler", {}),
+            coord_feature_scaler=dict(
+                coord_feature_scaler
+                if coord_feature_scaler is not None
+                else bundle.transforms.get("coord_feature_scaler", {})
+            ),
             coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
-            coord_distance_transform_stats=bundle.transforms.get("distance_transform_stats", {}),
+            coord_distance_transform_stats=dict(
+                coord_distance_transform_stats
+                if coord_distance_transform_stats is not None
+                else bundle.transforms.get("distance_transform_stats", {})
+            ),
             input_mode_meta=effective_input_mode_meta,
             checkpoint_meta_path=model_dir / "checkpoints" / "meta.json",
             target_role_schema=bundle.schemas.get("target_role_schema", {}),
@@ -609,6 +649,14 @@ class BenchmarkRunner:
         resolved["eval"]["primary_metric_effective"] = primary_metric
         resolved["eval"]["primary_mode_effective"] = primary_mode
         resolved["eval"]["objective_mode_effective"] = primary_mode
+        resolved["outer_selection_contract"] = {
+            "source": "training_validation_history",
+            "value_key": VALIDATION_VALUE_KEY,
+            "mode_key": "validation_selection_mode",
+            "reliability_key": "validation_selection_reliable",
+            "test_metrics_used_for_selection": False,
+            "test_metrics_role": "final_reporting_only",
+        }
         resolved["eval_protocol_contract"] = evaluation_protocol.as_dict()
         protocol_variant = str(eval_cfg.get("protocol_variant", "")).strip()
         resolved["eval"]["protocol_variant_effective"] = protocol_variant if protocol_variant else "default"
@@ -636,6 +684,15 @@ class BenchmarkRunner:
         split_structure_holdout = self._load_split_json(
             self.output_root / "preprocessing" / "split" / "split_structure_holdout_v1.json"
         )
+        structure_holdout_meta = dict(bundle.schemas.get("structure_holdout_meta", {}) or {})
+        if primary_split == "structure_holdout" and not bool(
+            structure_holdout_meta.get("is_real_structure_holdout", False)
+        ):
+            reason = str(structure_holdout_meta.get("fallback_reason", "missing_structure_metadata"))
+            raise ValueError(
+                "Evaluation requested primary_split=structure_holdout, but preprocessing did not create "
+                f"a real structure-group holdout (reason={reason}). Configure split.structure_holdout."
+            )
         split_by_name = {
             "interp": split_interp,
             "extrap": split_extrap,
@@ -713,9 +770,19 @@ class BenchmarkRunner:
             dict(train_cfg.get("loss", {})),
             target_role_schema=bundle.schemas.get("target_role_schema", {}),
         )
-        resolved["loss_protocol_effective"] = str(loss_cfg.get("protocol_effective", "none"))
+        resolved.update(loss_protocol_metadata(loss_cfg))
+        resolved["eval"]["boundary_distance_channels_effective"] = list(
+            boundary_distance_channels_from_loss_cfg(loss_cfg)
+        )
         curriculum_cfg = dict(train_cfg.get("curriculum", {}))
-        quality_score_cfg = dict(self.benchmark_cfg.get("eval", {}).get("quality_score", {}))
+        quality_protocol = resolve_quality_score_protocol(
+            dict(self.benchmark_cfg.get("eval", {}).get("quality_score", {}))
+        )
+        quality_score_cfg = dict(quality_protocol["effective_config"])
+        resolved["eval"]["quality_score_effective"] = dict(quality_score_cfg)
+        resolved["eval"]["quality_score_protocol"] = str(quality_protocol["protocol"])
+        resolved["eval"]["quality_score_protocol_version"] = int(quality_protocol["version"])
+        resolved["eval"]["quality_score_definition_hash"] = str(quality_protocol["definition_hash"])
         sample_mean_group_mode = str(loss_cfg.get("supervised", {}).get("sample_mean_group_mode", "batch"))
         if sample_mean_group_mode != "batch":
             raise ValueError("supervised.sample_mean_group_mode must be one of: batch")
@@ -772,6 +839,7 @@ class BenchmarkRunner:
                     tr_idx=tr,
                     va_idx=va,
                     te_idx=te,
+                    scaler_split_name="random",
                 )
                 leaderboard.append(out.row)
                 effective_steps_per_model[model_name] = int(out.effective_steps)
@@ -788,6 +856,7 @@ class BenchmarkRunner:
                     tr_idx=tr_i,
                     va_idx=va_i,
                     te_idx=te_i,
+                    scaler_split_name=primary_split,
                 )
                 row = dict(out.row)
                 _attach_primary_metric_status(
@@ -812,6 +881,7 @@ class BenchmarkRunner:
                         tr_idx=tr_i,
                         va_idx=va_i,
                         te_idx=te_i,
+                        scaler_split_name=split_name,
                     )
                     split_rows[split_name] = split_out.row
                     split_steps[split_name] = int(split_out.effective_steps)
@@ -897,23 +967,33 @@ class BenchmarkRunner:
                             coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
                             structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
                             latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
+                            case_ids=case_ids,
                             input_mode_meta=effective_input_mode_meta,
                         )
                     )
                     pred_eval = dispatch["pred_eval"]
                     true_eval = dispatch["true_eval"]
+                    fold_geometry = materialize_evaluation_spatial_geometry(
+                        context=context,
+                        geom_ctx=geom_ctx,
+                        eval_indices=te_fold,
+                        metric_mask_enabled=metric_mask is not None,
+                        expected_eval_count=_evaluation_case_count(
+                            pred_eval=pred_eval,
+                            true_eval=true_eval,
+                        ),
+                        boundary_distance_channels=boundary_distance_channels_from_loss_cfg(loss_cfg),
+                    )
                     fold_eval_row = build_benchmark_eval_row(
                         model_id=f"{model_name}_cv_fold_{fold_idx:02d}",
                         metrics=dict(dispatch["metrics"]),
                         r2_scores=dict(dispatch.get("r2_scores", {})),
                         pred_eval=pred_eval,
                         true_eval=true_eval,
-                        mask_plasma=metric_mask,
-                        region_mask_plasma=(
-                            np.asarray(geom_ctx.mask_plasma, dtype=np.float32) if geom_ctx is not None else None
-                        ),
-                        distance_any=geom_ctx.distance_any if geom_ctx is not None else None,
-                        distance_signed=geom_ctx.distance_signed if geom_ctx is not None else None,
+                        mask_plasma=fold_geometry.metric_mask,
+                        region_mask_plasma=fold_geometry.mask_plasma,
+                        distance_any=fold_geometry.distance_any,
+                        distance_signed=fold_geometry.distance_signed,
                         bc_dir_mask=geom_ctx.bc_dir_mask if geom_ctx is not None else None,
                         wafer_mask=(
                             np.asarray(geom_ctx.regions.get("wafer_mask"), dtype=np.float32)
@@ -928,9 +1008,14 @@ class BenchmarkRunner:
                         quality_score_cfg=quality_score_cfg,
                         target_role_schema=bundle.schemas.get("target_role_schema", {}),
                         target_scalers=bundle.transforms.get("y_scalers", {}),
+                        target_transforms=bundle.transforms.get("target_transforms", {}),
                         output_vars=y_vars,
                         single_diagnostics={},
                         extended_diagnostics_enabled=eval_diagnostics_enabled,
+                    )
+                    fold_eval_row["evaluation_geometry_source"] = fold_geometry.source
+                    fold_eval_row["evaluation_boundary_distance_channels"] = list(
+                        fold_geometry.boundary_distance_channels
                     )
                     row = {
                         str(key): float(value)
@@ -1037,11 +1122,14 @@ class BenchmarkRunner:
         history: list[dict[str, Any]],
         effective_input_mode_meta: dict[str, Any],
         extra_artifacts: dict[str, Any],
+        scaler_fit_split: str,
     ) -> VizRunner:
-        checkpoint_meta = merge_effective_runtime_metadata(
+        checkpoint_meta = merge_checkpoint_dispatch_metadata(
             runtime_meta=effective_input_mode_meta,
             dispatch_meta=extra_artifacts,
         )
+        checkpoint_meta["scaler_fit_split"] = str(scaler_fit_split)
+        checkpoint_meta["scaler_train_only"] = True
         save_checkpoint(model, model_dir / "checkpoints", extra_meta=checkpoint_meta)
 
         viz = VizRunner(model_dir / "eval")
@@ -1079,9 +1167,36 @@ class BenchmarkRunner:
         tr_idx: np.ndarray,
         va_idx: np.ndarray,
         te_idx: np.ndarray,
+        scaler_split_name: str,
     ) -> SingleSplitResult:
         bundle = context.bundle
         y_vars = [str(v) for v in list(bundle.schemas.get("output_layout", {}).get("vars", []))]
+        scaler_split_name = str(scaler_split_name).strip().lower()
+        lane_transforms = bundle.transform_bundle(
+            scaler_split_name,
+            require_protocol=scaler_split_name in {"interp", "extrap", "structure_holdout"},
+        )
+        lane_cond_scaled = lane_transforms.transform_cond(context.cond)
+        lane_y_scaled = lane_transforms.transform_fields(context.y)
+        lane_artifacts = dict(
+            dict(bundle.transforms.get("protocol_transforms", {}) or {}).get(scaler_split_name, {}) or {}
+        )
+        lane_coord_feature_scaler = dict(
+            lane_artifacts.get("coord_feature_scaler", bundle.transforms.get("coord_feature_scaler", {})) or {}
+        )
+        lane_distance_transform_stats = dict(
+            lane_artifacts.get(
+                "distance_transform_stats",
+                bundle.transforms.get("distance_transform_stats", {}),
+            )
+            or {}
+        )
+        if scaler_split_name in {"interp", "extrap", "structure_holdout"}:
+            if not lane_coord_feature_scaler or not lane_distance_transform_stats:
+                raise FileNotFoundError(
+                    "Missing train-only spatial transform artifacts for evaluation lane "
+                    f"{scaler_split_name!r} under preprocessing/scalers/by_split"
+                )
         effective_input_mode_meta = resolve_effective_input_mode_metadata_for_model(
             model_name=model_name,
             input_mode_meta=self.input_mode_meta,
@@ -1098,13 +1213,13 @@ class BenchmarkRunner:
                 h=context.h,
                 w=context.w,
                 y_vars=y_vars,
-                cond_scaled=context.cond_scaled,
+                cond_scaled=lane_cond_scaled,
                 y=context.y,
-                y_scaled=context.y_scaled,
+                y_scaled=lane_y_scaled,
                 tr=tr_idx,
                 va=va_idx,
                 te=te_idx,
-                transforms=context.transforms,
+                transforms=lane_transforms,
                 physics_cfg=physics_cfg,
                 loss_cfg=loss_cfg,
                 curriculum_cfg=curriculum_cfg,
@@ -1117,13 +1232,14 @@ class BenchmarkRunner:
                 deeponet_poisson_meta=context.deeponet_poisson_meta,
                 deeponet_boundary_index=context.deeponet_boundary_index,
                 deeponet_boundary_meta=context.deeponet_boundary_meta,
-                coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
+                coord_feature_scaler=lane_coord_feature_scaler,
                 coord_feature_pack=context.coord_feature_pack,
                 static_spatial_feature_pack=context.static_spatial_feature_pack,
                 case_structure_feature_pack=context.case_structure_feature_pack,
-                coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
+                coord_distance_transform_stats=lane_distance_transform_stats,
                 structure_descriptor_pack=bundle.schemas.get("structure_descriptor_pack"),
                 latent_feature_pack=bundle.schemas.get("latent_feature_pack"),
+                case_ids=[str(case["case_id"]) for case in context.dataset.cases],
                 input_mode_meta=effective_input_mode_meta,
             )
         )
@@ -1134,6 +1250,17 @@ class BenchmarkRunner:
         metrics = dispatch["metrics"]
         r2_scores = dispatch.get("r2_scores", {})
         extra_artifacts = dict(dispatch.get("extra_artifacts", {}))
+        eval_geometry = materialize_evaluation_spatial_geometry(
+            context=context,
+            geom_ctx=geom_ctx,
+            eval_indices=te_idx,
+            metric_mask_enabled=metric_mask is not None,
+            expected_eval_count=_evaluation_case_count(
+                pred_eval=pred_eval,
+                true_eval=true_eval,
+            ),
+            boundary_distance_channels=boundary_distance_channels_from_loss_cfg(loss_cfg),
+        )
 
         viz = self._write_model_runtime_artifacts(
             model=model,
@@ -1141,6 +1268,7 @@ class BenchmarkRunner:
             history=history,
             effective_input_mode_meta=effective_input_mode_meta,
             extra_artifacts=extra_artifacts,
+            scaler_fit_split=scaler_split_name,
         )
         inference_ood_cfg = BenchmarkPlanBuilder(self.benchmark_cfg).inference_ood_cfg()
         potential_key = _resolve_benchmark_potential_key(
@@ -1160,9 +1288,12 @@ class BenchmarkRunner:
             effective_input_mode_meta=effective_input_mode_meta,
             true_eval=true_eval,
             pred_eval=pred_eval,
-            metric_mask=metric_mask,
+            metric_mask=eval_geometry.metric_mask,
             te_idx=te_idx,
             viz=viz,
+            transform_bundle=lane_transforms,
+            coord_feature_scaler=lane_coord_feature_scaler,
+            coord_distance_transform_stats=lane_distance_transform_stats,
         )
 
         lock_hash = str(context.lock_hash)
@@ -1190,10 +1321,10 @@ class BenchmarkRunner:
             r2_scores=r2_scores,
             pred_eval=pred_eval,
             true_eval=true_eval,
-            mask_plasma=metric_mask,
-            region_mask_plasma=np.asarray(geom_ctx.mask_plasma, dtype=np.float32) if geom_ctx is not None else None,
-            distance_any=geom_ctx.distance_any if geom_ctx is not None else None,
-            distance_signed=geom_ctx.distance_signed if geom_ctx is not None else None,
+            mask_plasma=eval_geometry.metric_mask,
+            region_mask_plasma=eval_geometry.mask_plasma,
+            distance_any=eval_geometry.distance_any,
+            distance_signed=eval_geometry.distance_signed,
             bc_dir_mask=geom_ctx.bc_dir_mask if geom_ctx is not None else None,
             wafer_mask=(
                 np.asarray(geom_ctx.regions.get("wafer_mask"), dtype=np.float32)
@@ -1204,17 +1335,29 @@ class BenchmarkRunner:
             region_band_cfg=region_band_cfg,
             quality_score_cfg=quality_score_cfg,
             target_role_schema=bundle.schemas.get("target_role_schema", {}),
-            target_scalers=bundle.transforms.get("y_scalers", {}),
+            target_scalers=lane_transforms.to_dict().get("y_scalers", {}),
+            target_transforms=lane_transforms.to_dict().get("target_transforms", {}),
             output_vars=y_vars,
             single_diagnostics=probe.diagnostics,
             extended_diagnostics_enabled=eval_diagnostics_enabled,
+        )
+        row["evaluation_geometry_source"] = eval_geometry.source
+        row["evaluation_geometry_case_aligned"] = True
+        row["evaluation_boundary_distance_channels"] = list(
+            eval_geometry.boundary_distance_channels
         )
         _inject_input_mode_metadata_into_row(
             row=row,
             input_mode_meta=effective_input_mode_meta,
             case_spatial_pack_used=bool(context.case_structure_feature_pack),
         )
-        row["scaler_fit_split"] = str(preprocess_report.get("scaler_fit_split", "unknown"))
+        row["scaler_fit_split"] = scaler_split_name
+        row["scaler_train_only"] = True
+        row["selection_split"] = scaler_split_name
+        row["protocol_variant"] = str(
+            dict(self.benchmark_cfg.get("eval", {}) or {}).get("protocol_variant", "default")
+        ).strip() or "default"
+        row.update(validation_selection_from_history(history))
         if eval_diagnostics_enabled:
             write_eval_diagnostics(
                 eval_cfg=eval_cfg,
@@ -1225,10 +1368,14 @@ class BenchmarkRunner:
                 viz=viz,
                 pred_eval=pred_eval,
                 true_eval=true_eval,
-                metric_mask=metric_mask,
+                metric_mask=eval_geometry.metric_mask,
+                distance_any=eval_geometry.distance_any,
+                distance_signed=eval_geometry.distance_signed,
                 te_idx=te_idx,
                 target_vars_for_score=target_vars_for_score,
                 region_band_cfg=region_band_cfg,
+                target_transforms=lane_transforms.to_dict().get("target_transforms", {}),
+                target_scalers=lane_transforms.to_dict().get("y_scalers", {}),
             )
         _attach_primary_metric_status(
             row,
@@ -1255,9 +1402,14 @@ class BenchmarkRunner:
         objective_cfg = sweep_cfg.get("objective", {})
         objective_model = str(objective_cfg.get("model_id", "global_mlp"))
         objective_metric = str(objective_cfg.get("metric", "auto_primary")).strip()
-        objective_mode = str(objective_cfg.get("mode", "min"))
-        if objective_mode not in {"min", "max"}:
-            raise ValueError("benchmark.sweep.objective.mode must be 'min' or 'max'")
+        if objective_metric not in {"auto_primary", VALIDATION_VALUE_KEY}:
+            raise ValueError(
+                "Outer benchmark sweep selection is validation-only; objective.metric must be "
+                f"auto_primary or {VALIDATION_VALUE_KEY}. Test metrics are reporting-only."
+            )
+        objective_mode_requested = str(objective_cfg.get("mode", "auto")).strip().lower()
+        if objective_mode_requested not in {"auto", "min", "max"}:
+            raise ValueError("benchmark.sweep.objective.mode must be one of: auto, min, max")
 
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.store.save_json(
@@ -1267,7 +1419,7 @@ class BenchmarkRunner:
                 "objective": {
                     "model_id": objective_model,
                     "metric": objective_metric,
-                    "mode": objective_mode,
+                    "mode": objective_mode_requested,
                 },
             },
         )
@@ -1278,6 +1430,7 @@ class BenchmarkRunner:
             raise ValueError("Each benchmark.sweep.params entry must be a non-empty list")
 
         trials: list[dict[str, Any]] = []
+        objective_mode_effective: str | None = None
         for trial_idx, combo in enumerate(itertools.product(*values)):
             trial_values = {k: combo[i] for i, k in enumerate(keys)}
             trial_output = self.output_root / "sweep" / "trials" / f"trial_{trial_idx:03d}"
@@ -1294,14 +1447,19 @@ class BenchmarkRunner:
                 model_id=objective_model,
                 metric=objective_metric,
             )
-            score_key = "primary_metric_value" if objective_metric == "auto_primary" else objective_metric
-            raw_score = float(trial_row[score_key])
-            score_reliable = bool(
-                trial_row.get("primary_metric_reliable", True)
-                and trial_row.get("target_metrics_valid", True)
-                and np.isfinite(raw_score)
-            )
-            score = raw_score if score_reliable else (float("-inf") if objective_mode == "max" else float("inf"))
+            score_key = VALIDATION_VALUE_KEY
+            raw_score, row_objective_mode = require_validation_objective(trial_row)
+            if objective_mode_requested != "auto" and objective_mode_requested != row_objective_mode:
+                raise ValueError(
+                    "benchmark.sweep.objective.mode conflicts with the training validation selector: "
+                    f"configured={objective_mode_requested}, validation={row_objective_mode}"
+                )
+            if objective_mode_effective is None:
+                objective_mode_effective = row_objective_mode
+            elif objective_mode_effective != row_objective_mode:
+                raise ValueError("Benchmark sweep trials resolved inconsistent validation objective directions")
+            score_reliable = True
+            score = raw_score
             manifest = ArtifactStore(trial_output).load_json("manifest.json")
             artifact_hashes = dict(manifest.get("artifacts", {}).get("artifact_hashes", {}))
             trials.append(
@@ -1319,7 +1477,9 @@ class BenchmarkRunner:
                 }
             )
 
-        reverse = objective_mode == "max"
+        if objective_mode_effective is None:
+            raise ValueError("benchmark sweep produced no validation objectives")
+        reverse = objective_mode_effective == "max"
         reliable_trials = [row for row in trials if bool(row.get("objective_reliable", False))]
         if not reliable_trials:
             self.store.save_csv(
@@ -1439,6 +1599,15 @@ class BenchmarkRunner:
         return float(value)
 
     @staticmethod
+    def _dual_aggregatable_metric_key(key: str) -> bool:
+        """Return whether a numeric lane value has a meaningful weighted dual value."""
+
+        name = str(key)
+        return name == "surrogate_quality_score" or name.startswith(
+            ("test_rmse_", "test_r2_", "positive_violation_rate_")
+        )
+
+    @staticmethod
     def _combine_dual_axis_rows(
         *,
         split_rows: dict[str, dict[str, Any]],
@@ -1462,8 +1631,9 @@ class BenchmarkRunner:
         if not np.isfinite(total_weight) or total_weight <= 0.0:
             weights = {"interp": 0.5, "extrap": 0.5}
 
-        numeric_keys: set[str] = set()
-        combined_diagnostics: dict[str, Any] = dict(row.get("_diagnostics", {}) or {})
+        numeric_metric_keys: set[str] = set()
+        combined_diagnostics: dict[str, Any] = {}
+        row.pop("_diagnostics", None)
         for split_name, split_row in split_rows.items():
             split_diagnostics = split_row.get("_diagnostics")
             if isinstance(split_diagnostics, dict):
@@ -1472,33 +1642,89 @@ class BenchmarkRunner:
             for key, value in split_row.items():
                 if key == "_diagnostics":
                     continue
+                if isinstance(value, (bool, np.bool_)):
+                    row[f"{key}_{split_name}"] = bool(value)
+                    continue
                 try:
                     value_f = float(value)
                 except (TypeError, ValueError):
                     row[f"{key}_{split_name}"] = value
                     continue
                 if np.isfinite(value_f):
-                    numeric_keys.add(str(key))
+                    if BenchmarkRunner._dual_aggregatable_metric_key(str(key)):
+                        numeric_metric_keys.add(str(key))
                     row[f"{key}_{split_name}"] = value_f
                 else:
                     row[f"{key}_{split_name}"] = value
 
-        for key in sorted(numeric_keys):
+        required_lanes = ("interp", "extrap")
+        for key in sorted(numeric_metric_keys):
             weighted_values: list[tuple[float, float]] = []
-            for split_name, split_row in split_rows.items():
+            valid = True
+            for split_name in required_lanes:
+                split_row = split_rows.get(split_name, {})
                 try:
                     value_f = float(split_row.get(key, float("nan")))
                 except (TypeError, ValueError):
-                    continue
+                    valid = False
+                    break
                 weight = max(0.0, float(weights.get(split_name, 0.0)))
-                if np.isfinite(value_f) and np.isfinite(weight) and weight > 0.0:
+                if not np.isfinite(value_f) or not np.isfinite(weight):
+                    valid = False
+                    break
+                if weight > 0.0:
                     weighted_values.append((value_f, weight))
-            if not weighted_values:
+            if not valid or not weighted_values:
+                row[key] = float("nan")
                 continue
             denom = float(sum(weight for _, weight in weighted_values))
             if denom <= 0.0:
+                row[key] = float("nan")
                 continue
             row[key] = float(sum(value * weight for value, weight in weighted_values) / denom)
+
+        lane_target_valid = all(
+            bool(split_rows.get(split_name, {}).get("target_metrics_valid", False))
+            for split_name in required_lanes
+        )
+        quality_hashes = {
+            (
+                ""
+                if split_rows.get(split_name, {}).get("quality_score_definition_hash") is None
+                else str(
+                    split_rows.get(split_name, {}).get("quality_score_definition_hash", "")
+                ).strip()
+            )
+            for split_name in required_lanes
+        }
+        quality_values_finite = True
+        for split_name in required_lanes:
+            try:
+                quality_value = float(
+                    split_rows.get(split_name, {}).get("surrogate_quality_score", float("nan"))
+                )
+            except (TypeError, ValueError):
+                quality_values_finite = False
+                break
+            if not np.isfinite(quality_value):
+                quality_values_finite = False
+                break
+        quality_dual_reliable = bool(
+            lane_target_valid
+            and len(quality_hashes) == 1
+            and "" not in quality_hashes
+            and quality_values_finite
+        )
+        row["target_metrics_valid"] = bool(lane_target_valid)
+        row["quality_score_dual_reliable"] = quality_dual_reliable
+        row["quality_score_dual_invalid_reason"] = (
+            "" if quality_dual_reliable else "invalid_lane_metrics_or_quality_contract_mismatch"
+        )
+        if not quality_dual_reliable:
+            row["surrogate_quality_score"] = float("nan")
+        row["surrogate_quality_score_dual"] = float(
+            row.get("surrogate_quality_score", float("nan"))
+        )
 
         interp_r2, interp_ok, interp_invalid = BenchmarkRunner._r2_plasma_mean_status(
             split_rows.get("interp", {}),
@@ -1510,16 +1736,21 @@ class BenchmarkRunner:
         )
         row["test_r2_plasma_mean_interp"] = interp_r2
         row["test_r2_plasma_mean_extrap"] = extrap_r2
-        valid_r2: list[tuple[float, float]] = []
-        if interp_ok:
-            valid_r2.append((interp_r2, max(0.0, float(weights.get("interp", 0.0)))))
-        if extrap_ok:
-            valid_r2.append((extrap_r2, max(0.0, float(weights.get("extrap", 0.0)))))
-        if valid_r2 and sum(weight for _, weight in valid_r2) > 0.0:
+        r2_dual_reliable = bool(interp_ok and extrap_ok)
+        if r2_dual_reliable:
+            valid_r2 = [
+                (interp_r2, max(0.0, float(weights.get("interp", 0.0)))),
+                (extrap_r2, max(0.0, float(weights.get("extrap", 0.0)))),
+            ]
             denom = float(sum(weight for _, weight in valid_r2))
-            row["test_r2_plasma_mean_dual"] = float(sum(value * weight for value, weight in valid_r2) / denom)
+            row["test_r2_plasma_mean_dual"] = (
+                float(sum(value * weight for value, weight in valid_r2) / denom)
+                if denom > 0.0
+                else float("nan")
+            )
         else:
             row["test_r2_plasma_mean_dual"] = float("nan")
+        row["test_r2_plasma_mean_dual_reliable"] = r2_dual_reliable
         row["test_r2_plasma_mean_interp_reliable"] = bool(interp_ok)
         row["test_r2_plasma_mean_extrap_reliable"] = bool(extrap_ok)
         row["test_r2_plasma_mean_interp_invalid_vars"] = ",".join(interp_invalid)
@@ -1528,6 +1759,46 @@ class BenchmarkRunner:
         row["primary_split_effective"] = str(primary_split)
         row["interp_weight_effective"] = float(weights.get("interp", 0.0))
         row["extrap_weight_effective"] = float(weights.get("extrap", 0.0))
+        validation_modes = {
+            str(split_row.get("validation_selection_mode", "")).strip().lower()
+            for split_row in split_rows.values()
+        }
+        validation_reliable = all(
+            bool(split_row.get("validation_selection_reliable", False))
+            for split_row in split_rows.values()
+        ) and len(validation_modes) == 1 and validation_modes <= {"min", "max"}
+        validation_values: list[tuple[float, float]] = []
+        if validation_reliable:
+            for split_name in required_lanes:
+                try:
+                    value = float(split_rows.get(split_name, {}).get("validation_selection_value", float("nan")))
+                except (TypeError, ValueError):
+                    validation_reliable = False
+                    break
+                weight = max(0.0, float(weights.get(split_name, 0.0)))
+                if not np.isfinite(value) or not np.isfinite(weight):
+                    validation_reliable = False
+                    break
+                if weight > 0.0:
+                    validation_values.append((value, weight))
+        validation_denom = float(sum(weight for _, weight in validation_values))
+        validation_value = (
+            float(sum(value * weight for value, weight in validation_values) / validation_denom)
+            if validation_reliable and validation_denom > 0.0
+            else float("nan")
+        )
+        if not np.isfinite(validation_value):
+            validation_reliable = False
+        row["validation_selection_reliable"] = validation_reliable
+        row["validation_selection_value"] = validation_value
+        row["validation_selection_value_dual"] = validation_value
+        row["validation_selection_mode"] = next(iter(validation_modes)) if len(validation_modes) == 1 else ""
+        row["validation_selection_metric"] = "weighted_dual_validation_selection"
+        row["validation_selection_invalid_reason"] = (
+            "" if validation_reliable else "unreliable_or_mixed_dual_validation_selection"
+        )
+        row["selection_split"] = "dual_axis"
+        row["scaler_fit_split"] = "per_lane"
         if combined_diagnostics:
             row["_diagnostics"] = combined_diagnostics
         return row

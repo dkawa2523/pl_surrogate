@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
+from plasma_surrogate.models._auxiliary_losses import (
+    coefficient_aux_loss_diagnostics,
+    coefficient_aux_loss_tensor,
+    project_masked_pod_coefficients_torch,
+)
 from plasma_surrogate.models._torch_spatial_common import (
     _load_state_dict_numpy_torch,
     _resolve_torch_device,
@@ -140,6 +145,7 @@ def fit_pod_basis_from_targets(
     requested_rank: int,
     center: bool,
     per_var: bool,
+    active_mask: np.ndarray | None = None,
 ) -> PODBasisBundle:
     if not bool(per_var):
         raise ValueError("deeponet_pod v1 requires per_var=true")
@@ -153,6 +159,28 @@ def fit_pod_basis_from_targets(
         raise ValueError(
             f"deeponet_pod basis fitting target mismatch: got C={n_targets}, output_keys={list(output_keys)}"
         )
+    if active_mask is None:
+        mask = np.ones((n_samples, h, w), dtype=bool)
+    else:
+        mask_raw = np.asarray(active_mask)
+        if mask_raw.ndim == 2:
+            mask_raw = np.broadcast_to(mask_raw[None, ...], (n_samples, h, w))
+        elif mask_raw.ndim == 3 and int(mask_raw.shape[0]) == 1 and n_samples > 1:
+            mask_raw = np.broadcast_to(mask_raw, (n_samples, h, w))
+        if mask_raw.shape != (n_samples, h, w):
+            raise ValueError(
+                "deeponet_pod active_mask must align to [N,H,W]; "
+                f"expected={(n_samples, h, w)}, got={mask_raw.shape}"
+            )
+        if not np.all(np.isfinite(mask_raw)):
+            raise ValueError("deeponet_pod active_mask must contain only finite values")
+        mask = np.asarray(mask_raw > 0.0, dtype=bool)
+    empty_cases = np.flatnonzero(np.sum(mask, axis=(1, 2)) <= 0)
+    if empty_cases.size:
+        raise ValueError(
+            "deeponet_pod basis fitting has empty active masks: "
+            f"case_indices={empty_cases.astype(int).tolist()}"
+        )
     basis_by_var: dict[str, np.ndarray] = {}
     mean_by_var: dict[str, np.ndarray] = {}
     rank_by_var: dict[str, int] = {}
@@ -161,10 +189,27 @@ def fit_pod_basis_from_targets(
     flat_dim = int(h * w)
     for idx, var_name in enumerate(output_keys):
         snapshots = arr[:, idx].reshape(n_samples, flat_dim).astype(np.float32)
-        mean_flat = (
-            np.mean(snapshots, axis=0, dtype=np.float32) if bool(center) else np.zeros((flat_dim,), dtype=np.float32)
-        )
-        centered = snapshots - mean_flat[None, :]
+        mask_flat = mask.reshape(n_samples, flat_dim)
+        invalid_active = mask_flat & ~np.isfinite(snapshots)
+        if np.any(invalid_active):
+            raise ValueError(
+                "deeponet_pod basis fitting contains non-finite active targets: "
+                f"target={var_name}, count={int(np.sum(invalid_active))}"
+            )
+        if bool(center):
+            counts = np.sum(mask_flat, axis=0, dtype=np.float32)
+            sums = np.sum(np.where(mask_flat, snapshots, 0.0), axis=0, dtype=np.float32)
+            mean_flat = np.divide(
+                sums,
+                np.maximum(counts, 1.0),
+                out=np.zeros_like(sums, dtype=np.float32),
+            ).astype(np.float32)
+        else:
+            mean_flat = np.zeros((flat_dim,), dtype=np.float32)
+        # Inactive cells contribute zero centered energy.  This keeps arbitrary
+        # solid-region fill values out of the SVD while retaining the union of
+        # all train-case plasma supports.
+        centered = np.where(mask_flat, snapshots - mean_flat[None, :], 0.0).astype(np.float32)
         rank_eff = int(min(max_rank, n_samples, flat_dim))
         _, _, vh = np.linalg.svd(centered, full_matrices=False)
         basis_flat = np.asarray(vh[:rank_eff], dtype=np.float32)
@@ -188,6 +233,8 @@ class PODDeepONetTorch:
 
     model_type = "deeponet_pod"
     pod_impl_version = POD_DEEPONET_IMPL_VERSION
+    requires_spatial_features = False
+    requires_scaled_spatial_features = False
 
     def __init__(
         self,
@@ -337,17 +384,225 @@ class PODDeepONetTorch:
         chunks = [self.net.var_heads[name](z) for name in self.basis_keys]
         return self.torch.cat(chunks, dim=1)
 
-    def _project_target_coeff_norm_torch(self, target_t):
+    def _projection_mask_torch(self, supervised_mask: Any | None, target_t):
+        if supervised_mask is None:
+            if bool(self.torch.any(~self.torch.isfinite(target_t)).detach().cpu().item()):
+                raise ValueError("deeponet_pod target_raw must contain only finite values")
+            return None
+        mask = self.torch.as_tensor(
+            supervised_mask,
+            dtype=self.torch.float32,
+            device=target_t.device,
+        )
+        if mask.ndim == 2:
+            mask = mask[None, ...]
+        if mask.ndim == 4 and int(mask.shape[1]) == 1:
+            mask = mask[:, 0]
+        if mask.ndim != 3:
+            raise ValueError(
+                "deeponet_pod supervised_mask must be [H,W], [B,H,W], or [B,1,H,W]"
+            )
+        if int(mask.shape[0]) == 1 and int(target_t.shape[0]) > 1:
+            mask = mask.expand(int(target_t.shape[0]), -1, -1)
+        expected = (int(target_t.shape[0]), *self.grid_shape)
+        if tuple(int(value) for value in mask.shape) != expected:
+            raise ValueError(
+                f"deeponet_pod supervised_mask mismatch: expected={expected}, got={tuple(mask.shape)}"
+            )
+        if bool(self.torch.any(~self.torch.isfinite(mask)).detach().cpu().item()):
+            raise ValueError("deeponet_pod supervised_mask must contain only finite values")
+        active = mask > 0.0
+        invalid = active[:, None, :, :] & ~self.torch.isfinite(target_t)
+        if bool(self.torch.any(invalid).detach().cpu().item()):
+            raise ValueError("deeponet_pod target_raw is non-finite inside supervised_mask")
+        return active.reshape(int(target_t.shape[0]), -1)
+
+    def _project_target_coeff_norm_torch(self, target_t, *, supervised_mask: Any | None = None):
+        active_flat = self._projection_mask_torch(supervised_mask, target_t)
         chunks = []
         for var_idx, name in enumerate(self.basis_keys):
             flat = target_t[:, var_idx].reshape(int(target_t.shape[0]), -1)
             mean_t = self._mean_tensor(name).reshape(1, -1)
             centered = flat - mean_t
             basis_t = self._basis_tensor(name).reshape(int(self.basis_rank_by_var[name]), -1)
-            coeff_raw = self.torch.matmul(centered, basis_t.t())
+            coeff_raw = project_masked_pod_coefficients_torch(
+                centered,
+                basis_t,
+                active_mask=active_flat,
+            )
             coeff_norm = coeff_raw / self._coeff_std_tensor(name).reshape(1, -1)
             chunks.append(coeff_norm)
         return self.torch.cat(chunks, dim=1)
+
+    def _resolve_coeff_loss_weight(self, loss_cfg: dict[str, Any] | None) -> float:
+        weight = float(self.coeff_loss_weight)
+        if isinstance(loss_cfg, dict):
+            weight = float(dict(loss_cfg.get("deeponet_pod", {})).get("coeff_loss_weight", weight))
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError("deeponet_pod coeff_loss_weight must be finite and >= 0")
+        return float(weight)
+
+    def _validate_auxiliary_evaluation_inputs(
+        self,
+        cond: np.ndarray,
+        target_raw: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        cond_arr = np.asarray(cond, dtype=np.float32)
+        if cond_arr.ndim == 1:
+            cond_arr = cond_arr[None, :]
+        if cond_arr.ndim != 2:
+            raise ValueError(f"deeponet_pod cond must be [B,D], got {cond_arr.shape}")
+        if int(cond_arr.shape[0]) < 1:
+            raise ValueError("deeponet_pod cond must contain at least one case")
+        if int(cond_arr.shape[1]) != int(self.input_dim):
+            raise ValueError(
+                f"deeponet_pod cond feature mismatch: expected {self.input_dim}, got {cond_arr.shape[1]}"
+            )
+        if not np.all(np.isfinite(cond_arr)):
+            raise ValueError("deeponet_pod cond must contain only finite values")
+
+        target_arr = np.asarray(target_raw, dtype=np.float32)
+        if target_arr.ndim != 4:
+            raise ValueError(f"deeponet_pod target_raw must be [B,C,H,W], got {target_arr.shape}")
+        if int(target_arr.shape[0]) != int(cond_arr.shape[0]):
+            raise ValueError(
+                "deeponet_pod target_raw batch mismatch: "
+                f"expected {int(cond_arr.shape[0])}, got {int(target_arr.shape[0])}"
+            )
+        if int(target_arr.shape[1]) != int(len(self.basis_keys)):
+            raise ValueError(
+                f"deeponet_pod target_raw channel mismatch: expected {len(self.basis_keys)}, "
+                f"got {target_arr.shape[1]}"
+            )
+        if tuple(int(v) for v in target_arr.shape[2:]) != tuple(self.grid_shape):
+            raise ValueError(
+                f"deeponet_pod target_raw grid mismatch: expected {self.grid_shape}, got {target_arr.shape[2:]}"
+            )
+        return cond_arr.astype(np.float32, copy=False), target_arr.astype(np.float32, copy=False)
+
+    def evaluate_auxiliary_losses(
+        self,
+        cond: np.ndarray,
+        target_raw: np.ndarray,
+        *,
+        spatial_features: np.ndarray | None = None,
+        supervised_mask: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
+    ) -> dict[str, float]:
+        """Evaluate coefficient diagnostics without consuming training caches or gradients."""
+
+        del spatial_features  # POD coefficients depend on conditions only.
+        cond_arr, target_arr = self._validate_auxiliary_evaluation_inputs(cond, target_raw)
+        weight = self._resolve_coeff_loss_weight(loss_cfg)
+        module_modes = [(module, bool(module.training)) for module in self.net.modules()]
+        cached_out = self._torch_last_out
+        cached_coeff = self._torch_last_coeff_norm
+        device = next(self.net.parameters()).device
+        try:
+            self.net.eval()
+            with self.torch.no_grad():
+                cond_t = self.torch.as_tensor(cond_arr, dtype=self.torch.float32, device=device)
+                target_t = self.torch.as_tensor(target_arr, dtype=self.torch.float32, device=device)
+                coeff_pred = self._predict_coeff_norm_torch(cond_t)
+                coeff_target = self._project_target_coeff_norm_torch(
+                    target_t,
+                    supervised_mask=supervised_mask,
+                )
+                coeff_loss, by_target, by_group = coefficient_aux_loss_tensor(
+                    coeff_pred,
+                    coeff_target,
+                    basis_keys=self.basis_keys,
+                    coeff_slices=self._coeff_slices,
+                    loss_cfg=loss_cfg,
+                )
+                coeff_loss_value = float(coeff_loss.detach().cpu().item())
+                target_values = {
+                    name: float(value.detach().cpu().item()) for name, value in by_target.items()
+                }
+                group_values = {
+                    name: float(value.detach().cpu().item()) for name, value in by_group.items()
+                }
+        finally:
+            for module, was_training in module_modes:
+                module.training = was_training
+            self._torch_last_out = cached_out
+            self._torch_last_coeff_norm = cached_coeff
+        return coefficient_aux_loss_diagnostics(
+            coeff_loss=coeff_loss_value,
+            coeff_loss_weight=weight,
+            coeff_loss_by_target=target_values,
+            coeff_loss_by_group=group_values,
+        )
+
+    def _cached_coeff_loss_tensor(
+        self,
+        target_raw: np.ndarray,
+        *,
+        supervised_mask: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
+    ):
+        if self._torch_last_coeff_norm is None:
+            raise RuntimeError("PODDeepONetTorch auxiliary loss requires a cached training forward")
+        target_arr = np.asarray(target_raw, dtype=np.float32)
+        if target_arr.ndim != 4:
+            raise ValueError(f"deeponet_pod target_raw must be [B,C,H,W], got {target_arr.shape}")
+        if int(target_arr.shape[1]) != int(len(self.basis_keys)):
+            raise ValueError(
+                f"deeponet_pod target_raw channel mismatch: expected {len(self.basis_keys)}, got {target_arr.shape[1]}"
+            )
+        if int(target_arr.shape[0]) != int(self._torch_last_coeff_norm.shape[0]):
+            raise ValueError(
+                "deeponet_pod target_raw batch mismatch: "
+                f"expected {int(self._torch_last_coeff_norm.shape[0])}, got {int(target_arr.shape[0])}"
+            )
+        if tuple(int(v) for v in target_arr.shape[2:]) != tuple(self.grid_shape):
+            raise ValueError(
+                f"deeponet_pod target_raw grid mismatch: expected {self.grid_shape}, got {target_arr.shape[2:]}"
+            )
+        target_t = self.torch.as_tensor(
+            target_arr,
+            dtype=self.torch.float32,
+            device=getattr(self._torch_last_coeff_norm, "device", None),
+        )
+        coeff_target = self._project_target_coeff_norm_torch(
+            target_t,
+            supervised_mask=supervised_mask,
+        )
+        return coefficient_aux_loss_tensor(
+            self._torch_last_coeff_norm,
+            coeff_target,
+            basis_keys=self.basis_keys,
+            coeff_slices=self._coeff_slices,
+            loss_cfg=loss_cfg,
+        )
+
+    def auxiliary_loss_diagnostics(
+        self,
+        target_raw: np.ndarray,
+        *,
+        supervised_mask: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
+    ) -> dict[str, float]:
+        """Inspect cached coefficient loss without changing caches or gradients."""
+
+        weight = self._resolve_coeff_loss_weight(loss_cfg)
+        with self.torch.no_grad():
+            coeff_loss, by_target, by_group = self._cached_coeff_loss_tensor(
+                target_raw,
+                supervised_mask=supervised_mask,
+                loss_cfg=loss_cfg,
+            )
+            coeff_loss_value = float(coeff_loss.detach().cpu().item())
+        return coefficient_aux_loss_diagnostics(
+            coeff_loss=coeff_loss_value,
+            coeff_loss_weight=weight,
+            coeff_loss_by_target={
+                name: float(value.detach().cpu().item()) for name, value in by_target.items()
+            },
+            coeff_loss_by_group={
+                name: float(value.detach().cpu().item()) for name, value in by_group.items()
+            },
+        )
 
     def _forward_raw_torch(self, cond: np.ndarray, *, training: bool) -> np.ndarray:
         cond_arr = np.asarray(cond, dtype=np.float32)
@@ -424,6 +679,7 @@ class PODDeepONetTorch:
         weight_decay: float = 0.0,
         apply_step: bool = True,
         target_raw: np.ndarray | None = None,
+        supervised_mask: np.ndarray | None = None,
         loss_cfg: dict[str, Any] | None = None,
     ) -> dict[str, float]:
         del weight_decay
@@ -441,7 +697,14 @@ class PODDeepONetTorch:
         if not params:
             self._torch_last_out = None
             self._torch_last_coeff_norm = None
-            return {"step_rel_hidden_mean": 0.0, "step_rel_output": 0.0, "coeff_loss": 0.0}
+            return {
+                "step_rel_hidden_mean": 0.0,
+                "step_rel_output": 0.0,
+                **coefficient_aux_loss_diagnostics(
+                    coeff_loss=0.0,
+                    coeff_loss_weight=self._resolve_coeff_loss_weight(loss_cfg),
+                ),
+            }
         hidden_w, out_w = self._torch_step_reference()
         with self.torch.no_grad():
             w_hidden_prev = hidden_w.detach().clone() if hidden_w is not None else None
@@ -449,29 +712,23 @@ class PODDeepONetTorch:
         for p in params:
             if p.grad is not None:
                 p.grad.zero_()
-        coeff_loss_weight = float(self.coeff_loss_weight)
-        if isinstance(loss_cfg, dict):
-            coeff_loss_weight = float(loss_cfg.get("deeponet_pod", {}).get("coeff_loss_weight", coeff_loss_weight))
+        coeff_loss_weight = self._resolve_coeff_loss_weight(loss_cfg)
         use_coeff_loss = bool(target_raw is not None and coeff_loss_weight > 0.0)
+        coeff_loss = None
+        coeff_loss_by_target: dict[str, Any] = {}
+        coeff_loss_by_group: dict[str, Any] = {}
+        if target_raw is not None:
+            coeff_loss, coeff_loss_by_target, coeff_loss_by_group = self._cached_coeff_loss_tensor(
+                target_raw,
+                supervised_mask=supervised_mask,
+                loss_cfg=loss_cfg,
+            )
         self._torch_last_out.backward(grad_t, retain_graph=bool(use_coeff_loss))
         coeff_loss_val = 0.0
-        if use_coeff_loss:
-            target_arr = np.asarray(target_raw, dtype=np.float32)
-            if target_arr.ndim != 4:
-                raise ValueError(f"deeponet_pod target_raw must be [B,C,H,W], got {target_arr.shape}")
-            if int(target_arr.shape[1]) != int(len(self.basis_keys)):
-                raise ValueError(
-                    f"deeponet_pod target_raw channel mismatch: expected {len(self.basis_keys)}, got {target_arr.shape[1]}"
-                )
-            target_t = self.torch.as_tensor(
-                target_arr,
-                dtype=self.torch.float32,
-                device=getattr(self._torch_last_coeff_norm, "device", None),
-            )
-            coeff_target = self._project_target_coeff_norm_torch(target_t)
-            coeff_loss = self.torch.mean((self._torch_last_coeff_norm - coeff_target) ** 2)
-            (float(coeff_loss_weight) * coeff_loss).backward()
+        if coeff_loss is not None:
             coeff_loss_val = float(coeff_loss.detach().cpu().item())
+        if use_coeff_loss and coeff_loss is not None:
+            (float(coeff_loss_weight) * coeff_loss).backward()
         step_hidden = 0.0
         step_out = 0.0
         if bool(apply_step):
@@ -495,7 +752,18 @@ class PODDeepONetTorch:
         return {
             "step_rel_hidden_mean": float(step_hidden),
             "step_rel_output": float(step_out),
-            "coeff_loss": float(coeff_loss_val),
+            **coefficient_aux_loss_diagnostics(
+                coeff_loss=coeff_loss_val,
+                coeff_loss_weight=coeff_loss_weight,
+                coeff_loss_by_target={
+                    name: float(value.detach().cpu().item())
+                    for name, value in coeff_loss_by_target.items()
+                },
+                coeff_loss_by_group={
+                    name: float(value.detach().cpu().item())
+                    for name, value in coeff_loss_by_group.items()
+                },
+            ),
         }
 
     def state_dict_numpy(self) -> dict[str, np.ndarray]:

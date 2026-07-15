@@ -20,7 +20,10 @@ class BenchmarkContractEmitter:
         contract_samples: Any,
     ) -> None:
         resolved["model_contracts"] = dict(resolved.get("model_contracts", {}) or {})
-        emit_unet_contract = bool(contract_samples.unet) or eval_protocol_scope not in self.unet_contract_optional_scopes
+        emit_unet_contract = bool(contract_samples.unet) or (
+            active_unet_model is not None
+            and eval_protocol_scope not in self.unet_contract_optional_scopes
+        )
         if emit_unet_contract:
             unet_contract_effective = self._aggregate_unet_contract_effective(
                 train_cfg=train_cfg,

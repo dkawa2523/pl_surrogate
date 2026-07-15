@@ -24,6 +24,46 @@ def test_compose_numpy_disabled_returns_zero_components():
     assert all(v == pytest.approx(0.0) for v in components.values())
 
 
+def test_spatial_loss_is_zero_for_identical_fields_and_reports_components():
+    target = {"field": np.arange(16, dtype=np.float32).reshape(1, 4, 4)}
+    loss, grads, parts = compose_supervised_numpy(
+        target,
+        target,
+        y_order=["field"],
+        loss_cfg={
+            "supervised": {
+                "type": "huber",
+                "normalization": "sample_mean",
+                "spatial": {
+                    "gradient_weight": 0.1,
+                    "multiscale_weight": 0.05,
+                    "multiscale_scales": [2, 4],
+                },
+            }
+        },
+    )
+    assert loss == pytest.approx(0.0)
+    np.testing.assert_array_equal(grads["field"], np.zeros((1, 4, 4), dtype=np.float32))
+    assert parts["loss_supervised_spatial_gradient_field"] == pytest.approx(0.0)
+    assert parts["loss_supervised_spatial_multiscale_field"] == pytest.approx(0.0)
+
+
+def test_gradient_loss_does_not_cross_mask_boundary():
+    target = {"field": np.zeros((1, 2, 4), dtype=np.float32)}
+    pred = {"field": np.zeros((1, 2, 4), dtype=np.float32)}
+    pred["field"][:, :, 2:] = 100.0
+    mask = np.zeros((1, 2, 4), dtype=np.float32)
+    mask[:, :, :2] = 1.0
+    base, _, _ = compose_supervised_numpy(
+        pred,
+        target,
+        y_order=["field"],
+        mask=mask,
+        loss_cfg={"supervised": {"type": "mse", "spatial": {"gradient_weight": 1.0}}},
+    )
+    assert base == pytest.approx(0.0)
+
+
 def test_compose_numpy_resolves_explicit_physics_symbols_for_dynamic_targets():
     rng = np.random.default_rng(4)
     pred = {
@@ -340,6 +380,42 @@ def test_compose_supervised_numpy_uniform_by_group_balances_field_families():
     assert np.allclose(grads["electron_temperature"], np.full((1, 2, 2), 0.5, dtype=np.float32))
 
 
+def test_compose_supervised_numpy_weighted_by_group_uses_normalized_group_weights():
+    y_order = ["electron_density", "ion_density", "electron_temperature"]
+    pred = {
+        "electron_density": _field(2.0, (1, 2, 2)),
+        "ion_density": _field(1.0, (1, 2, 2)),
+        "electron_temperature": _field(4.0, (1, 2, 2)),
+    }
+    target = {name: np.zeros_like(value) for name, value in pred.items()}
+    schema = {
+        "targets": [
+            {"id": "electron_density", "field_family": "density"},
+            {"id": "ion_density", "field_family": "density"},
+            {"id": "electron_temperature", "field_family": "temperature"},
+        ]
+    }
+
+    loss, grads, per_var = compose_supervised_numpy(
+        pred,
+        target,
+        y_order=y_order,
+        loss_cfg={
+            "supervised": {"type": "mse"},
+            "group_weighting": {"mode": "weighted_by_group", "weights": {"density": 3.0, "temperature": 1.0}},
+            "target_role_schema": schema,
+        },
+    )
+
+    assert loss == pytest.approx(2.9375)
+    assert per_var["electron_density"] == pytest.approx(0.75)
+    assert per_var["ion_density"] == pytest.approx(0.1875)
+    assert per_var["electron_temperature"] == pytest.approx(2.0)
+    assert per_var["loss_supervised_group_density"] == pytest.approx(0.9375)
+    assert per_var["loss_supervised_group_temperature"] == pytest.approx(2.0)
+    assert np.allclose(grads["electron_temperature"], np.full((1, 2, 2), 0.25, dtype=np.float32))
+
+
 def test_compose_supervised_numpy_uniform_by_group_requires_target_role_schema():
     pred = {"electron_density": _field(1.0, (1, 2, 2))}
     target = {"electron_density": np.zeros((1, 2, 2), dtype=np.float32)}
@@ -350,6 +426,24 @@ def test_compose_supervised_numpy_uniform_by_group_requires_target_role_schema()
             target,
             y_order=["electron_density"],
             loss_cfg={"supervised": {"type": "mse"}, "group_weighting": {"mode": "uniform_by_group"}},
+        )
+
+
+def test_compose_supervised_numpy_weighted_by_group_rejects_missing_group_weight():
+    pred = {"electron_density": _field(1.0, (1, 2, 2))}
+    target = {"electron_density": np.zeros((1, 2, 2), dtype=np.float32)}
+    schema = {"targets": [{"id": "electron_density", "field_family": "density"}]}
+
+    with pytest.raises(ValueError, match="missing groups"):
+        compose_supervised_numpy(
+            pred,
+            target,
+            y_order=["electron_density"],
+            loss_cfg={
+                "supervised": {"type": "mse"},
+                "group_weighting": {"mode": "weighted_by_group", "weights": {}},
+                "target_role_schema": schema,
+            },
         )
 
 
@@ -389,6 +483,41 @@ def test_compose_supervised_torch_uniform_by_group_reports_breakdown():
 
 
 @pytest.mark.torch_runtime
+def test_compose_supervised_torch_weighted_by_group_reports_breakdown():
+    require_torch_runtime(enable_backend=True)
+    torch = require_torch()
+    y_order = ["electron_density", "ion_density", "electron_temperature"]
+    pred = {
+        "electron_density": torch.full((1, 1, 2, 2), 2.0),
+        "ion_density": torch.full((1, 1, 2, 2), 1.0),
+        "electron_temperature": torch.full((1, 1, 2, 2), 4.0),
+    }
+    target = torch.zeros((1, 3, 2, 2), dtype=torch.float32)
+    schema = {
+        "targets": [
+            {"id": "electron_density", "field_family": "density"},
+            {"id": "ion_density", "field_family": "density"},
+            {"id": "electron_temperature", "field_family": "temperature"},
+        ]
+    }
+
+    loss, per_var = compose_supervised_torch(
+        pred,
+        target,
+        y_order=y_order,
+        loss_cfg={
+            "supervised": {"type": "mse"},
+            "group_weighting": {"mode": "weighted_by_group", "weights": {"density": 3.0, "temperature": 1.0}},
+            "target_role_schema": schema,
+        },
+    )
+
+    assert float(loss.detach().cpu().item()) == pytest.approx(2.9375)
+    assert per_var["loss_supervised_group_density"] == pytest.approx(0.9375)
+    assert per_var["loss_supervised_group_temperature"] == pytest.approx(2.0)
+
+
+@pytest.mark.torch_runtime
 def test_compose_supervised_torch_huber_is_differentiable():
     require_torch_runtime(enable_backend=True)
     torch = require_torch()
@@ -412,6 +541,36 @@ def test_compose_supervised_torch_huber_is_differentiable():
     )
 
 
+@pytest.mark.torch_runtime
+def test_compose_supervised_torch_spatial_loss_is_differentiable():
+    require_torch_runtime(enable_backend=True)
+    torch = require_torch()
+    pred_tensor = torch.arange(16, dtype=torch.float32).reshape(1, 1, 4, 4).clone().requires_grad_(True)
+    target = torch.zeros((1, 1, 4, 4), dtype=torch.float32)
+    loss, parts = compose_supervised_torch(
+        {"field": pred_tensor},
+        target,
+        y_order=["field"],
+        mask=torch.ones((1, 4, 4), dtype=torch.float32),
+        loss_cfg={
+            "supervised": {
+                "type": "huber",
+                "normalization": "sample_mean",
+                "spatial": {
+                    "gradient_weight": 0.1,
+                    "multiscale_weight": 0.05,
+                    "multiscale_scales": [2, 4],
+                },
+            }
+        },
+    )
+    loss.backward()
+    assert pred_tensor.grad is not None
+    assert torch.all(torch.isfinite(pred_tensor.grad))
+    assert parts["loss_supervised_spatial_gradient_field"] > 0.0
+    assert parts["loss_supervised_spatial_multiscale_field"] > 0.0
+
+
 def test_compose_supervised_removed_region_weighting_rejects():
     pred = {"plasma_potential": np.ones((1, 2, 2), dtype=np.float32)}
     target = {"plasma_potential": np.zeros((1, 2, 2), dtype=np.float32)}
@@ -429,3 +588,47 @@ def test_compose_supervised_removed_region_weighting_rejects():
                 }
             },
         )
+
+
+def test_axisymmetric_point_weighting_uses_radial_cell_weight():
+    pred = {"ne": np.array([[[1.0, 2.0], [1.0, 2.0]]], dtype=np.float32)}
+    target = {"ne": np.zeros((1, 2, 2), dtype=np.float32)}
+    loss, _, _ = compose_supervised_numpy(
+        pred,
+        target,
+        y_order=["ne"],
+        loss_cfg={
+            "supervised": {
+                "type": "mse",
+                "normalization": "sample_mean",
+                "physical_weighting": {"axisymmetric_volume": True},
+            }
+        },
+        point_weight=np.array([[1.0, 3.0], [1.0, 3.0]], dtype=np.float32),
+    )
+    assert loss == pytest.approx(1.625)
+
+
+def test_te_density_weighting_uses_inverse_linear_density_target():
+    pred = {"Te": np.array([[[1.0, 2.0], [1.0, 2.0]]], dtype=np.float32)}
+    target = {
+        "Te": np.zeros((1, 2, 2), dtype=np.float32),
+        "ne": np.array([[[1.0, 3.0], [1.0, 3.0]]], dtype=np.float32),
+    }
+    loss, _, _ = compose_supervised_numpy(
+        pred,
+        target,
+        y_order=["Te"],
+        loss_cfg={
+            "supervised": {
+                "type": "mse",
+                "normalization": "sample_mean",
+                "physical_weighting": {
+                    "density_source": "ne",
+                    "density_weighted_targets": ["Te"],
+                },
+            }
+        },
+        target_affine={"ne": {"mean": 0.0, "scale": 1.0}},
+    )
+    assert loss == pytest.approx(1.625)

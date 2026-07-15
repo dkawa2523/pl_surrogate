@@ -235,6 +235,11 @@ def test_icp_part_sdf_lite_runtime_features_change_with_geom_param(tmp_path: Pat
     ]
     base = provider.get({"geom_id": "default", "geom_param": {}})
     shifted = provider.get({"geom_id": "default", "geom_param": {"part.coil_01.tx": 0.2}})
+    base_runtime_rows = engine.feature_builder.build_grid_feature_rows(base, channels)
+    engine.feature_builder.coord_feature_pack = {
+        "channels": np.asarray(channels),
+        "data": base_runtime_rows.T.reshape(len(channels), 8, 8),
+    }
     rows_base = engine.feature_builder.build_grid_feature_rows(base, channels)
     rows_shifted = engine.feature_builder.build_grid_feature_rows(shifted, channels)
     assert rows_base.shape == (64, 14)

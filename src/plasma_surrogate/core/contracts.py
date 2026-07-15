@@ -402,6 +402,9 @@ def build_product_manifest(
         "cv",
         "effective_steps_per_model",
         "loss_protocol_effective",
+        "loss_protocol_version",
+        "loss_protocol_definition_hash",
+        "loss_protocol_effective_config",
     }
     physics_prefixes = ("physics_",)
     physics_keys = {

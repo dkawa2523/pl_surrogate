@@ -7,7 +7,17 @@ from typing import Any
 import yaml
 
 
-CORE_MODELS = ("global_mlp", "unet", "ffno", "cno", "cno_operator_unet")
+CORE_MODELS = (
+    "global_mlp",
+    "deeponet_pod",
+    "unet",
+    "unetpp",
+    "unetpp_attn",
+    "fno",
+    "ffno",
+    "cno",
+    "cno_operator_unet",
+)
 DEFAULT_MODELS = ("global_mlp", "unet", "ffno", "cno_operator_unet")
 LEGACY_COND_COLUMNS = ["llcoil", "rrc", "nncoil", "rrce", "zzc", "pp", "pp0"]
 PROCESS_COND_COLUMNS = ["pp", "pp0"]
@@ -118,7 +128,10 @@ def _parse_args() -> argparse.Namespace:
         "--primary-split",
         choices=("", "interp", "extrap", "structure_holdout"),
         default="",
-        help="Optional primary split override. For --structure-spatial-v1 the default is extrap.",
+        help=(
+            "Optional primary split override. Structural single-axis studies default to "
+            "structure_holdout so validation/test coil groups are unseen during training."
+        ),
     )
     parser.add_argument(
         "--linear-target-preprocessing",
@@ -209,7 +222,7 @@ def _set_target_transforms(cfg: dict[str, Any], *, structure_defaults: bool) -> 
                     "value_transform": "signed_log1p",
                     "scaler": "robust",
                     "fit_scope": "plasma_only",
-                    "clip": {"mode": "none"},
+                    "clip": {"mode": "quantile", "q_low": 0.001, "q_high": 0.999},
                 },
             }
         )
@@ -292,13 +305,26 @@ def _make_smoke_lightweight(train_cfg: dict[str, Any], model: str) -> None:
         net_cfg = model_cfg.setdefault("model_cfg", {})
         net_cfg["base_channels"] = 8
         net_cfg.setdefault("conv_cfg", {})["depth"] = 1
-    elif model == "ffno":
+    elif model in {"unetpp", "unetpp_attn"}:
+        net_cfg = model_cfg.setdefault("model_cfg", {})
+        conv_cfg = net_cfg.setdefault("conv_cfg", {})
+        conv_cfg["base_channels"] = 8
+        conv_cfg["depth"] = 2
+        if model == "unetpp_attn":
+            conv_cfg.setdefault("attention_cfg", {})["enabled"] = True
+    elif model in {"fno", "ffno"}:
         net_cfg = model_cfg.setdefault("model_cfg", {})
         net_cfg["n_modes"] = 4
         net_cfg["fno_n_modes"] = 4
         spectral = net_cfg.setdefault("spectral_cfg", {})
         spectral["width"] = 16
         spectral["n_layers"] = 1
+    elif model == "deeponet_pod":
+        pod_cfg = model_cfg.setdefault("model_cfg", {})
+        pod_cfg["hidden_dim"] = 32
+        pod_cfg["latent_dim"] = 32
+        pod_cfg["coeff_loss_weight"] = 0.1
+        pod_cfg.setdefault("basis", {})["rank"] = 8
     elif model == "cno":
         cno_cfg = model_cfg.setdefault("model_cfg", {}).setdefault("cno_cfg", {})
         cno_cfg["width"] = 16
@@ -335,13 +361,16 @@ def _mutate_config(
 
     bench["output_dir"] = str(run_root / size / model).replace("\\", "/")
     eval_cfg = bench.setdefault("eval", {})
+    eval_cfg["interp_mode"] = "marginal"
     eval_cfg["protocol_variant"] = f"icp_stage4_core4_{size}_{model}"
     eval_protocol = bench.setdefault("eval_protocol", {})
+    eval_protocol["interp_mode"] = "marginal"
     primary_split_override = str(primary_split_override).strip().lower()
     if primary_metric:
         eval_cfg["primary_metric"] = str(primary_metric)
         if primary_mode:
             eval_cfg["primary_mode"] = str(primary_mode)
+            eval_cfg["objective_mode"] = str(primary_mode)
         if "_extrap" in str(primary_metric):
             eval_protocol["primary_split"] = "extrap"
         elif "_interp" in str(primary_metric):
@@ -365,9 +394,26 @@ def _mutate_config(
         feature_profile = "geom_v1_mainline"
         feature_channels = list(ICP_STRUCT_SPATIAL_CHANNELS)
         provider_mode = "fixed"
-    if structure_inputs_enabled and not primary_metric and not primary_split_override:
-        eval_protocol["primary_split"] = "extrap"
+    metric_lower = str(primary_metric).strip().lower()
+    metric_selects_split = any(
+        token in metric_lower for token in ("_interp", "_extrap", "_structure_holdout")
+    )
+    if (
+        structure_inputs_enabled
+        and not dual_axis
+        and not primary_split_override
+        and not metric_selects_split
+    ):
+        eval_protocol["primary_split"] = "structure_holdout"
     primary_split = str(eval_protocol.get("primary_split", "interp")).strip().lower()
+    eval_protocol["min_primary_test_cases"] = max(
+        int(eval_protocol.get("min_primary_test_cases", 3)),
+        3,
+    )
+    eval_protocol["min_primary_test_groups"] = max(
+        int(eval_protocol.get("min_primary_test_groups", 3)),
+        3,
+    )
     metric_effective = str(eval_cfg.get("primary_metric", "")).strip()
     if not dual_axis:
         eval_protocol["mode"] = "primary_axis"
@@ -392,14 +438,29 @@ def _mutate_config(
     dataset["geometry_root"] = "geometry"
 
     bench["split"] = {"seed": 7, "ratios": [0.8, 0.1, 0.1]}
+    if structure_inputs_enabled:
+        bench["split"]["structure_holdout"] = {
+            "enabled": True,
+            "required": True,
+            "group_key": "base_case_id",
+        }
     _set_target_transforms(
         bench,
         structure_defaults=bool(structure_inputs_enabled and not linear_target_preprocessing),
     )
-    bench.setdefault("preprocessing", {}).setdefault("scalers", {})["fit_split"] = primary_split
-    coord_features = bench.setdefault("preprocessing", {}).setdefault("coord_features", {})
-    if structure_inputs_enabled and model != "global_mlp":
+    preprocessing = bench.setdefault("preprocessing", {})
+    preprocessing.setdefault("scalers", {})["fit_split"] = primary_split
+    if structure_inputs_enabled:
+        # The converted ICP datasets provide explicit physical r/z coordinate vectors.
+        # Request that source directly and reject any fallback to normalized coordinates.
+        preprocessing["coord_grid_source"] = "rz_linear"
+        preprocessing.setdefault("coord_grid_contract", {})["require_requested_source"] = "error"
+    coord_features = preprocessing.setdefault("coord_features", {})
+    grid_pack_model = bool(structure_inputs_enabled and model not in {"global_mlp", "deeponet_pod"})
+    descriptor_model = bool(structure_inputs_enabled and model == "deeponet_pod")
+    if grid_pack_model:
         coord_features["channels_from_profile"] = feature_profile
+        coord_features.pop("channels", None)
         coord_features.pop("case_output", None)
         coord_features.setdefault("static_output", "features/static_spatial_feature_pack.npz")
         coord_features.setdefault("case_structure_output", "features/case_structure_feature_pack.npz")
@@ -412,6 +473,12 @@ def _mutate_config(
                 "mask_scope": "plasma_plus_band",
             }
         )
+    elif descriptor_model:
+        coord_features["channels_from_profile"] = feature_profile
+        coord_features.pop("channels", None)
+        coord_features.pop("case_output", None)
+        coord_features.setdefault("static_output", "features/static_spatial_feature_pack.npz")
+        coord_features.setdefault("case_structure_output", "features/case_structure_feature_pack.npz")
     elif model == "global_mlp":
         coord_features.pop("channels_from_profile", None)
 
@@ -425,14 +492,21 @@ def _mutate_config(
     _set_epochs(train_cfg, model, epochs)
     if size == "smoke":
         _make_smoke_lightweight(train_cfg, model)
-    if structure_inputs_enabled and model != "global_mlp":
+    if grid_pack_model:
         model_train_cfg = train_cfg.setdefault(model, {})
         input_features = model_train_cfg.setdefault("input_features", {})
         input_features["mode"] = "geom_feature_pack"
-        input_features["require_pack"] = "off" if (part_sdf_lite_v1 or part_lite_v1) else "error"
+        input_features["require_pack"] = "error"
         input_features["features"] = list(feature_channels)
         if model == "unet":
-            model_train_cfg.setdefault("model_cfg", {}).setdefault("output_heads", {})["mode"] = "split_density_field"
+            model_train_cfg.setdefault("model_cfg", {}).setdefault("output_heads", {})["mode"] = "shared"
+        if model == "fno":
+            net_cfg = model_train_cfg.setdefault("model_cfg", {})
+            net_cfg["n_modes"] = 12
+            net_cfg["fno_n_modes"] = 12
+            spectral = net_cfg.setdefault("spectral_cfg", {})
+            spectral["width"] = 48
+            model_train_cfg["batch_size_cases"] = min(int(model_train_cfg.get("batch_size_cases", 4)), 2)
         if model == "ffno":
             net_cfg = model_train_cfg.setdefault("model_cfg", {})
             net_cfg["n_modes"] = 16
@@ -446,36 +520,38 @@ def _mutate_config(
         loss_cfg = train_cfg.setdefault("loss", {})
         supervised = loss_cfg.setdefault("supervised", {})
         supervised["type"] = "huber"
-        supervised["delta"] = 1.0
-        supervised["base"] = "huber"
         supervised["huber_delta"] = 1.0
         supervised.setdefault("mask", "plasma_only")
-        supervised.setdefault("nan_region_policy", "sdf_continuous")
+        supervised["nan_region_policy"] = "mask_only"
         supervised["target_weights"] = {"ne": 1.0, "ni": 1.0, "Te": 1.2, "phi": 0.5}
-        supervised["target_region_by_var"] = {
-            "ne": "plasma_only",
-            "ni": "plasma_only",
-            "Te": "plasma_only",
-            "phi": "plasma_only",
-        }
-        supervised["boundary_weight"] = {
-            "enabled": True,
-            "alpha": 2.0,
-            "tau": 2.0,
-            "vars": ["ne", "ni", "Te", "phi"],
-        }
-        for old_key in ("spatial_consistency", "region_balance", "density_relative_weighting"):
+        for old_key in (
+            "boundary_weight",
+            "target_region_by_var",
+            "spatial_consistency",
+            "region_balance",
+            "density_relative_weighting",
+        ):
             supervised.pop(old_key, None)
         multitask = loss_cfg.setdefault("multitask", {})
         multitask["weighting"] = "fixed"
         multitask["fixed_weights_by_var"] = {"ne": 1.0, "ni": 1.0, "Te": 1.2, "phi": 0.5}
+        _set_inference_defaults(bench, enable_optimize=enable_optimize, size=size)
+    if descriptor_model:
+        loss_cfg = train_cfg.setdefault("loss", {})
+        supervised = loss_cfg.setdefault("supervised", {})
+        supervised["type"] = "huber"
+        supervised["huber_delta"] = 1.0
+        supervised.setdefault("mask", "plasma_only")
+        supervised["nan_region_policy"] = "mask_only"
+        supervised["target_weights"] = {"ne": 1.0, "ni": 1.0, "Te": 1.2, "phi": 0.5}
+        model_train_cfg = train_cfg.setdefault(model, {})
+        model_train_cfg["batch_size_cases"] = min(int(model_train_cfg.get("batch_size_cases", 4)), 4)
         _set_inference_defaults(bench, enable_optimize=enable_optimize, size=size)
 
     if model == "global_mlp":
         runtime = {
             "input_mode": "table_only",
             "strict_input_mode": "error",
-            "allow_mode_fallback": False,
             "structure": {
                 "feature_profile": "none",
                 "descriptor_profile": "none",
@@ -484,11 +560,22 @@ def _mutate_config(
                 "provider_mode": "fixed",
             },
         }
+    elif model == "deeponet_pod":
+        runtime = {
+            "input_mode": "table_plus_structure",
+            "strict_input_mode": "error",
+            "structure": {
+                "feature_profile": feature_profile if structure_inputs_enabled else "geom_v1_mainline",
+                "descriptor_profile": "struct_desc_v2",
+                "latent_profile": "none",
+                "adapter_mode": "descriptor_branch",
+                "provider_mode": "parametric_parts",
+            },
+        }
     else:
         runtime = {
             "input_mode": "table_plus_structure",
             "strict_input_mode": "error",
-            "allow_mode_fallback": False,
             "structure": {
                 "feature_profile": feature_profile if structure_inputs_enabled else "geom_v1_mainline",
                 "descriptor_profile": "none",
@@ -540,6 +627,14 @@ def _validate_generated(
     if structure_inputs_enabled:
         if bench.get("preprocessing", {}).get("scalers", {}).get("fit_split") != bench.get("eval_protocol", {}).get("primary_split"):
             raise ValueError(f"{path}: preprocessing.scalers.fit_split must match primary_split")
+        holdout_cfg = dict(bench.get("split", {}).get("structure_holdout", {}) or {})
+        if not bool(holdout_cfg.get("required", False)) or holdout_cfg.get("group_key") != "base_case_id":
+            raise ValueError(f"{path}: structural configs must require base_case_id structure holdout")
+        if bench.get("preprocessing", {}).get("coord_grid_source") != "rz_linear":
+            raise ValueError(f"{path}: structural configs must request coord_grid_source=rz_linear")
+        coord_contract = bench.get("preprocessing", {}).get("coord_grid_contract", {})
+        if coord_contract.get("require_requested_source") != "error":
+            raise ValueError(f"{path}: structural configs must enforce coord-grid source")
     if structure_inputs_enabled and not linear_target_preprocessing:
         expected_transforms = {"ne": "log10_floor", "ni": "log10_floor", "Te": "log1p", "phi": "signed_log1p"}
     else:
@@ -547,6 +642,9 @@ def _validate_generated(
     for name, expected_transform in expected_transforms.items():
         if transforms.get(name, {}).get("value_transform") != expected_transform:
             raise ValueError(f"{path}: {name} target transform must be {expected_transform}")
+        if structure_inputs_enabled and not linear_target_preprocessing:
+            if transforms.get(name, {}).get("clip", {}).get("mode") != "quantile":
+                raise ValueError(f"{path}: {name} must use fitted quantile bounds for stable inverse evaluation")
     output_dir = str(bench.get("output_dir", ""))
     expected_suffix = f"{size}/{model}".replace("\\", "/")
     if not output_dir.replace("\\", "/").endswith(expected_suffix):
@@ -570,6 +668,10 @@ def _validate_generated(
     )
     if str(structure.get("feature_profile", "")) != expected_profile:
         raise ValueError(f"{path}: feature_profile mismatch")
+    if structure_inputs_enabled and model not in {"global_mlp", "deeponet_pod"}:
+        input_features = dict(dict(bench.get("train", {})).get(model, {}).get("input_features", {}))
+        if input_features.get("require_pack") != "error":
+            raise ValueError(f"{path}: structural grid models must require the case feature pack")
 
 
 def main() -> int:

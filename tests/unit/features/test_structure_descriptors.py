@@ -84,6 +84,35 @@ def test_struct_desc_lite_v1_uses_global_features_only() -> None:
     assert np.allclose(lite.vector, via_registry.vector)
 
 
+def test_fixed_part_slots_do_not_count_inactive_slots_as_parts() -> None:
+    geom = _geom_ctx_with_parts()
+    active = np.asarray(geom.regions["part_mask_stack"], dtype=np.float32)
+    fixed_slots = np.zeros((6, *active.shape[1:]), dtype=np.float32)
+    fixed_slots[:2] = active
+    geom.regions = {"part_mask_stack": fixed_slots}
+
+    full = build_struct_desc_v2(geom)
+    lite = build_struct_desc_lite_v1(geom)
+
+    assert full.n_parts == 2
+    assert full.n_part_slots == 6
+    assert int(full.vector[0]) == 2
+    assert int(full.vector.shape[0]) == 6 + 6 * 9
+    assert np.allclose(full.vector[6 + 2 * 9 :], 0.0)
+    assert lite.n_parts == 2
+    assert lite.n_part_slots == 6
+    assert int(lite.vector[0]) == 2
+    assert int(lite.vector.shape[0]) == 6
+    assert int(full.to_npz_payload()["n_part_slots"][0]) == 6
+
+
+def test_descriptor_rejects_part_stack_without_active_parts() -> None:
+    geom = _geom_ctx_with_parts()
+    geom.regions = {"part_mask_stack": np.zeros((6, 8, 8), dtype=np.float32)}
+    with pytest.raises(ValueError, match="at least one active part"):
+        build_struct_desc_v2(geom)
+
+
 def test_struct_desc_v1_requires_part_mask_stack() -> None:
     geom = _geom_ctx_with_parts()
     geom.regions = {}

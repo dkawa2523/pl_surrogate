@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import numpy as np
 
+from plasma_surrogate.core.boundary_distance import boundary_distance_channels_from_loss_cfg
 from plasma_surrogate.core.input_modes import (
     DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY,
     DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
@@ -42,12 +43,19 @@ from plasma_surrogate.train.deeponet_contracts import (
     validate_pod_deeponet_experimental_contract as _validate_pod_deeponet_experimental_contract,
 )
 from plasma_surrogate.train.deeponet_runtime import DeeponetRuntime, resolve_deeponet_runtime
-from plasma_surrogate.train.loss_protocols import resolve_loss_protocol
+from plasma_surrogate.train.loss_protocols import loss_protocol_metadata, resolve_loss_protocol
 from plasma_surrogate.train.model_artifacts import record_model_contract
+from plasma_surrogate.train.selection import SPATIAL_SELECTION_MODE, resolve_spatial_selection_config
+from plasma_surrogate.train.spatial_supervision import (
+    materialize_supervised_geometry,
+    required_raw_supervision_channels,
+)
 from plasma_surrogate.preprocessing.spatial_features import (
     apply_coord_feature_scaling as _apply_coord_feature_scaling,
     apply_distance_transform as _apply_distance_transform,
+    build_case_spatial_features as _build_case_spatial_features,
     build_coord_feature_rows as _build_coord_feature_rows,
+    materialize_case_spatial_batch as _materialize_case_spatial_batch,
     resolve_coord_feature_channels as _resolve_coord_feature_channels,
     resolve_distance_transform_cfg as _resolve_distance_transform_cfg,
     resolve_distance_transform_effective as _resolve_distance_transform_effective,
@@ -103,6 +111,7 @@ class TrainDispatchContext:
     coord_distance_transform_stats: dict[str, Any] | None = None
     structure_descriptor_pack: dict[str, Any] | None = None
     latent_feature_pack: dict[str, Any] | None = None
+    case_ids: list[str] | None = None
     input_mode_effective: str | None = None
     structure_adapter_mode_effective: str | None = None
     structure_descriptor_profile_effective: str | None = None
@@ -271,7 +280,7 @@ def _build_train_lane_runtime(
     extra_artifacts: dict[str, Any] = {
         "input_mode_effective": str(input_mode_effective),
         "structure_adapter_mode_effective": str(structure_adapter_mode_effective),
-        "loss_protocol_effective": str(loss_cfg.get("protocol_effective", "none")),
+        **loss_protocol_metadata(loss_cfg),
     }
     return TrainLaneRuntime(
         ctx=ctx,
@@ -328,6 +337,70 @@ def _run_model_train_predict_for_adapter(
     return _run_train_lane(ctx, adapter=expected_adapter, handler=handler)
 
 
+def _required_raw_supervision_channels(
+    *,
+    loss_cfg: dict[str, Any] | None,
+    selection_cfg: dict[str, Any] | None,
+) -> list[str]:
+    """Return geometry channels whose raw, case-aligned values affect the objective."""
+
+    return required_raw_supervision_channels(loss_cfg=loss_cfg, selection_cfg=selection_cfg)
+
+
+def _resolve_case_supervision_splits(
+    rt: TrainLaneRuntime,
+    *,
+    loss_cfg: dict[str, Any] | None,
+    selection_cfg: dict[str, Any] | None,
+) -> tuple[Any | None, Any | None]:
+    """Build raw geometry sources for objectives without coupling them to model inputs."""
+
+    required = _required_raw_supervision_channels(
+        loss_cfg=loss_cfg,
+        selection_cfg=selection_cfg,
+    )
+    if not required:
+        return None, None
+
+    ctx = rt.ctx
+    case_pack = dict(ctx.case_structure_feature_pack or {})
+    if "data" not in case_pack:
+        # Static geometry and older preprocessed bundles keep the established
+        # supervised_mask/supervised_distance fallback path.
+        return None, None
+    static_pack = dict(ctx.static_spatial_feature_pack or {})
+    if "data" not in static_pack:
+        raise ValueError(
+            "case-varying geometry declares a case_structure_feature_pack but raw spatial "
+            "supervision also requires static_spatial_feature_pack"
+        )
+
+    source, source_name = _build_case_spatial_features(
+        channels=required,
+        h=rt.h,
+        w=rt.w,
+        static_pack=static_pack,
+        case_pack=case_pack,
+        distance_transform_cfg={"mode": "raw"},
+        coord_feature_scaler_artifact=None,
+        expected_case_ids=ctx.case_ids,
+    )
+    if source is None:
+        raise ValueError(
+            "case-varying geometry is missing raw supervision channels required by the "
+            f"training/selection objective: required={required}, source={source_name}"
+        )
+    if int(source.n_cases) != int(ctx.n_cases):
+        raise ValueError(
+            "case-varying raw supervision row count must match the dataset: "
+            f"rows={int(source.n_cases)}, n_cases={int(ctx.n_cases)}"
+        )
+    rt.extra_artifacts["case_supervision_pack_used"] = True
+    rt.extra_artifacts["case_supervision_pack_storage"] = str(source_name)
+    rt.extra_artifacts["case_supervision_channels"] = list(required)
+    return source.subset(ctx.tr), source.subset(ctx.va)
+
+
 def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     ctx = rt.ctx
     train_cfg = rt.train_cfg
@@ -356,6 +429,11 @@ def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         if clip_stats:
             sup["robust_clip_stats"] = clip_stats
     global_loss_cfg["supervised"] = sup
+    supervision_train, supervision_val = _resolve_case_supervision_splits(
+        rt,
+        loss_cfg=global_loss_cfg,
+        selection_cfg=dict(cfg.get("selection", {})),
+    )
     model = build_model_from_name(
         model_name="global_mlp",
         input_dim=ctx.cond_scaled.shape[1],
@@ -389,6 +467,8 @@ def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         grad_clip_cfg=grad_clip_cfg,
         output_head_refresh_cfg=output_head_refresh_cfg,
         selection_cfg=dict(cfg.get("selection", {})),
+        supervision_train=supervision_train,
+        supervision_val=supervision_val,
     )
     history = out.history
     steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
@@ -400,6 +480,113 @@ def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         true_eval=_to_true_eval(ctx.y, ctx.te, ctx.y_vars),
         eval_vars=list(ctx.y_vars),
     )
+
+
+def _case_structure_pack_is_varying(
+    pack: dict[str, Any] | None,
+    *,
+    n_cases: int,
+) -> bool:
+    payload = dict(pack or {})
+    if "data" not in payload:
+        return False
+    data = np.asarray(payload["data"])
+    if data.ndim < 2:
+        raise ValueError(
+            "case_structure_feature_pack data must have a leading case dimension; "
+            f"got shape={data.shape}"
+        )
+    if int(data.shape[0]) != int(n_cases):
+        raise ValueError(
+            "case_structure_feature_pack row count mismatch: "
+            f"rows={int(data.shape[0])}, n_cases={int(n_cases)}"
+        )
+    if int(n_cases) < 2:
+        return False
+    first = np.asarray(data[0])
+    return any(not np.array_equal(np.asarray(data[i]), first) for i in range(1, int(n_cases)))
+
+
+def _resolve_pod_descriptor_splits(
+    *,
+    descriptor_input: np.ndarray,
+    descriptor_pack: dict[str, Any] | None,
+    case_structure_pack: dict[str, Any] | None,
+    n_cases: int,
+    tr: np.ndarray,
+    va: np.ndarray,
+    te: np.ndarray,
+    case_ids: list[str] | None = None,
+    case_specific_structure_declared: bool = False,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    descriptors = np.asarray(descriptor_input, dtype=np.float32)
+    split_indices = {
+        "train": np.asarray(tr, dtype=np.int64).reshape(-1),
+        "val": np.asarray(va, dtype=np.int64).reshape(-1),
+        "test": np.asarray(te, dtype=np.int64).reshape(-1),
+    }
+    for split_name, indices in split_indices.items():
+        if np.any(indices < 0) or np.any(indices >= int(n_cases)):
+            raise ValueError(
+                f"POD descriptor {split_name} indices are out of range for n_cases={int(n_cases)}"
+            )
+
+    if descriptors.ndim == 1:
+        structure_varies = _case_structure_pack_is_varying(
+            case_structure_pack,
+            n_cases=int(n_cases),
+        )
+        if structure_varies or bool(case_specific_structure_declared):
+            raise ValueError(
+                "POD-DeepONet refuses to repeat one structure descriptor across case-specific geometry. "
+                "Rerun preprocessing to create structure_descriptor_pack.vectors with aligned case_ids; "
+                "exclude this model from structure-aware comparison until that artifact exists."
+            )
+        rows = np.repeat(descriptors.reshape(1, -1), int(n_cases), axis=0).astype(np.float32)
+    elif descriptors.ndim == 2:
+        rows = descriptors.astype(np.float32)
+        if int(rows.shape[0]) != int(n_cases):
+            raise ValueError(
+                "case-specific POD descriptor row count mismatch: "
+                f"rows={int(rows.shape[0])}, n_cases={int(n_cases)}"
+            )
+        descriptor_payload = dict(descriptor_pack or {})
+        descriptor_case_ids = [
+            str(v) for v in np.asarray(descriptor_payload.get("case_ids", [])).reshape(-1).tolist()
+        ]
+        if len(descriptor_case_ids) != int(n_cases):
+            raise ValueError(
+                "case-specific POD descriptor requires one case_id per descriptor row: "
+                f"case_ids={len(descriptor_case_ids)}, rows={int(rows.shape[0])}"
+            )
+        if len(set(descriptor_case_ids)) != len(descriptor_case_ids):
+            raise ValueError("case-specific POD descriptor case_ids must be unique")
+        if case_ids is not None:
+            runtime_case_ids = [str(v) for v in case_ids]
+            if len(runtime_case_ids) != int(n_cases):
+                raise ValueError(
+                    "runtime case_ids length mismatch for POD descriptors: "
+                    f"case_ids={len(runtime_case_ids)}, n_cases={int(n_cases)}"
+                )
+            if descriptor_case_ids != runtime_case_ids:
+                raise ValueError("POD descriptor case_ids are not aligned with runtime dataset case_ids")
+        structure_payload = dict(case_structure_pack or {})
+        if "case_ids" in structure_payload:
+            structure_case_ids = [
+                str(v) for v in np.asarray(structure_payload["case_ids"]).reshape(-1).tolist()
+            ]
+            if descriptor_case_ids != structure_case_ids:
+                raise ValueError(
+                    "POD descriptor case_ids are not aligned with case_structure_feature_pack case_ids"
+                )
+    else:
+        raise ValueError(
+            "POD descriptor input must be a vector [D] or case matrix [N,D]; "
+            f"got shape={descriptors.shape}"
+        )
+    if not np.all(np.isfinite(rows)):
+        raise ValueError("POD descriptor rows must contain finite values")
+    return tuple(rows[split_indices[name]].astype(np.float32) for name in ("train", "val", "test"))
 
 
 def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
@@ -426,7 +613,7 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         model_cfg=dict(cfg.get("model_cfg", {})),
         selection_cfg=dict(cfg.get("selection", {})),
     )
-    pod_descriptor_vec, pod_descriptor_meta = _resolve_pod_descriptor_and_latent_contract(
+    pod_descriptor_input, pod_descriptor_meta = _resolve_pod_descriptor_and_latent_contract(
         input_mode=rt.input_mode_effective,
         adapter_mode=rt.structure_adapter_mode_effective,
         descriptor_profile=ctx.structure_descriptor_profile_effective,
@@ -439,20 +626,47 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     cond_train = np.asarray(ctx.cond_scaled[ctx.tr], dtype=np.float32)
     cond_val = np.asarray(ctx.cond_scaled[ctx.va], dtype=np.float32)
     cond_test = np.asarray(ctx.cond_scaled[ctx.te], dtype=np.float32)
-    if pod_descriptor_vec is not None:
-        desc_train = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_train.shape[0], axis=0).astype(np.float32)
-        desc_val = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_val.shape[0], axis=0).astype(np.float32)
-        desc_test = np.repeat(pod_descriptor_vec.reshape(1, -1), cond_test.shape[0], axis=0).astype(np.float32)
+    if pod_descriptor_input is not None:
+        dataset_cfg = dict(ctx.run_cfg.get("dataset", {}) or {})
+        desc_train, desc_val, desc_test = _resolve_pod_descriptor_splits(
+            descriptor_input=pod_descriptor_input,
+            descriptor_pack=ctx.structure_descriptor_pack,
+            case_structure_pack=ctx.case_structure_feature_pack,
+            n_cases=ctx.n_cases,
+            tr=ctx.tr,
+            va=ctx.va,
+            te=ctx.te,
+            case_ids=ctx.case_ids,
+            case_specific_structure_declared=bool(dataset_cfg.get("structure_npz_column")),
+        )
         cond_train = np.concatenate([cond_train, desc_train], axis=1).astype(np.float32)
         cond_val = np.concatenate([cond_val, desc_val], axis=1).astype(np.float32)
         cond_test = np.concatenate([cond_test, desc_test], axis=1).astype(np.float32)
     pod_y_train = np.asarray(ctx.y_scaled[ctx.tr][:, pod_target_indices], dtype=np.float32)
+    pod_selection_cfg = dict(cfg.get("selection", {}))
+    pod_selection_cfg["weights"] = _resolve_mainline_selection_weights(
+        selection_cfg=pod_selection_cfg,
+        target_vars=pod_target_vars,
+        cfg_prefix=train_key,
+    )
+    supervision_train, supervision_val = _resolve_case_supervision_splits(
+        rt,
+        loss_cfg=rt.loss_cfg,
+        selection_cfg=pod_selection_cfg,
+    )
+    basis_geometry = materialize_supervised_geometry(
+        supervision_train,
+        np.arange(int(len(ctx.tr)), dtype=np.int64),
+        mask=rt.supervised_mask,
+        distance_any=rt.supervised_distance,
+    )
     pod_basis_bundle = fit_pod_basis_from_targets(
         pod_y_train,
         output_keys=list(pod_target_vars),
         requested_rank=int(basis_cfg_effective["rank"]),
         center=bool(basis_cfg_effective["center"]),
         per_var=bool(basis_cfg_effective["per_var"]),
+        active_mask=basis_geometry["mask"],
     )
     pod_model_cfg = normalize_pod_deeponet_model_cfg(
         dict(cfg.get("model_cfg", {})),
@@ -468,12 +682,6 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         out_channels=len(pod_target_vars),
         output_keys=pod_target_vars,
         pod_basis_bundle=pod_basis_bundle,
-    )
-    pod_selection_cfg = dict(cfg.get("selection", {}))
-    pod_selection_cfg["weights"] = _resolve_mainline_selection_weights(
-        selection_cfg=pod_selection_cfg,
-        target_vars=pod_target_vars,
-        cfg_prefix=train_key,
     )
     pod_optimizer_cfg = dict(cfg.get("optimizer", {}))
     grid_like_cfg = dict(train_cfg.get("unet_like", {}))
@@ -498,6 +706,8 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         shuffle_cases=shuffle_cases,
         seed=ctx.global_seed + ctx.model_idx,
         selection_cfg=pod_selection_cfg,
+        supervision_train=supervision_train,
+        supervision_val=supervision_val,
     )
     history = out.history
     steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
@@ -531,6 +741,9 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
             ),
             DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: str(
                 pod_descriptor_meta[DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY]
+            ),
+            "descriptor_scope_effective": str(
+                pod_descriptor_meta.get("deeponet_pod_descriptor_scope_effective", "none")
             ),
             DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY: str(
                 pod_descriptor_meta[DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY]
@@ -637,21 +850,6 @@ def _run_deeponet_plasma_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         operator_mode=operator_mode,
     )
     model = runtime.model
-    deeponet_feature_source = "geom_feature_pack"
-    deeponet_distance_transform_effective: dict[str, Any] = {"mode": "raw"}
-    rows, source = _build_coord_feature_rows(
-        channels=deeponet_feature_channels,
-        pack=ctx.coord_feature_pack,
-        geom_ctx=ctx.geom_ctx,
-        h=rt.h,
-        w=rt.w,
-    )
-    deeponet_feature_source = str(source)
-    if source != "preprocess_pack":
-        raise ValueError(
-            "deeponet input-feature contract requires preprocessing coord_feature_pack; "
-            f"effective_source={source}"
-        )
     distance_transform_cfg = _resolve_distance_transform_cfg(
         dict(input_features_cfg.get("distance_transform") or {})
     )
@@ -659,18 +857,57 @@ def _run_deeponet_plasma_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         distance_transform_cfg,
         stats=ctx.coord_distance_transform_stats,
     )
-    rows, deeponet_distance_transform_effective = _apply_distance_transform(
-        rows.astype(np.float32),
+    _, deeponet_distance_transform_effective = _apply_distance_transform(
+        np.zeros((1, len(deeponet_feature_channels)), dtype=np.float32),
         channels=deeponet_feature_channels,
         cfg=distance_transform_cfg_effective,
     )
-    rows, _, _ = _apply_coord_feature_scaling(
-        rows.astype(np.float32),
+    case_spatial_source, source = _build_case_spatial_features(
         channels=deeponet_feature_channels,
+        h=rt.h,
+        w=rt.w,
+        static_pack=ctx.static_spatial_feature_pack,
+        case_pack=ctx.case_structure_feature_pack,
+        distance_transform_cfg=distance_transform_cfg_effective,
         coord_feature_scaler_artifact=ctx.coord_feature_scaler,
+        expected_case_ids=ctx.case_ids,
     )
-    if hasattr(model, "set_static_spatial_features"):
-        model.set_static_spatial_features(rows.astype(np.float32), channels=list(deeponet_feature_channels))
+    deeponet_feature_source = str(source)
+    spatial_train = case_spatial_source.subset(ctx.tr) if case_spatial_source is not None else None
+    spatial_val = case_spatial_source.subset(ctx.va) if case_spatial_source is not None else None
+    spatial_test = case_spatial_source.subset(ctx.te) if case_spatial_source is not None else None
+    if case_spatial_source is not None:
+        rt.extra_artifacts["case_spatial_pack_used"] = True
+        rt.extra_artifacts["case_spatial_pack_storage"] = str(source)
+        rt.extra_artifacts["case_spatial_feature_channels"] = list(deeponet_feature_channels)
+        rt.extra_artifacts["case_spatial_feature_shape"] = [int(v) for v in case_spatial_source.shape]
+    else:
+        rows, source = _build_coord_feature_rows(
+            channels=deeponet_feature_channels,
+            pack=ctx.coord_feature_pack,
+            geom_ctx=ctx.geom_ctx,
+            h=rt.h,
+            w=rt.w,
+        )
+        deeponet_feature_source = str(source)
+        if source != "preprocess_pack":
+            raise ValueError(
+                "deeponet input-feature contract requires preprocessing coord_feature_pack; "
+                f"effective_source={source}"
+            )
+        rows, deeponet_distance_transform_effective = _apply_distance_transform(
+            rows.astype(np.float32),
+            channels=deeponet_feature_channels,
+            cfg=distance_transform_cfg_effective,
+        )
+        rows, _, _ = _apply_coord_feature_scaling(
+            rows.astype(np.float32),
+            channels=deeponet_feature_channels,
+            coord_feature_scaler_artifact=ctx.coord_feature_scaler,
+            distance_transform_cfg=deeponet_distance_transform_effective,
+        )
+        if hasattr(model, "set_static_spatial_features"):
+            model.set_static_spatial_features(rows.astype(np.float32), channels=list(deeponet_feature_channels))
     ttrainer = TorchTrainer(ctx.model_dir / "train")
     stages = resolve_deeponet_stages(
         cfg,
@@ -679,6 +916,11 @@ def _run_deeponet_plasma_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     )
     deeponet_y_train = ctx.y_scaled[ctx.tr][:, deeponet_target_indices]
     deeponet_y_val = ctx.y_scaled[ctx.va][:, deeponet_target_indices]
+    supervision_train, supervision_val = _resolve_case_supervision_splits(
+        rt,
+        loss_cfg=rt.loss_cfg,
+        selection_cfg=deeponet_selection_cfg,
+    )
     out_t = ttrainer.run_deeponet(
         model=model,
         cond_train=ctx.cond_scaled[ctx.tr],
@@ -699,13 +941,38 @@ def _run_deeponet_plasma_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         batch_size_cases=deeponet_batch_size_cases,
         shuffle_cases=deeponet_shuffle_cases,
         seed=ctx.global_seed + ctx.model_idx,
+        spatial_train=spatial_train,
+        spatial_val=spatial_val,
+        supervision_train=supervision_train,
+        supervision_val=supervision_val,
     )
     history = out_t.history
     steps_per_epoch = (
         int(np.ceil(len(ctx.tr) / max(1, deeponet_batch_size_cases))) if deeponet_batch_size_cases > 0 else 1
     )
     rt.extra_artifacts["effective_steps"] = int(max(steps_per_epoch, 1) * len(history))
-    pred = model.predict_fields(ctx.cond_scaled[ctx.te], geom_ctx=ctx.geom_ctx)
+    test_batch_size = (
+        len(ctx.te)
+        if deeponet_batch_size_cases <= 0
+        else min(max(1, deeponet_batch_size_cases), len(ctx.te))
+    )
+    pred_chunks: list[dict[str, np.ndarray]] = []
+    for start in range(0, len(ctx.te), test_batch_size):
+        stop = min(start + test_batch_size, len(ctx.te))
+        spatial_batch = _materialize_case_spatial_batch(
+            spatial_test,
+            np.arange(start, stop, dtype=np.int64),
+        )
+        chunk = model.predict_fields(
+            ctx.cond_scaled[ctx.te[start:stop]],
+            geom_ctx=ctx.geom_ctx,
+            spatial_features=spatial_batch,
+        )
+        pred_chunks.append({str(k): np.asarray(v, dtype=np.float32) for k, v in chunk.items()})
+    pred = {
+        key: np.concatenate([chunk[key] for chunk in pred_chunks], axis=0).astype(np.float32)
+        for key in sorted({key for chunk in pred_chunks for key in chunk})
+    }
     pred_eval = ctx.transforms.inverse_field_dict({k: v for k, v in pred.items() if k in set(deeponet_target_vars)})
     if "rho_eff" in pred:
         pred_eval["rho_eff"] = np.asarray(pred["rho_eff"], dtype=np.float32)

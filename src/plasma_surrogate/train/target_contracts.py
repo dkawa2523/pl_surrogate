@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.train.selection import SPATIAL_SELECTION_MODE, resolve_spatial_selection_config
+
 
 def to_true_eval(
     y: np.ndarray,
@@ -94,8 +96,19 @@ def validate_mainline_selection_contract(
     cfg_prefix: str,
 ) -> dict[str, float]:
     sel_mode = str(selection_cfg.get("mode", "last")).strip().lower()
-    if sel_mode not in {"best_val_allvars_balance", "best_val_loss"}:
-        raise ValueError(f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, best_val_loss for mainline")
+    if sel_mode not in {
+        "best_val_allvars_balance",
+        "best_val_group_balance",
+        SPATIAL_SELECTION_MODE,
+        "best_val_loss",
+    }:
+        raise ValueError(
+            f"{cfg_prefix}.selection.mode must be one of: "
+            "best_val_allvars_balance, best_val_group_balance, "
+            "best_val_spatial_objective, best_val_loss for mainline"
+        )
+    if sel_mode == SPATIAL_SELECTION_MODE:
+        resolve_spatial_selection_config(selection_cfg)
     if "density_guard" in selection_cfg:
         raise ValueError(f"{cfg_prefix}.selection.density_guard is removed from mainline")
     if "boundary_bonus_weight" in selection_cfg and float(selection_cfg.get("boundary_bonus_weight", 0.0)) != 0.0:

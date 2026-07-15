@@ -5,11 +5,402 @@ import math
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from plasma_surrogate.eval.core_metrics import build_benchmark_eval_row, build_region_metrics
 from plasma_surrogate.eval.payloads import build_eval_metrics_payload, build_viz_tables_payload
 from plasma_surrogate.eval.physics_metrics import build_single_case_physics_metrics
-from plasma_surrogate.eval.spatial_metrics import build_spatial_distribution_by_case_rows
+from plasma_surrogate.eval.quality_score import (
+    build_spatial_huber_quality_components,
+    resolve_quality_score_protocol,
+)
+from plasma_surrogate.eval.spatial_metrics import (
+    build_spatial_distribution_by_case_rows,
+    build_structure_residual_correlation_rows,
+)
+
+
+def test_quality_protocol_resolves_pool_scale_alias_and_hashes_effective_defaults() -> None:
+    legacy_alias = resolve_quality_score_protocol({"mode": "spatial_huber", "pool_scale": 3})
+    canonical = resolve_quality_score_protocol(
+        {"mode": "spatial_huber", "multiscale_scales": [3]}
+    )
+
+    assert legacy_alias["protocol"] == "spatial_huber_case_balanced_v2"
+    assert legacy_alias["version"] == 2
+    assert legacy_alias["effective_config"]["multiscale_scales"] == [3]
+    assert legacy_alias["effective_config"]["gradient_lambda"] == 0.1
+    assert legacy_alias["effective_config"]["p90_weight"] == 0.25
+    assert legacy_alias["effective_config"]["worst_weight"] == 0.1
+    assert legacy_alias["effective_config"]["target_aggregation"] == "uniform_by_group"
+    assert "pool_scale" not in legacy_alias["effective_config"]
+    assert legacy_alias["definition_hash"] == canonical["definition_hash"]
+    assert len(legacy_alias["definition_hash"]) == 64
+
+    uniform_by_target = resolve_quality_score_protocol(
+        {"mode": "spatial_huber", "multiscale_scales": [3], "target_aggregation": "uniform_by_target"}
+    )
+    assert uniform_by_target["definition_hash"] != canonical["definition_hash"]
+
+    legacy_composite = resolve_quality_score_protocol(None)
+    assert legacy_composite["protocol"] == "legacy_composite_v1"
+    assert legacy_composite["version"] == 1
+
+
+@pytest.mark.parametrize(
+    "cfg",
+    [
+        {"mode": "spatial_huber", "pool_scale": 2.5},
+        {"mode": "spatial_huber", "multiscale_scales": [2, 3.5]},
+        {"mode": "spatial_huber", "pool_scale": 2, "pool_kernel": 2},
+        {"mode": "spatial_huber", "target_aggregation": "unknown"},
+    ],
+)
+def test_quality_protocol_rejects_ambiguous_or_fractional_pool_scales(
+    cfg: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError):
+        resolve_quality_score_protocol(cfg)
+
+
+def test_benchmark_row_records_quality_protocol_metadata_in_core_and_diagnostics() -> None:
+    true = np.arange(16, dtype=np.float32).reshape(1, 1, 4, 4) + 1.0
+    pred = true + 0.25
+    row = build_benchmark_eval_row(
+        model_id="metadata",
+        metrics={"field": 0.25},
+        r2_scores={"field": 0.9},
+        pred_eval={"field": pred},
+        true_eval={"field": true},
+        mask_plasma=np.ones((4, 4), dtype=np.float32),
+        distance_any=np.zeros((4, 4), dtype=np.float32),
+        target_vars_for_score=["field"],
+        quality_score_cfg={"mode": "spatial_huber", "pool_scale": 3},
+        target_role_schema={"targets": [{"id": "field", "field_family": "custom_field"}]},
+        target_scalers={"field": {"type": "zscore", "mean": 0.0, "std": 1.0}},
+        single_diagnostics={},
+    )
+
+    diagnostics = row["_diagnostics"]
+    assert row["quality_score_protocol"] == "spatial_huber_case_balanced_v2"
+    assert row["quality_score_protocol_version"] == 2
+    assert row["quality_score_definition_hash"] == diagnostics["quality_score_definition_hash"]
+    assert row["quality_score_effective_config"] == diagnostics["quality_score_effective_config"]
+    effective = json.loads(str(row["quality_score_effective_config"]))
+    assert effective["multiscale_scales"] == [3]
+    assert effective["gradient_lambda"] == 0.1
+    assert effective["target_aggregation"] == "uniform_by_group"
+    assert "score_total_group_custom_field" in diagnostics
+
+
+def test_spatial_huber_quality_is_case_balanced_and_target_transform_aware():
+    true = np.stack(
+        [np.full((4, 4), 1.0e8, dtype=np.float32), np.full((4, 4), 1.0e18, dtype=np.float32)],
+        axis=0,
+    )
+    pred = true.copy()
+    pred[0] = 1.0e14
+    result = build_spatial_huber_quality_components(
+        true_eval={"ne": true},
+        pred_eval={"ne": pred},
+        mask_plasma=np.ones((4, 4), dtype=np.float32),
+        distance_any=np.zeros((4, 4), dtype=np.float32),
+        target_vars=["ne"],
+        target_scalers={"ne": {"type": "none"}},
+        target_role_schema={"targets": [{"id": "ne", "field_family": "density"}]},
+        target_transforms={
+            "ne": {
+                "value_transform": "log10_floor",
+                "floor": 1.0e-30,
+                "clip": {
+                    "mode": "physical_bounds",
+                    "min": 1.0e8,
+                    "max": 1.0e19,
+                    "clip_low": 8.0,
+                    "clip_high": 19.0,
+                },
+            }
+        },
+        cfg={"mode": "spatial_huber", "gradient_lambda": 0.1, "multiscale_scales": [2, 4]},
+    )
+    assert result["score_total_worst_ne"] > result["score_total_median_ne"]
+    assert result["score_physical_bound_fraction_worst_ne"] == 0.0
+
+
+def test_spatial_huber_quality_balances_field_families_before_targets() -> None:
+    true = np.zeros((1, 2, 2), dtype=np.float32)
+    pred = {
+        "ne": np.ones_like(true),
+        "ni": np.ones_like(true),
+        "Te": np.full_like(true, 3.0),
+    }
+    schema = {
+        "targets": [
+            {"id": "ne", "field_family": "density"},
+            {"id": "ni", "field_family": "density"},
+            {"id": "Te", "field_family": "temperature"},
+            {"id": "phi", "field_family": "electrostatic"},
+        ]
+    }
+    common = {
+        "true_eval": {name: true for name in pred},
+        "pred_eval": pred,
+        "mask_plasma": np.ones((2, 2), dtype=np.float32),
+        "distance_any": None,
+        "target_vars": ["ne", "ni", "Te"],
+        "target_scalers": {
+            name: {"type": "zscore", "mean": 0.0, "std": 1.0}
+            for name in pred
+        },
+    }
+    score_cfg = {
+        "mode": "spatial_huber",
+        "boundary_alpha": 0.0,
+        "avgpool_lambda": 0.0,
+        "gradient_lambda": 0.0,
+        "p90_weight": 0.0,
+        "worst_weight": 0.0,
+    }
+
+    grouped = build_spatial_huber_quality_components(
+        **common,
+        target_role_schema=schema,
+        cfg=score_cfg,
+    )
+    by_target = build_spatial_huber_quality_components(
+        **common,
+        cfg={**score_cfg, "target_aggregation": "uniform_by_target"},
+    )
+
+    assert np.isclose(grouped["score_total_group_density"], 0.5)
+    assert np.isclose(grouped["score_total_group_temperature"], 2.5)
+    assert np.isclose(grouped["surrogate_quality_score"], 1.5)
+    assert np.isclose(by_target["surrogate_quality_score"], 7.0 / 6.0)
+
+
+def test_spatial_huber_group_aggregation_requires_complete_family_schema() -> None:
+    field = np.zeros((1, 2, 2), dtype=np.float32)
+    kwargs = {
+        "true_eval": {"a": field, "b": field},
+        "pred_eval": {"a": field, "b": field},
+        "mask_plasma": np.ones((2, 2), dtype=np.float32),
+        "distance_any": None,
+        "target_vars": ["a", "b"],
+        "target_scalers": {
+            "a": {"type": "zscore", "mean": 0.0, "std": 1.0},
+            "b": {"type": "zscore", "mean": 0.0, "std": 1.0},
+        },
+        "cfg": {"mode": "spatial_huber", "boundary_alpha": 0.0},
+    }
+
+    with pytest.raises(ValueError, match="requires target_role_schema.targets"):
+        build_spatial_huber_quality_components(**kwargs)
+    with pytest.raises(ValueError, match="missing output_vars"):
+        build_spatial_huber_quality_components(
+            **kwargs,
+            target_role_schema={"targets": [{"id": "a", "field_family": "family_a"}]},
+        )
+    with pytest.raises(ValueError, match="requires field_family metadata"):
+        build_spatial_huber_quality_components(
+            **kwargs,
+            target_role_schema={"targets": [{"id": "a"}, {"id": "b", "field_family": "family_b"}]},
+        )
+
+
+def test_spatial_huber_boundary_weight_fails_closed_without_aligned_distance() -> None:
+    field = np.zeros((1, 3, 3), dtype=np.float32)
+    kwargs = {
+        "true_eval": {"field": field},
+        "pred_eval": {"field": field},
+        "mask_plasma": np.ones((3, 3), dtype=np.float32),
+        "target_vars": ["field"],
+        "target_scalers": {"field": {"type": "zscore", "mean": 0.0, "std": 1.0}},
+        "cfg": {"mode": "spatial_huber", "target_aggregation": "uniform_by_target"},
+    }
+
+    with pytest.raises(ValueError, match="requires distance_any"):
+        build_spatial_huber_quality_components(**kwargs, distance_any=None)
+    with pytest.raises(ValueError, match="distance_any must align"):
+        build_spatial_huber_quality_components(
+            **kwargs,
+            distance_any=np.zeros((2, 2), dtype=np.float32),
+        )
+
+
+def test_spatial_huber_quality_fails_closed_for_empty_or_invalid_active_cases() -> None:
+    true = np.ones((2, 3, 3), dtype=np.float32)
+    pred = true.copy()
+    common = {
+        "true_eval": {"field": true},
+        "pred_eval": {"field": pred},
+        "distance_any": None,
+        "target_vars": ["field"],
+        "target_scalers": {"field": {"type": "zscore", "mean": 0.0, "std": 1.0}},
+        "cfg": {
+            "mode": "spatial_huber",
+            "target_aggregation": "uniform_by_target",
+            "boundary_alpha": 0.0,
+        },
+    }
+
+    mask_with_empty_case = np.ones((2, 3, 3), dtype=np.float32)
+    mask_with_empty_case[1] = 0.0
+    with pytest.raises(ValueError, match="empty active mask"):
+        build_spatial_huber_quality_components(
+            **common,
+            mask_plasma=mask_with_empty_case,
+        )
+
+    pred_invalid = pred.copy()
+    pred_invalid[1, 1, 1] = np.nan
+    with pytest.raises(ValueError, match="non-finite truth/prediction"):
+        build_spatial_huber_quality_components(
+            **{**common, "pred_eval": {"field": pred_invalid}},
+            mask_plasma=np.ones((2, 3, 3), dtype=np.float32),
+        )
+
+
+def test_spatial_huber_quality_ignores_nonfinite_values_outside_active_mask() -> None:
+    true = np.ones((1, 3, 3), dtype=np.float32)
+    pred = true.copy()
+    true[0, 0, 0] = np.nan
+    pred[0, 0, 0] = np.inf
+    mask = np.ones((3, 3), dtype=np.float32)
+    mask[0, 0] = 0.0
+
+    result = build_spatial_huber_quality_components(
+        true_eval={"field": true},
+        pred_eval={"field": pred},
+        mask_plasma=mask,
+        distance_any=None,
+        target_vars=["field"],
+        target_scalers={"field": {"type": "zscore", "mean": 0.0, "std": 1.0}},
+        cfg={
+            "mode": "spatial_huber",
+            "target_aggregation": "uniform_by_target",
+            "boundary_alpha": 0.0,
+        },
+    )
+
+    assert result["surrogate_quality_score"] == 0.0
+
+
+def test_spatial_huber_quality_rejects_missing_or_misaligned_targets() -> None:
+    field = np.zeros((1, 3, 3), dtype=np.float32)
+    common = {
+        "mask_plasma": np.ones((3, 3), dtype=np.float32),
+        "distance_any": None,
+        "target_scalers": {
+            "field": {"type": "zscore", "mean": 0.0, "std": 1.0},
+            "missing": {"type": "zscore", "mean": 0.0, "std": 1.0},
+        },
+        "cfg": {
+            "mode": "spatial_huber",
+            "target_aggregation": "uniform_by_target",
+            "boundary_alpha": 0.0,
+        },
+    }
+
+    with pytest.raises(ValueError, match="missing a configured target"):
+        build_spatial_huber_quality_components(
+            **common,
+            true_eval={"field": field},
+            pred_eval={"field": field},
+            target_vars=["field", "missing"],
+        )
+    with pytest.raises(ValueError, match="shape mismatch"):
+        build_spatial_huber_quality_components(
+            **common,
+            true_eval={"field": field},
+            pred_eval={"field": np.zeros((1, 2, 2), dtype=np.float32)},
+            target_vars=["field"],
+        )
+
+
+def test_spatial_huber_quality_rejects_empty_boundary_band() -> None:
+    field = np.zeros((1, 3, 3), dtype=np.float32)
+    with pytest.raises(ValueError, match="empty boundary band"):
+        build_spatial_huber_quality_components(
+            true_eval={"field": field},
+            pred_eval={"field": field},
+            mask_plasma=np.ones((3, 3), dtype=np.float32),
+            distance_any=np.full((3, 3), 99.0, dtype=np.float32),
+            target_vars=["field"],
+            target_scalers={"field": {"type": "zscore", "mean": 0.0, "std": 1.0}},
+            cfg={"mode": "spatial_huber", "target_aggregation": "uniform_by_target"},
+        )
+
+
+def test_spatial_huber_multiscale_pool_keeps_partial_edge_blocks() -> None:
+    true = np.zeros((1, 3, 3), dtype=np.float32)
+    pred = true.copy()
+    pred[0, -1, -1] = 1.0
+
+    result = build_spatial_huber_quality_components(
+        true_eval={"edge": true},
+        pred_eval={"edge": pred},
+        mask_plasma=np.ones((3, 3), dtype=np.float32),
+        distance_any=None,
+        target_vars=["edge"],
+        target_scalers={"edge": {"type": "zscore", "mean": 0.0, "std": 1.0}},
+        cfg={
+            "mode": "spatial_huber",
+            "target_aggregation": "uniform_by_target",
+            "boundary_alpha": 0.0,
+            "multiscale_scales": [2],
+            "avgpool_lambda": 1.0,
+            "gradient_lambda": 0.0,
+            "p90_weight": 0.0,
+            "worst_weight": 0.0,
+        },
+    )
+
+    assert np.isclose(result["score_avgpool_huber_edge"], 1.0 / 18.0)
+
+
+def test_distribution_metrics_report_relative_gradient_multiscale_and_bounds():
+    true = np.arange(16, dtype=np.float32).reshape(1, 4, 4) + 1.0
+    pred = true * 2.0
+    rows = build_spatial_distribution_by_case_rows(
+        pred_eval={"field": pred},
+        true_eval={"field": true},
+        mask_plasma=np.ones((4, 4), dtype=np.float32),
+        vars_for_summary=["field"],
+        target_transforms={
+            "field": {
+                "value_transform": "identity",
+                "clip": {
+                    "mode": "physical_bounds",
+                    "min": 0.0,
+                    "max": 32.0,
+                    "clip_low": 0.0,
+                    "clip_high": 32.0,
+                },
+            }
+        },
+        target_scalers={"field": {"type": "none"}},
+    )
+    assert rows[0]["physical_rel_l2"] == 1.0
+    assert rows[0]["gradient_rel_l2"] == 1.0
+    assert rows[0]["multiscale_rel_l2_s2"] == 1.0
+    assert rows[0]["physical_bound_fraction"] > 0.0
+    assert rows[0]["transformed_huber"] > 0.0
+
+
+def test_structure_residual_correlation_detects_imprinted_line():
+    feature = np.zeros((1, 8, 8), dtype=np.float32)
+    feature[:, :, 4:] = 1.0
+    truth = np.zeros_like(feature)
+    pred = feature.copy()
+    rows = build_structure_residual_correlation_rows(
+        pred_eval={"field": pred},
+        true_eval={"field": truth},
+        structure_features={"part_edge": feature},
+        mask_plasma=np.ones((8, 8), dtype=np.float32),
+        case_ids=["case_a"],
+    )
+    assert len(rows) == 1
+    assert rows[0]["absolute_correlation"] > 0.99
 
 
 def test_build_single_case_physics_metrics_reads_scalar_diagnostics(tmp_path: Path):

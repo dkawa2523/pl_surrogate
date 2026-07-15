@@ -20,6 +20,7 @@ torch = [
 ]
 optuna = [
     "optuna>=4.0",
+    "cmaes>=0.11",
 ]
 dev = [
     "pytest>=9.0",
@@ -27,6 +28,7 @@ dev = [
 all = [
     "torch>=2.10",
     "optuna>=4.0",
+    "cmaes>=0.11",
     "pytest>=9.0",
 ]
 

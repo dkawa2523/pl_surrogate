@@ -6,7 +6,14 @@ from typing import Any
 
 import numpy as np
 
-DEEPONET_PLASMA_CHECKPOINT_MODEL_TYPES = frozenset({"deeponet_plasma_torch"})
+DEEPONET_PLASMA_CHECKPOINT_MODEL_TYPES = frozenset(
+    {
+        "deeponet_plasma",
+        # Read compatibility for checkpoints written before the product model
+        # id was aligned with the canonical registry key.
+        "deeponet_plasma_torch",
+    }
+)
 DEFAULT_SENSOR_FEATURE_NAMES = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
 
 __all__ = [
@@ -23,7 +30,11 @@ def is_deeponet_plasma_checkpoint_model(model: Any) -> bool:
     if not callable(to_meta):
         return False
     meta = to_meta()
-    return isinstance(meta, dict) and str(meta.get("model_type", "")).strip().lower() == "deeponet_plasma_torch"
+    return (
+        isinstance(meta, dict)
+        and str(meta.get("model_type", "")).strip().lower()
+        in DEEPONET_PLASMA_CHECKPOINT_MODEL_TYPES
+    )
 
 
 def make_deeponet_plasma_checkpoint_meta(model: Any) -> dict[str, Any] | None:
@@ -55,6 +66,11 @@ def _build_plasma_operator_from_meta(
         query_indices=np.asarray(_get_meta_value(meta, root, "query_indices", []), dtype=np.int64),
         flatten_order=str(_get_meta_value(meta, root, "flatten_order", "C")),
         sensor_feature_names=list(_get_meta_value(meta, root, "sensor_feature_names", DEFAULT_SENSOR_FEATURE_NAMES)),
+        query_feature_names=(
+            list(_get_meta_value(meta, root, "query_feature_names", []))
+            if _get_meta_value(meta, root, "query_feature_names", None) is not None
+            else None
+        ),
         trunk_input_mode=str(_get_meta_value(meta, root, "trunk_input_mode", "geom_feature_pack")),
         sensor_pool_mode=str(_get_meta_value(meta, root, "sensor_pool_mode", "moments")),
         sensor_embed_dim=int(_get_meta_value(meta, root, "sensor_embed_dim", 32)),

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -17,6 +18,12 @@ STANDARD_TARGET_GROUP_NAMES = (
     "flux",
     "source",
     DEFAULT_TARGET_GROUP,
+)
+TARGET_WEIGHTING_MODES = (
+    "none",
+    "uniform_by_target",
+    "uniform_by_group",
+    "weighted_by_group",
 )
 
 
@@ -237,10 +244,92 @@ def resolve_target_groups(
     return groups
 
 
+def resolve_target_weight_multipliers(
+    *,
+    output_vars: list[str],
+    target_role_schema: dict[str, Any] | None,
+    mode: str,
+    group_weights: Mapping[str, Any] | None = None,
+    context: str = "target weighting",
+) -> tuple[dict[str, float], dict[str, TargetGroup]]:
+    """Resolve one target-weight contract shared by field and auxiliary losses.
+
+    Group-balanced modes first assign a normalized share to each field family,
+    then split that share uniformly across the family's targets.  This prevents
+    channel count or POD rank from changing a family's influence.
+    """
+
+    target_names = list(_normalize_output_vars([str(name) for name in output_vars]))
+    mode_effective = str(mode).strip().lower()
+    if mode_effective not in TARGET_WEIGHTING_MODES:
+        raise ValueError(
+            f"{context}.mode must be one of: {', '.join(TARGET_WEIGHTING_MODES)}"
+        )
+    if mode_effective == "none":
+        return {name: 1.0 for name in target_names}, {}
+    if mode_effective == "uniform_by_target":
+        share = 1.0 / float(max(len(target_names), 1))
+        return {name: share for name in target_names}, {}
+
+    schema = dict(target_role_schema or {})
+    raw_targets = schema.get("targets", [])
+    if not isinstance(raw_targets, list) or not raw_targets:
+        raise ValueError(f"{context}.mode={mode_effective} requires target_role_schema.targets")
+    selected = set(target_names)
+    filtered_schema = dict(schema)
+    filtered_schema["targets"] = [
+        dict(raw)
+        for raw in raw_targets
+        if isinstance(raw, Mapping) and str(raw.get("id", "")).strip() in selected
+    ]
+    groups = resolve_target_groups(
+        output_vars=target_names,
+        target_role_schema=filtered_schema,
+        mode=FIELD_FAMILY_MODE,
+        strict=True,
+    )
+    if not groups:
+        raise ValueError(f"{context}.mode={mode_effective} resolved no target groups")
+
+    if mode_effective == "weighted_by_group":
+        raw_weights = dict(group_weights or {})
+        expected = set(groups)
+        provided = set(str(name) for name in raw_weights)
+        unknown = sorted(provided - expected)
+        missing = sorted(expected - provided)
+        if unknown:
+            raise ValueError(f"{context}.weights contains unknown groups: {unknown}")
+        if missing:
+            raise ValueError(f"{context}.weights missing groups: {missing}")
+        shares: dict[str, float] = {}
+        for name in groups:
+            value = float(raw_weights[name])
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{context}.weights[{name}] must be finite and > 0")
+            shares[name] = value
+        total = float(sum(shares.values()))
+        shares = {name: value / total for name, value in shares.items()}
+    else:
+        share = 1.0 / float(len(groups))
+        shares = {name: share for name in groups}
+
+    multipliers: dict[str, float] = {}
+    for group_name, group in groups.items():
+        per_target = float(shares[group_name]) / float(len(group.targets))
+        for target in group.targets:
+            multipliers[str(target)] = per_target
+    missing_targets = [name for name in target_names if name not in multipliers]
+    if missing_targets:
+        raise ValueError(f"{context} did not assign targets: {missing_targets}")
+    return multipliers, groups
+
+
 __all__ = [
     "DEFAULT_TARGET_GROUP",
     "FIELD_FAMILY_MODE",
     "STANDARD_TARGET_GROUP_NAMES",
+    "TARGET_WEIGHTING_MODES",
     "TargetGroup",
     "resolve_target_groups",
+    "resolve_target_weight_multipliers",
 ]

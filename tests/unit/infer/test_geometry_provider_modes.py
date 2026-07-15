@@ -197,3 +197,68 @@ def test_parametric_provider_rejects_negative_layout_size(tmp_path: Path) -> Non
                 },
             }
         )
+
+
+def test_parametric_provider_selects_one_alternative_case_pack_without_union(tmp_path: Path) -> None:
+    dataset_root = tmp_path / "dataset_alternatives"
+    _write_base_geometry(dataset_root)
+    geometry = dataset_root / "geometry"
+    structure_root = dataset_root / "structure_features"
+    structure_root.mkdir(parents=True)
+    mask = np.ones((8, 8), dtype=np.float32)
+    mask[0, :] = 0.0
+    base2_stack = np.zeros((2, 8, 8), dtype=np.float32)
+    base2_stack[0, 2, 1:5] = 1.0
+    base2_stack[1, 3:6, 5] = 1.0
+    base3_stack = np.zeros((2, 8, 8), dtype=np.float32)
+    base3_stack[0, 5, 2:7] = 1.0
+    base3_stack[1, 1:4, 2] = 1.0
+    for base_name, stack in (("base2", base2_stack), ("base3", base3_stack)):
+        np.savez_compressed(
+            structure_root / f"{base_name}.npz",
+            mask_plasma=mask,
+            valid_field_mask=mask,
+            outside_mask=1.0 - mask,
+            part_mask_stack=stack,
+            part_ids=np.asarray(["boundary_00", "boundary_01"], dtype=object),
+        )
+    np.savez_compressed(
+        geometry / "parts_pack.npz",
+        part_ids=np.asarray(["base2", "base3"], dtype=object),
+        mask_stack=np.stack(
+            [np.maximum.reduce(base2_stack, axis=0), np.maximum.reduce(base3_stack, axis=0)],
+            axis=0,
+        ),
+    )
+    (geometry / "parts_manifest.json").write_text(
+        json.dumps(
+            {
+                "part_semantics": "alternatives",
+                "default_alternative_id": "base2",
+                "plasma_mode": "preserve",
+                "part_ids": ["base2", "base3"],
+                "structure_npz_by_alternative": {
+                    "base2": "structure_features/base2.npz",
+                    "base3": "structure_features/base3.npz",
+                },
+                "param_specs": {
+                    "part.base2.tx": {"default": 0.0, "min": -0.2, "max": 0.2},
+                    "part.base3.tx": {"default": 0.0, "min": -0.2, "max": 0.2},
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    provider = build_geometry_provider(dataset_root, provider_mode="parametric_parts")
+
+    base2 = provider.get({"geom_id": "base2"})
+    base3 = provider.get({"geom_id": "base3"})
+
+    assert base2.regions["part_ids"].tolist() == ["boundary_00", "boundary_01"]
+    assert base3.regions["part_ids"].tolist() == ["boundary_00", "boundary_01"]
+    assert np.array_equal(base2.regions["part_mask_stack"], base2_stack)
+    assert np.array_equal(base3.regions["part_mask_stack"], base3_stack)
+    assert not np.array_equal(base2.regions["solid_union_mask"], base3.regions["solid_union_mask"])
+    assert np.array_equal(base2.mask_plasma, mask)
+    assert np.array_equal(base3.mask_plasma, mask)

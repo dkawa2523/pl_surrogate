@@ -172,8 +172,66 @@ def _read_coil_layout(path: Path, *, r_coords: np.ndarray, z_coords: np.ndarray)
     if not path.exists():
         raise FileNotFoundError(f"coil layout not found: {path}")
     with path.open("r", encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.DictReader(f))
-    by_index = {int(float(row["coil_index"])): row for row in rows}
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = set(reader.fieldnames or [])
+    required = {"coil_index", "active"}
+    missing_columns = sorted(required - fieldnames)
+    if missing_columns:
+        raise ValueError(f"coil layout missing columns {missing_columns}: {path}")
+    by_index: dict[int, dict[str, str]] = {}
+    row_numbers: dict[int, int] = {}
+    for row_number, row in enumerate(rows, start=2):
+        raw_index = str(row.get("coil_index", "")).strip()
+        try:
+            index_value = float(raw_index)
+        except ValueError as exc:
+            raise ValueError(
+                f"coil_index must be an integer at row={row_number}: value={raw_index!r}, path={path}"
+            ) from exc
+        if not np.isfinite(index_value) or not index_value.is_integer():
+            raise ValueError(
+                f"coil_index must be an integer at row={row_number}: value={raw_index!r}, path={path}"
+            )
+        coil_index = int(index_value)
+        if coil_index < 1 or coil_index > len(PART_IDS):
+            raise ValueError(
+                "coil_index exceeds the fixed part-slot contract: "
+                f"index={coil_index}, allowed=1..{len(PART_IDS)}, row={row_number}, path={path}"
+            )
+        if coil_index in by_index:
+            raise ValueError(
+                "duplicate coil_index in coil layout: "
+                f"index={coil_index}, rows={[row_numbers[coil_index], row_number]}, path={path}"
+            )
+        raw_active = str(row.get("active", "")).strip()
+        try:
+            active_value = float(raw_active)
+        except ValueError as exc:
+            raise ValueError(
+                f"active must be 0 or 1 at row={row_number}: value={raw_active!r}, path={path}"
+            ) from exc
+        if not np.isfinite(active_value) or not active_value.is_integer() or int(active_value) not in {0, 1}:
+            raise ValueError(
+                f"active must be 0 or 1 at row={row_number}: value={raw_active!r}, path={path}"
+            )
+        if int(active_value) == 1:
+            bounds: dict[str, float] = {}
+            for key in ("r_min", "r_max", "z_min", "z_max"):
+                raw_bound = str(row.get(key, "")).strip()
+                try:
+                    bound = float(raw_bound)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"active coil requires finite {key} at row={row_number}: path={path}"
+                    ) from exc
+                if not np.isfinite(bound):
+                    raise ValueError(f"active coil requires finite {key} at row={row_number}: path={path}")
+                bounds[key] = bound
+            if bounds["r_min"] > bounds["r_max"] or bounds["z_min"] > bounds["z_max"]:
+                raise ValueError(f"active coil has inverted bounds at row={row_number}: path={path}")
+        by_index[coil_index] = row
+        row_numbers[coil_index] = row_number
     h = int(np.asarray(z_coords).shape[0])
     w = int(np.asarray(r_coords).shape[0])
     r = np.asarray(r_coords, dtype=np.float32).reshape(1, w)
@@ -187,12 +245,17 @@ def _read_coil_layout(path: Path, *, r_coords: np.ndarray, z_coords: np.ndarray)
         active = int(float(row.get("active", 0) or 0)) == 1
         mask = np.zeros((h, w), dtype=np.float32)
         if active:
-            active_count += 1
             r_min = float(row["r_min"])
             r_max = float(row["r_max"])
             z_min = float(row["z_min"])
             z_max = float(row["z_max"])
             mask = ((r >= r_min) & (r <= r_max) & (z >= z_min) & (z <= z_max)).astype(np.float32)
+            if not np.any(mask > 0.5):
+                raise ValueError(
+                    "active coil rasterized to an empty mask: "
+                    f"index={idx}, bounds={(r_min, r_max, z_min, z_max)}, path={path}"
+                )
+            active_count += 1
         masks.append(mask.astype(np.float32))
         sdfs[f"sdf_coil_{idx:02d}"] = _signed_distance_for_part(mask).astype(np.float32)
     return {
@@ -200,6 +263,9 @@ def _read_coil_layout(path: Path, *, r_coords: np.ndarray, z_coords: np.ndarray)
         "mask_stack": np.stack(masks, axis=0).astype(np.float32),
         "sdf_maps": sdfs,
         "active_count": int(active_count),
+        "layout_row_count": int(len(rows)),
+        "missing_slot_indices": [idx for idx in range(1, len(PART_IDS) + 1) if idx not in by_index],
+        "max_coil_index": int(max(by_index, default=0)),
     }
 
 
@@ -308,6 +374,8 @@ def convert(
     source_split_counts: dict[str, int] = {}
     groups: set[str] = set()
     reference_parts: dict[str, Any] | None = None
+    coil_layout_validated_cases = 0
+    coil_layout_missing_slot_rows = 0
 
     for i, row in enumerate(manifest_rows, start=1):
         case_id = str(row["case_id"])
@@ -369,6 +437,17 @@ def convert(
                     r_coords=np.asarray(mask_info["r_coords"], dtype=np.float32),
                     z_coords=np.asarray(mask_info["z_coords"], dtype=np.float32),
                 )
+                expected_active_raw = float(row["nncoil"])
+                if not np.isfinite(expected_active_raw) or not expected_active_raw.is_integer():
+                    raise ValueError(f"manifest nncoil must be an integer: case={case_id}, value={row['nncoil']!r}")
+                expected_active = int(expected_active_raw)
+                if int(parts["active_count"]) != expected_active:
+                    raise ValueError(
+                        "coil layout active_count does not match manifest nncoil: "
+                        f"case={case_id}, layout={int(parts['active_count'])}, manifest={expected_active}"
+                    )
+                coil_layout_validated_cases += 1
+                coil_layout_missing_slot_rows += int(len(parts["missing_slot_indices"]))
                 structure_payload.update(parts["sdf_maps"])
                 structure_payload["part_mask_stack"] = np.asarray(parts["mask_stack"], dtype=np.float32)
                 if reference_parts is None or int(parts["active_count"]) > int(reference_parts["active_count"]):
@@ -450,6 +529,14 @@ def convert(
         "part_lite_v1_ready": bool(part_sdf_lite_v1),
         "parts_manifest": "geometry/parts_manifest.json" if part_sdf_lite_v1 else "",
         "parts_pack": "geometry/parts_pack.npz" if part_sdf_lite_v1 else "",
+        "coil_layout_audit": {
+            "validated_cases": int(coil_layout_validated_cases),
+            "fixed_part_slots": int(len(PART_IDS)),
+            "missing_slot_rows": int(coil_layout_missing_slot_rows),
+            "duplicate_index_policy": "error",
+            "out_of_range_index_policy": "error",
+            "active_count_vs_nncoil": "validated" if part_sdf_lite_v1 else "not_applicable",
+        },
         "targets": {
             "ne": {"source_key": "ne", "source_field": "electron_density", "value_transform": "identity"},
             "ni": {"source_key": "ni", "source_field": "ion_density", "value_transform": "identity"},

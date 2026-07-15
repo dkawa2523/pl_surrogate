@@ -42,6 +42,7 @@ class StructureDescriptorPack:
     vector: np.ndarray
     feature_names: tuple[str, ...]
     n_parts: int
+    n_part_slots: int
 
     def to_npz_payload(self) -> dict[str, np.ndarray]:
         return {
@@ -49,6 +50,7 @@ class StructureDescriptorPack:
             "feature_names": np.asarray(list(self.feature_names), dtype=object),
             "profile": np.asarray([self.profile], dtype=object),
             "n_parts": np.asarray([int(self.n_parts)], dtype=np.int64),
+            "n_part_slots": np.asarray([int(self.n_part_slots)], dtype=np.int64),
         }
 
     def to_meta_dict(self) -> dict[str, Any]:
@@ -56,6 +58,7 @@ class StructureDescriptorPack:
             "profile": str(self.profile),
             "descriptor_dim": int(self.vector.shape[0]),
             "n_parts": int(self.n_parts),
+            "n_part_slots": int(self.n_part_slots),
             "feature_names": list(self.feature_names),
         }
 
@@ -92,7 +95,11 @@ def _resolve_part_mask_stack(geom_ctx: GeometryContext, *, profile: str) -> np.n
             "part_mask_stack spatial shape mismatch: "
             f"expected={(int(h), int(w))}, got={tuple(int(v) for v in stack.shape[1:])}"
         )
-    return (stack > 0.5).astype(np.float32)
+    binary = (stack > 0.5).astype(np.float32)
+    active_slots = np.any(binary > 0.5, axis=(1, 2))
+    if not np.any(active_slots):
+        raise ValueError(f"part_mask_stack must contain at least one active part for {profile}")
+    return binary
 
 
 def _resolve_union_solid(mask_stack: np.ndarray, geom_ctx: GeometryContext) -> np.ndarray:
@@ -182,7 +189,9 @@ def _build_struct_desc(
     length_scale = float(max(int(h), int(w), 1))
     perimeter_scale = float(max(2 * (int(h) + int(w)), 1))
     part_mask_stack = _resolve_part_mask_stack(geom_ctx, profile=profile)
-    n_parts = int(part_mask_stack.shape[0])
+    n_part_slots = int(part_mask_stack.shape[0])
+    active_slots = np.any(part_mask_stack > 0.5, axis=(1, 2))
+    n_parts = int(np.sum(active_slots, dtype=np.int64))
     union_solid = _resolve_union_solid(part_mask_stack, geom_ctx)
     x_map, y_map = _resolve_coord_maps(geom_ctx)
     distance_any = np.asarray(geom_ctx.distance_any, dtype=np.float32)
@@ -211,9 +220,17 @@ def _build_struct_desc(
     lite_profile = profile == STRUCT_DESC_LITE_V1
     per_part_rows: list[list[float]] = []
     per_part_gap_values: list[float] = []
-    for i in range(n_parts):
+    for i in range(n_part_slots):
         mask_i = (part_mask_stack[i] > 0.5).astype(np.float32)
-        union_others = np.maximum.reduce(np.delete(part_mask_stack, i, axis=0), axis=0) if n_parts > 1 else np.zeros_like(mask_i)
+        if not bool(active_slots[i]):
+            if not lite_profile:
+                per_part_rows.append([0.0] * len(_PART_FEATURE_NAMES))
+            continue
+        union_others = (
+            np.maximum.reduce(np.delete(part_mask_stack, i, axis=0), axis=0)
+            if n_part_slots > 1
+            else np.zeros_like(mask_i)
+        )
         min_gap_to_other = _min_gap_to_other_parts(mask_i, union_others)
         if normalize_lengths:
             min_gap_to_other = float(min_gap_to_other / length_scale)
@@ -281,7 +298,7 @@ def _build_struct_desc(
         raise ValueError(f"{profile} produced non-finite descriptor values")
     feature_names = list(_GLOBAL_FEATURE_NAMES)
     if not lite_profile:
-        for i in range(n_parts):
+        for i in range(n_part_slots):
             prefix = f"part_{i:03d}"
             feature_names.extend(f"{prefix}.{name}" for name in _PART_FEATURE_NAMES)
     if len(feature_names) != int(vec.shape[0]):
@@ -294,6 +311,7 @@ def _build_struct_desc(
         vector=vec,
         feature_names=tuple(feature_names),
         n_parts=int(n_parts),
+        n_part_slots=int(n_part_slots),
     )
 
 

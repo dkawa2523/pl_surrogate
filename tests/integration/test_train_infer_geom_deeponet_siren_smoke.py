@@ -78,6 +78,7 @@ def _write_cfg(cfg_path: Path, run_dir: Path) -> None:
             "single": {"enabled": True, "geom": {"geom_id": "default"}},
             "batch": {"enabled": False},
             "optimize": {"enabled": False},
+            "qoi": {"uniformity": {"target": "ne"}},
         },
     }
     with cfg_path.open("w", encoding="utf-8") as f:

@@ -144,6 +144,36 @@ def test_custom_groups_output_head_preserves_output_order() -> None:
     assert model.target_groups["density"].source == "custom"
 
 
+def test_custom_groups_spatial_refine_head_preserves_output_order(tmp_path: Path) -> None:
+    model = _build_custom_groups_model(
+        output_heads=_custom_groups_output_heads(
+            groups={
+                "electron_density": {"targets": ["electron_density"]},
+                "ion_density": {"targets": ["ion_density"]},
+                "thermal": {"targets": ["electron_temperature"]},
+                "electrostatic": {"targets": ["plasma_potential"]},
+            },
+        )
+        | {
+            "group_options": {
+                "electron_density": {"head": "spatial_refine"},
+                "ion_density": {"head": "spatial_refine"},
+            }
+        }
+    )
+    pred = model.forward(np.zeros((2, 3), dtype=np.float32))
+    ckpt = save_checkpoint(model, tmp_path / "custom_groups_spatial_refine")
+    meta = json.loads((ckpt / "meta.json").read_text(encoding="utf-8"))
+
+    assert pred.shape == (2, 4, 8, 8)
+    assert model.output_keys == _logical_output_keys()
+    assert model.output_head_group_options == {
+        "electron_density": {"head": "spatial_refine"},
+        "ion_density": {"head": "spatial_refine"},
+    }
+    assert meta["output_heads"]["group_options"] == model.output_head_group_options
+
+
 def test_custom_groups_output_head_rejects_duplicate_target() -> None:
     with pytest.raises(ValueError, match="already assigned"):
         _build_custom_groups_model(

@@ -107,6 +107,7 @@ class FFNOBaseline(_TorchGridFieldBaseline):
         self.axis_mix_init_w = float(axis_mix_init_w)
         torch = self.torch
         nn = torch.nn
+        output_head_group_options = dict(getattr(self, "output_head_group_options", {}) or {})
 
         class _FactorizedSpectralConv2d(nn.Module):
             def __init__(
@@ -321,6 +322,7 @@ class FFNOBaseline(_TorchGridFieldBaseline):
                         in_channels=width,
                         output_keys=output_keys,
                         target_groups=target_groups,
+                        group_options=output_head_group_options,
                         with_rho_eff_head=with_rho_eff_head,
                     )
                 else:

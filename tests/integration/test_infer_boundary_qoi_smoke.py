@@ -41,6 +41,9 @@ def test_infer_boundary_qoi_and_diagnostics_smoke(tmp_path: Path, geometry_root:
     cond = {"c0": 0.2, "c1": 0.4, "c2": 0.6}
     res = engine.single_run(cond=cond, geom={"geom_id": "default"}, axis={"mode": "steady", "value": 0.0})
     assert "boundary_gamma_uniformity" in res.qoi
+    assert "bohm_flux_uniformity" in res.qoi
+    assert res.qoi["bohm_flux_uniformity"] >= 0.0
+    assert res.qoi["bohm_flux_mean"] >= 0.0
     assert res.qoi["uniformity_target"] == "Te"
     assert res.qoi["uniformity_region"] == "plasma_mid_height"
     assert "uniformity_max_density" in res.qoi

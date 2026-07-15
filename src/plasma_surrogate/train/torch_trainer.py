@@ -13,12 +13,28 @@ from plasma_surrogate.core.deeponet_contract import allvars_plasma_balance_score
 from plasma_surrogate.core.physics_contract import resolve_epoch_scaled_physics
 from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.core.torch_backend import require_torch
+from plasma_surrogate.preprocessing.spatial_features import materialize_case_spatial_batch
 from plasma_surrogate.train.artifact_writers import (
     save_physics_terms,
     save_resolved_physics,
     save_torch_optimization_diagnostics,
 )
 from plasma_surrogate.train.loss_composer import compose_supervised_torch, compose_torch
+from plasma_surrogate.train.selection import (
+    GROUP_BALANCE_SELECTION_MODE,
+    SPATIAL_SELECTION_MODE,
+    SPATIAL_SELECTION_OBJECTIVE_VERSION,
+    case_macro_spatial_objective,
+    group_plasma_balance_score,
+    resolve_selection_group_weights,
+    resolve_selection_target_groups,
+    resolve_spatial_selection_config,
+)
+from plasma_surrogate.train.spatial_supervision import (
+    materialize_supervised_geometry,
+    objective_boundary_distance_channels,
+)
+from plasma_surrogate.train.target_contracts import resolve_mainline_selection_weights
 
 
 @dataclass
@@ -278,6 +294,10 @@ class TorchTrainer:
         batch_size_cases: int = 0,
         shuffle_cases: bool = True,
         seed: int = 0,
+        spatial_train: Any | None = None,
+        spatial_val: Any | None = None,
+        supervision_train: Any | None = None,
+        supervision_val: Any | None = None,
     ) -> TorchTrainOutput:
         torch = require_torch()
         device = getattr(model, "device", torch.device("cuda" if bool(torch.cuda.is_available()) else "cpu"))
@@ -317,22 +337,68 @@ class TorchTrainer:
         selection_mode = str(selection_cfg.get("mode", "last")).strip().lower()
         if selection_mode == "best_val_data_loss":
             selection_mode = "best_val_loss"
-        if selection_mode not in {"last", "best_val_allvars_balance", "best_val_loss"}:
-            raise ValueError("train.deeponet_plasma.selection.mode must be one of: last, best_val_allvars_balance, best_val_loss")
+        selection_score_modes = {
+            "best_val_allvars_balance",
+            GROUP_BALANCE_SELECTION_MODE,
+            SPATIAL_SELECTION_MODE,
+        }
+        if selection_mode not in {"last", *selection_score_modes, "best_val_loss"}:
+            raise ValueError(
+                "train.deeponet_plasma.selection.mode must be one of: last, "
+                "best_val_allvars_balance, best_val_group_balance, "
+                "best_val_spatial_objective, best_val_loss"
+            )
+        if selection_mode == SPATIAL_SELECTION_MODE:
+            resolve_spatial_selection_config(selection_cfg)
         selection_eval_every = int(max(int(selection_cfg.get("eval_every_n_epochs", 2)), 1))
         selection_warmup = int(max(int(selection_cfg.get("warmup_epochs", 5)), 0))
-        raw_weights = dict(selection_cfg.get("weights", {}))
-        if len(raw_weights) == 0:
-            uniform = 1.0 / float(max(len(y_vars), 1))
-            selection_weights = {str(name): float(uniform) for name in y_vars}
-        else:
-            unknown = sorted(set(str(k) for k in raw_weights.keys()) - set(str(v) for v in y_vars))
-            if unknown:
-                raise ValueError(
-                    "train.deeponet_plasma.selection.weights contains unknown vars: "
-                    f"{unknown}; expected={list(y_vars)}"
-                )
-            selection_weights = {str(name): float(raw_weights.get(name, 0.0)) for name in y_vars}
+        selection_weights = resolve_mainline_selection_weights(
+            selection_cfg=selection_cfg,
+            target_vars=list(y_vars),
+            cfg_prefix="train.deeponet_plasma",
+        )
+        selection_target_groups = {}
+        selection_group_weights: dict[str, float] = {}
+        target_role_schema = dict(
+            selection_cfg.get("target_role_schema")
+            or dict(loss_cfg or {}).get("target_role_schema")
+            or dict(physics_cfg or {}).get("target_role_schema")
+            or {}
+        )
+        model_target_groups = getattr(model, "target_groups", None)
+        should_resolve_groups = selection_mode == GROUP_BALANCE_SELECTION_MODE or (
+            selection_mode == SPATIAL_SELECTION_MODE
+            and bool(model_target_groups or target_role_schema.get("targets"))
+        )
+        if should_resolve_groups:
+            selection_target_groups = resolve_selection_target_groups(
+                output_vars=list(y_vars),
+                target_role_schema=target_role_schema,
+                model_target_groups=model_target_groups,
+            )
+            selection_group_weights = resolve_selection_group_weights(
+                (
+                    dict(selection_cfg.get("group_weights", {}) or {})
+                    if selection_mode in {GROUP_BALANCE_SELECTION_MODE, SPATIAL_SELECTION_MODE}
+                    else None
+                ),
+                groups=selection_target_groups,
+                cfg_prefix="train.deeponet_plasma",
+            )
+        selection_target_part_keys = {
+            str(name): (
+                f"spatial_{name}" if selection_mode == SPATIAL_SELECTION_MODE else f"r2_{name}_plasma"
+            )
+            for name in y_vars
+        }
+        selection_group_part_keys = {
+            str(name): (
+                f"spatial_group_{name}"
+                if selection_mode == SPATIAL_SELECTION_MODE
+                else f"r2_group_{name}_plasma"
+            )
+            for name in selection_target_groups
+        }
         grad_clip_cfg = dict(opt_contract.get("grad_clip", {}))
         diag_cfg = dict(opt_contract.get("diagnostics", {}))
         alert_cfg = dict(diag_cfg.get("alert", {}))
@@ -345,12 +411,23 @@ class TorchTrainer:
             )
         min_grad_l2_total = float(alert_cfg.get("min_grad_l2_total", 1.0e-5))
         best_state: dict[str, np.ndarray] | None = None
-        best_score = float("-inf")
+        best_score = float("inf") if selection_mode == SPATIAL_SELECTION_MODE else float("-inf")
         best_loss = float("inf")
         best_epoch = -1
         best_score_parts: dict[str, float] = {}
         selection_valid = selection_mode == "last"
         total_epochs = int(sum(max(int(stage.get("epochs", 0)), 0) for stage in stages_cfg))
+        val_case_indices = np.arange(int(c_va.shape[0]), dtype=np.int64)
+        val_selection_geometry = materialize_supervised_geometry(
+            spatial_val if supervision_val is None else supervision_val,
+            val_case_indices,
+            mask=supervised_mask,
+            distance_any=supervised_distance,
+            boundary_distance_channels=objective_boundary_distance_channels(
+                loss_cfg=loss_cfg,
+                selection_cfg=selection_cfg,
+            ),
+        )
 
         for stage in stages_cfg:
             n_epochs = int(stage.get("epochs", 0))
@@ -428,7 +505,19 @@ class TorchTrainer:
                 for batch_idx in train_batches:
                     c_tr_b = c_tr[batch_idx]
                     y_tr_b = y_tr[batch_idx]
-                    pred = model.predict_fields_torch(c_tr_b, geom_ctx=geom_ctx)
+                    spatial_tr_b = materialize_case_spatial_batch(spatial_train, batch_idx)
+                    supervision_tr_b = materialize_supervised_geometry(
+                        spatial_train if supervision_train is None else supervision_train,
+                        batch_idx,
+                        mask=supervised_mask,
+                        distance_any=supervised_distance,
+                        boundary_distance_channels=objective_boundary_distance_channels(loss_cfg=loss_cfg),
+                    )
+                    pred = model.predict_fields_torch(
+                        c_tr_b,
+                        geom_ctx=geom_ctx,
+                        spatial_features=spatial_tr_b,
+                    )
                     if poisson_head is not None and "rho_eff" in pred:
                         pred[str(potential_key)] = poisson_head.predict_phi(
                             pred["rho_eff"],
@@ -441,8 +530,8 @@ class TorchTrainer:
                         target_fields=y_tr_b,
                         y_order=y_vars,
                         loss_cfg=loss_cfg,
-                        mask=supervised_mask,
-                        distance_any=supervised_distance,
+                        mask=supervision_tr_b["mask"],
+                        distance_any=supervision_tr_b["distance_any"],
                     )
                     phys_loss, terms = compose_torch(
                         pred_fields=pred,
@@ -461,7 +550,7 @@ class TorchTrainer:
                     train_data_num += float(data_loss.detach().cpu().item()) * float(bsz_case)
                     train_phys_num += float(phys_loss.detach().cpu().item()) * float(bsz_case)
                     for key, value in data_parts.items():
-                        if str(key).startswith("loss_supervised_group_"):
+                        if str(key).startswith("loss_supervised_"):
                             group_loss_acc[str(key)] = group_loss_acc.get(str(key), 0.0) + float(value) * float(bsz_case)
                     for key in terms_acc:
                         terms_acc[key] += float(terms.get(key, 0.0)) * float(bsz_case)
@@ -508,7 +597,7 @@ class TorchTrainer:
                 group_loss_mean = {k: float(v / denom_tr) for k, v in group_loss_acc.items()}
 
                 should_eval_selection = (
-                    selection_mode == "best_val_allvars_balance"
+                    selection_mode in selection_score_modes
                     and epoch_abs >= selection_warmup
                     and ((epoch_abs - selection_warmup) % selection_eval_every == 0)
                 )
@@ -529,7 +618,19 @@ class TorchTrainer:
                     for batch_idx in val_batches:
                         c_va_b = c_va[batch_idx]
                         y_va_b = y_va[batch_idx]
-                        pred_va_b = model.predict_fields_torch(c_va_b, geom_ctx=geom_ctx)
+                        spatial_va_b = materialize_case_spatial_batch(spatial_val, batch_idx)
+                        supervision_va_b = materialize_supervised_geometry(
+                            spatial_val if supervision_val is None else supervision_val,
+                            batch_idx,
+                            mask=supervised_mask,
+                            distance_any=supervised_distance,
+                            boundary_distance_channels=objective_boundary_distance_channels(loss_cfg=loss_cfg),
+                        )
+                        pred_va_b = model.predict_fields_torch(
+                            c_va_b,
+                            geom_ctx=geom_ctx,
+                            spatial_features=spatial_va_b,
+                        )
                         if poisson_head is not None and "rho_eff" in pred_va_b:
                             pred_va_b[str(potential_key)] = poisson_head.predict_phi(
                                 pred_va_b["rho_eff"],
@@ -542,8 +643,8 @@ class TorchTrainer:
                             target_fields=y_va_b,
                             y_order=y_vars,
                             loss_cfg=loss_cfg,
-                            mask=supervised_mask,
-                            distance_any=supervised_distance,
+                            mask=supervision_va_b["mask"],
+                            distance_any=supervision_va_b["distance_any"],
                         )
                         val_phys_b, _ = compose_torch(
                             pred_fields=pred_va_b,
@@ -590,17 +691,47 @@ class TorchTrainer:
                         else np.zeros((0, len(y_vars), int(y_va.shape[-2]), int(y_va.shape[-1])), dtype=np.float32)
                     )
                     bsz, _c, hh, ww = pred_stack.shape
-                    plasma_mask = self._align_mask_bhw(supervised_mask, batch_size=bsz, h=hh, w=ww)
-                    val_balance_score, parts = allvars_plasma_balance_score(
-                        pred=pred_stack,
-                        target=target_stack,
-                        y_vars=list(y_vars),
-                        weights=selection_weights,
-                        plasma_mask=plasma_mask,
+                    plasma_mask = self._align_mask_bhw(
+                        val_selection_geometry["mask"],
+                        batch_size=bsz,
+                        h=hh,
+                        w=ww,
                     )
-                    if np.isfinite(val_balance_score) and (
-                        best_state is None or float(val_balance_score) > float(best_score)
-                    ):
+                    if selection_mode == SPATIAL_SELECTION_MODE:
+                        val_balance_score, parts = case_macro_spatial_objective(
+                            pred=pred_stack,
+                            target=target_stack,
+                            y_vars=list(y_vars),
+                            plasma_mask=plasma_mask,
+                            distance_any=val_selection_geometry["distance_any"],
+                            cfg=selection_cfg,
+                            target_weights=selection_weights,
+                            groups=selection_target_groups or None,
+                            group_weights=selection_group_weights or None,
+                        )
+                    elif selection_mode == GROUP_BALANCE_SELECTION_MODE:
+                        val_balance_score, parts = group_plasma_balance_score(
+                            pred=pred_stack,
+                            target=target_stack,
+                            y_vars=list(y_vars),
+                            plasma_mask=plasma_mask,
+                            groups=selection_target_groups,
+                            group_weights=selection_group_weights,
+                        )
+                    else:
+                        val_balance_score, parts = allvars_plasma_balance_score(
+                            pred=pred_stack,
+                            target=target_stack,
+                            y_vars=list(y_vars),
+                            weights=selection_weights,
+                            plasma_mask=plasma_mask,
+                        )
+                    improved = (
+                        float(val_balance_score) < float(best_score)
+                        if selection_mode == SPATIAL_SELECTION_MODE
+                        else float(val_balance_score) > float(best_score)
+                    )
+                    if np.isfinite(val_balance_score) and (best_state is None or improved):
                         best_state = self._clone_model_state_numpy(model)
                         best_score = float(val_balance_score)
                         best_epoch = int(epoch_abs)
@@ -627,7 +758,22 @@ class TorchTrainer:
                         "selection_valid_flag": 1.0 if selection_valid else 0.0,
                         "selected_epoch_flag": 0.0,
                         "selected_epoch_score": 0.0,
-                        **{f"selection_score_{name}": 0.0 for name in y_vars},
+                        **{
+                            f"selection_score_{name}": float(
+                                parts.get(selection_target_part_keys[str(name)], 0.0)
+                                if should_eval_selection
+                                else 0.0
+                            )
+                            for name in y_vars
+                        },
+                        **{
+                            f"selection_score_group_{name}": float(
+                                parts.get(selection_group_part_keys[str(name)], 0.0)
+                                if should_eval_selection
+                                else 0.0
+                            )
+                            for name in selection_target_groups
+                        },
                         **group_loss_mean,
                     }
                 )
@@ -665,18 +811,33 @@ class TorchTrainer:
             epoch_offset += n_epochs
 
         selected_epoch_effective = int(best_epoch if best_epoch >= 0 else (len(history) - 1))
-        if selection_mode in {"best_val_allvars_balance", "best_val_loss"} and best_state is not None:
+        checkpoint_selection_modes = {
+            "best_val_allvars_balance",
+            GROUP_BALANCE_SELECTION_MODE,
+            SPATIAL_SELECTION_MODE,
+            "best_val_loss",
+        }
+        if selection_mode in checkpoint_selection_modes and best_state is not None:
             self._restore_model_state_numpy(model, best_state)
-        if selection_mode in {"best_val_allvars_balance", "best_val_loss"} and best_state is None:
+        if selection_mode in checkpoint_selection_modes and best_state is None:
             selection_valid = False
         for row in history:
             row["selected_epoch_flag"] = 1.0 if int(row.get("epoch", -1)) == selected_epoch_effective else 0.0
             row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
+            row["selection_mode_effective"] = selection_mode
+            row["selection_objective_version"] = (
+                SPATIAL_SELECTION_OBJECTIVE_VERSION
+                if selection_mode == SPATIAL_SELECTION_MODE
+                else ""
+            )
             row["selected_epoch_score"] = float(best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0))
             if int(row.get("epoch", -1)) == selected_epoch_effective and best_epoch >= 0:
                 for name in y_vars:
                     key = f"selection_score_{name}"
-                    row[key] = float(best_score_parts.get(f"r2_{name}_plasma", 0.0))
+                    row[key] = float(best_score_parts.get(selection_target_part_keys[str(name)], 0.0))
+                for name in selection_target_groups:
+                    key = f"selection_score_group_{name}"
+                    row[key] = float(best_score_parts.get(selection_group_part_keys[str(name)], 0.0))
 
         header = list(history[0].keys()) if history else ["epoch", "train_loss", "val_loss"]
         rows = [[r[k] for k in header] for r in history]

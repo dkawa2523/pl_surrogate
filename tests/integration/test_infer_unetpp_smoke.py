@@ -64,7 +64,10 @@ def test_infer_unetpp_smoke(tmp_path: Path) -> None:
                 },
             },
         },
-        "inference": {"single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}}},
+        "inference": {
+            "single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}},
+            "qoi": {"uniformity": {"target": "ne"}},
+        },
     }
     cfg_path = tmp_path / "unetpp.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:

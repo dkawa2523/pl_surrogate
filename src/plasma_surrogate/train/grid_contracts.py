@@ -18,12 +18,12 @@ from plasma_surrogate.core.model_families import (
 )
 from plasma_surrogate.core.model_input_policy import ADAPTER_AUTO, ADAPTER_HYBRID_PACK_DESCRIPTOR
 from plasma_surrogate.core.vector_pack import load_vector_from_pack
+from plasma_surrogate.features.structure_feature_registry import FEATURE_PROFILE_CHANNELS
 from plasma_surrogate.models.heads.role_grouped import (
     GROUPED_OUTPUT_HEAD_MODES,
     ROLE_GROUPED_OUTPUT_HEAD_MODELS,
     is_grouped_output_head_mode,
 )
-from plasma_surrogate.preprocessing.spatial_features import ICP_PART_SDF_CHANNELS, PART_SDF_SUMMARY_CHANNELS
 from plasma_surrogate.train.target_contracts import validate_mainline_selection_contract
 
 
@@ -76,23 +76,16 @@ def validate_unet_like_mainline_contract(
         mode = str(input_features_mode or "").strip().lower()
         if mode != "geom_feature_pack":
             raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack for mainline")
-        required_channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
-        part_lite_channels = required_channels + [
-            "normal_x",
-            "normal_y",
-            "curvature_proxy",
-            "boundary_band",
-            *PART_SDF_SUMMARY_CHANNELS,
-        ]
-        icp_struct_channels = required_channels + ["mask_coil", "distance_coil", "coil_proximity"]
-        icp_part_sdf_lite_channels = icp_struct_channels + list(ICP_PART_SDF_CHANNELS)
         channels = [str(v) for v in list(input_feature_channels or [])]
-        if channels not in (required_channels, part_lite_channels, icp_struct_channels, icp_part_sdf_lite_channels):
+        matching_profiles = [
+            name
+            for name, profile_channels in FEATURE_PROFILE_CHANNELS.items()
+            if tuple(channels) == tuple(profile_channels)
+        ]
+        if not matching_profiles:
             raise ValueError(
-                f"{cfg_prefix}.input_features.features must be {required_channels} "
-                f"(or {part_lite_channels} for part_lite_v1, "
-                f"or {icp_struct_channels} for icp_struct_spatial_v1, "
-                f"or {icp_part_sdf_lite_channels} for icp_part_sdf_lite_v1); got={channels}"
+                f"{cfg_prefix}.input_features.features must exactly match one registered "
+                f"structure feature profile; profiles={list(FEATURE_PROFILE_CHANNELS)}, got={channels}"
             )
     validate_mainline_selection_contract(
         selection_cfg=selection_cfg,
@@ -168,14 +161,47 @@ def resolve_geom_deeponet_siren_descriptor_contract(
         )
     if desc_profile == "none":
         raise ValueError("geom_deeponet_siren requires runtime.structure.descriptor_profile != none")
-    descriptor_vector, descriptor_names = load_vector_from_pack(
-        pack=descriptor_pack,
-        pack_name="structure_descriptor_pack",
-    )
-    return descriptor_vector, {
+    payload = dict(descriptor_pack or {})
+    descriptor_scope = "static_provider_geometry"
+    if "vectors" in payload:
+        descriptor_input = np.asarray(payload["vectors"], dtype=np.float32)
+        if descriptor_input.ndim != 2 or min(descriptor_input.shape) < 1:
+            raise ValueError(
+                "structure_descriptor_pack vectors must be a non-empty [N,D] matrix; "
+                f"got shape={descriptor_input.shape}"
+            )
+        if not np.all(np.isfinite(descriptor_input)):
+            raise ValueError("structure_descriptor_pack vectors must contain finite values")
+        descriptor_names = [
+            str(value)
+            for value in np.asarray(payload.get("feature_names", [])).reshape(-1).tolist()
+        ]
+        if descriptor_names and len(descriptor_names) != int(descriptor_input.shape[1]):
+            raise ValueError(
+                "structure_descriptor_pack feature_names length mismatch: "
+                f"names={len(descriptor_names)}, dim={int(descriptor_input.shape[1])}"
+            )
+        descriptor_case_ids = [
+            str(value) for value in np.asarray(payload.get("case_ids", [])).reshape(-1).tolist()
+        ]
+        if len(descriptor_case_ids) != int(descriptor_input.shape[0]):
+            raise ValueError(
+                "case-specific structure_descriptor_pack requires one case_id per row: "
+                f"case_ids={len(descriptor_case_ids)}, rows={int(descriptor_input.shape[0])}"
+            )
+        if len(set(descriptor_case_ids)) != len(descriptor_case_ids):
+            raise ValueError("case-specific structure_descriptor_pack case_ids must be unique")
+        descriptor_scope = "case_specific"
+    else:
+        descriptor_input, descriptor_names = load_vector_from_pack(
+            pack=payload,
+            pack_name="structure_descriptor_pack",
+        )
+    return descriptor_input, {
         GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: str(desc_profile),
-        GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(descriptor_vector.shape[0]),
+        GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(descriptor_input.shape[-1]),
         "descriptor_feature_names_effective": list(descriptor_names),
+        "descriptor_scope_effective": descriptor_scope,
         "adapter_mode_effective": str(adapter),
     }
 

@@ -4,6 +4,7 @@ import pytest
 
 from plasma_surrogate.core.input_modes import TABLE_ONLY, TABLE_PLUS_STRUCTURE
 from plasma_surrogate.core.model_input_policy import (
+    ADAPTER_AUTO,
     ADAPTER_COORD_PACK,
     ADAPTER_GRID_PACK,
     ADAPTER_HYBRID_PACK_DESCRIPTOR,
@@ -61,6 +62,25 @@ def test_validate_adapter_mode_success_and_failure() -> None:
         validate_adapter_mode("ffno", TABLE_PLUS_STRUCTURE, "descriptor_branch")
 
 
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "coord_mlp_fourier",
+        "coord_mlp_siren",
+        "coord_mlp_pod_residual",
+        "deeponet_plasma",
+    ],
+)
+def test_coord_pack_models_reject_unimplemented_descriptor_adapters(model_name: str) -> None:
+    assert set(resolve_allowed_adapter_modes(model_name)) == {ADAPTER_COORD_PACK, ADAPTER_AUTO}
+    with pytest.raises(ValueError, match="model/adapter mismatch"):
+        validate_adapter_mode(
+            model_name,
+            TABLE_PLUS_STRUCTURE,
+            ADAPTER_HYBRID_PACK_DESCRIPTOR,
+        )
+
+
 def test_resolve_effective_adapter_mode_auto_mapping() -> None:
     assert resolve_effective_adapter_mode("global_mlp", TABLE_ONLY, "auto") == ADAPTER_NONE
     assert resolve_effective_adapter_mode("deeponet_pod", TABLE_PLUS_STRUCTURE, "auto") == ADAPTER_NONE
@@ -74,6 +94,7 @@ def test_resolve_effective_adapter_mode_auto_mapping() -> None:
     assert resolve_effective_adapter_mode("geom_deeponet_siren", TABLE_PLUS_STRUCTURE, "auto") == ADAPTER_HYBRID_PACK_DESCRIPTOR
     assert resolve_effective_adapter_mode("coord_mlp_fourier", TABLE_PLUS_STRUCTURE, "auto") == ADAPTER_COORD_PACK
     assert resolve_effective_adapter_mode("coord_mlp_pod_residual", TABLE_PLUS_STRUCTURE, "auto") == ADAPTER_COORD_PACK
+    assert resolve_effective_adapter_mode("deeponet_plasma", TABLE_PLUS_STRUCTURE, "auto") == ADAPTER_COORD_PACK
 
 
 def test_validate_model_mode_adapter_policy_rejects_table_only_non_none_adapter() -> None:

@@ -18,16 +18,24 @@ def normalize_uno_cfg(raw_cfg: dict[str, Any] | None) -> dict[str, Any]:
     width = int(cfg.get("width", 64))
     n_layers = int(cfg.get("n_layers", 4))
     dropout = float(cfg.get("dropout", 0.0))
+    padding_fraction = float(cfg.get("padding_fraction", 0.0))
+    padding_mode = str(cfg.get("padding_mode", "reflect")).strip().lower()
     if width < 1:
         raise ValueError("train.u_no.model_cfg.uno_cfg.width must be >= 1")
     if n_layers < 1:
         raise ValueError("train.u_no.model_cfg.uno_cfg.n_layers must be >= 1")
     if not np.isfinite(dropout) or dropout < 0.0 or dropout >= 1.0:
         raise ValueError("train.u_no.model_cfg.uno_cfg.dropout must be finite and in [0, 1)")
+    if not np.isfinite(padding_fraction) or padding_fraction < 0.0 or padding_fraction >= 0.5:
+        raise ValueError("train.u_no.model_cfg.uno_cfg.padding_fraction must be finite and in [0, 0.5)")
+    if padding_mode != "reflect":
+        raise ValueError("train.u_no.model_cfg.uno_cfg.padding_mode must be 'reflect'")
     return {
         "width": int(width),
         "n_layers": int(n_layers),
         "dropout": float(dropout),
+        "padding_fraction": float(padding_fraction),
+        "padding_mode": padding_mode,
     }
 
 
@@ -79,9 +87,12 @@ class UNOBaseline(_TorchGridFieldBaseline):
         width = int(self.uno_cfg["width"])
         n_layers = int(self.uno_cfg["n_layers"])
         dropout = float(self.uno_cfg["dropout"])
+        padding_fraction = float(self.uno_cfg["padding_fraction"])
+        padding_mode = str(self.uno_cfg["padding_mode"])
 
         torch = self.torch
         nn = torch.nn
+        output_head_group_options = dict(getattr(self, "output_head_group_options", {}) or {})
 
         class _LowFreqMix2d(nn.Module):
             def __init__(self, channels: int, n_modes: int) -> None:
@@ -146,8 +157,12 @@ class UNOBaseline(_TorchGridFieldBaseline):
                 output_keys: list[str],
                 target_groups: dict[str, Any],
                 with_rho_eff_head: bool,
+                padding_fraction: float,
+                padding_mode: str,
             ):
                 super().__init__()
+                self.padding_fraction = float(padding_fraction)
+                self.padding_mode = str(padding_mode)
                 self.in_proj = nn.Conv2d(in_channels, width, kernel_size=1)
                 self.blocks = nn.ModuleList(
                     [_UNOBlock(width=width, n_modes=n_modes, dropout=dropout) for _ in range(max(int(n_layers), 1))]
@@ -163,6 +178,7 @@ class UNOBaseline(_TorchGridFieldBaseline):
                         in_channels=width,
                         output_keys=output_keys,
                         target_groups=target_groups,
+                        group_options=output_head_group_options,
                         with_rho_eff_head=with_rho_eff_head,
                     )
                 else:
@@ -175,12 +191,27 @@ class UNOBaseline(_TorchGridFieldBaseline):
                     self.head = None
 
             def forward(self, x):
+                original_h, original_w = int(x.shape[-2]), int(x.shape[-1])
+                pad_h = int(round(original_h * self.padding_fraction))
+                pad_w = int(round(original_w * self.padding_fraction))
+                if pad_h > 0 or pad_w > 0:
+                    if pad_h >= original_h or pad_w >= original_w:
+                        raise ValueError("UNO reflect padding must be smaller than each spatial dimension")
+                    x = torch.nn.functional.pad(
+                        x,
+                        (pad_w, pad_w, pad_h, pad_h),
+                        mode=self.padding_mode,
+                    )
                 h = self.in_proj(x)
                 for block in self.blocks:
                     h = block(h)
                 h = self.post(h)
                 if self.head is not None:
-                    return self.head(h)
+                    h = self.head(h)
+                if pad_h > 0:
+                    h = h[..., pad_h : pad_h + original_h, :]
+                if pad_w > 0:
+                    h = h[..., :, pad_w : pad_w + original_w]
                 return h
 
         self.net = _UNONet(
@@ -194,6 +225,8 @@ class UNOBaseline(_TorchGridFieldBaseline):
             output_keys=list(self.output_keys),
             target_groups=dict(self.target_groups),
             with_rho_eff_head=bool(self.with_rho_eff_head),
+            padding_fraction=padding_fraction,
+            padding_mode=padding_mode,
         )
         self._torch_width = int(width)
         self._torch_layers = int(n_layers)

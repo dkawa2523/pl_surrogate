@@ -48,8 +48,8 @@ preprocessing:
   distance_contract:
     require_negative_outside: error
   coord_grid_contract:
-    require_requested_source: warn
-  coord_grid_source: coord_grid
+    require_requested_source: error
+  coord_grid_source: rz_linear
   coord_features:
     enabled: true
     output: features/coord_feature_pack.npz

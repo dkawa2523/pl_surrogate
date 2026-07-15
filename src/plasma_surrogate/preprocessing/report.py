@@ -26,6 +26,8 @@ class PreprocessReportBuilder:
         coord_rows_z: np.ndarray,
         coord_rows_mm: np.ndarray,
         scaler_fit_split: str,
+        protocol_scaler_fit_splits: list[str],
+        structure_holdout_meta: dict[str, Any],
         train_indices: np.ndarray,
         target_transforms_cfg: dict[str, Any],
         y_vars: list[str],
@@ -78,6 +80,8 @@ class PreprocessReportBuilder:
             "coord_scaler_status": "ok",
             "scaler_fit_split": scaler_fit_split,
             "scaler_fit_train_case_count": int(len(train_indices)),
+            "protocol_scaler_fit_splits": list(protocol_scaler_fit_splits),
+            "structure_holdout": dict(structure_holdout_meta),
             "target_value_transform_effective": {
                 name: str(dict(target_transforms_cfg.get(name, {})).get("value_transform", "identity"))
                 for name in [str(var_name) for var_name in y_vars]

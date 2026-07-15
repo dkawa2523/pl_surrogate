@@ -10,6 +10,7 @@ from plasma_surrogate.data.geometry_context import GeometryContext
 from plasma_surrogate.features.structure_feature_registry import validate_coord_feature_channels
 from plasma_surrogate.preprocessing.scalers import ScalerFactory
 from plasma_surrogate.preprocessing.spatial_features import (
+    apply_coord_feature_scaling,
     apply_distance_transform,
     derive_geom_feature_maps,
     distance_to_mask,
@@ -81,6 +82,12 @@ class InferenceFeatureBuilder:
     def resolve_coord_feature_channels(model: Any) -> list[str]:
         raw = getattr(model, "input_feature_channels", None)
         if not isinstance(raw, list) or len(raw) == 0:
+            # DeepONet plasma checkpoints historically exposed this contract
+            # as sensor_feature_names.  Keep that fallback so old checkpoints
+            # can be rehydrated from their run bundle without storing a large
+            # static feature tensor in weights.npz.
+            raw = getattr(model, "sensor_feature_names", None)
+        if not isinstance(raw, list) or len(raw) == 0:
             return ["x", "y"]
         channels = [str(v) for v in raw]
         try:
@@ -100,7 +107,8 @@ class InferenceFeatureBuilder:
         )
         scaler_cfg = dict(self.coord_feature_scaler or {})
         has_coord_feature_scaler = bool(dict(scaler_cfg.get("channels", {})))
-        if pack:
+        use_runtime_geometry = bool(getattr(self.geometry_provider, "supports_geom_param", False))
+        if pack and not use_runtime_geometry:
             rows = self._rows_from_pack(pack=pack, channels=channels, h=h, w=w)
             if rows is not None:
                 if (not has_coord_feature_scaler) and {"x", "y"}.issubset(set(channels)):
@@ -108,9 +116,13 @@ class InferenceFeatureBuilder:
                     idx_y = channels.index("y")
                     rows[:, [idx_x, idx_y]] = self.transform_coord(rows[:, [idx_x, idx_y]])
                 rows, _ = apply_distance_transform(rows, channels=channels, cfg=distance_transform_cfg)
-                return self.transform_coord_features(rows, channels)
+                return self.transform_coord_features(
+                    rows,
+                    channels,
+                    distance_transform_cfg=distance_transform_cfg,
+                )
 
-        if not bool(getattr(self.geometry_provider, "supports_geom_param", False)):
+        if not use_runtime_geometry:
             raise ValueError("input-feature contract requires preprocessing coord_feature_pack")
         rows = self._build_runtime_coord_feature_rows(geom=geom, channels=channels)
         if (not has_coord_feature_scaler) and {"x", "y"}.issubset(set(channels)):
@@ -118,23 +130,26 @@ class InferenceFeatureBuilder:
             idx_y = channels.index("y")
             rows[:, [idx_x, idx_y]] = self.transform_coord(rows[:, [idx_x, idx_y]])
         rows, _ = apply_distance_transform(rows, channels=channels, cfg=distance_transform_cfg)
-        return self.transform_coord_features(rows, channels)
+        return self.transform_coord_features(
+            rows,
+            channels,
+            distance_transform_cfg=distance_transform_cfg,
+        )
 
-    def transform_coord_features(self, rows: np.ndarray, channels: list[str]) -> np.ndarray:
-        raw = dict(self.coord_feature_scaler or {})
-        if not bool(raw.get("enabled", False)):
-            return np.asarray(rows, dtype=np.float32)
-        channel_scalers = dict(raw.get("channels", {}))
-        if len(channel_scalers) == 0:
-            return np.asarray(rows, dtype=np.float32)
-        out = np.asarray(rows, dtype=np.float32).copy()
-        for i, name in enumerate(channels):
-            payload = channel_scalers.get(name)
-            if not isinstance(payload, dict) or len(payload) == 0:
-                continue
-            scaler = ScalerFactory.from_dict(payload)
-            out[:, i : i + 1] = scaler.transform(out[:, i : i + 1]).astype(np.float32)
-        return out.astype(np.float32)
+    def transform_coord_features(
+        self,
+        rows: np.ndarray,
+        channels: list[str],
+        *,
+        distance_transform_cfg: dict[str, Any] | None = None,
+    ) -> np.ndarray:
+        out, _, _ = apply_coord_feature_scaling(
+            rows,
+            channels=channels,
+            coord_feature_scaler_artifact=self.coord_feature_scaler,
+            distance_transform_cfg=distance_transform_cfg,
+        )
+        return out
 
     def require_coord_feature_scaling_enabled(self) -> None:
         raw = dict(self.coord_feature_scaler or {})
@@ -159,14 +174,21 @@ class InferenceFeatureBuilder:
         )
         scaler_cfg = dict(self.coord_feature_scaler or {})
         has_coord_feature_scaler = bool(dict(scaler_cfg.get("channels", {})))
-        rows = self._rows_from_pack(pack=dict(self.coord_feature_pack or {}), channels=channels, h=h, w=w)
+        use_runtime_geometry = bool(getattr(self.geometry_provider, "supports_geom_param", False))
+        rows = None
+        if not use_runtime_geometry:
+            rows = self._rows_from_pack(pack=dict(self.coord_feature_pack or {}), channels=channels, h=h, w=w)
         if rows is not None:
             if (not has_coord_feature_scaler) and {"x", "y"}.issubset(set(channels)):
                 idx_x = channels.index("x")
                 idx_y = channels.index("y")
                 rows[:, [idx_x, idx_y]] = self.transform_coord(rows[:, [idx_x, idx_y]])
             rows, _ = apply_distance_transform(rows, channels=channels, cfg=distance_transform_cfg)
-            return self.transform_coord_features(rows, channels)
+            return self.transform_coord_features(
+                rows,
+                channels,
+                distance_transform_cfg=distance_transform_cfg,
+            )
         return self.build_coord_feature_rows(geom, channels)
 
     @staticmethod

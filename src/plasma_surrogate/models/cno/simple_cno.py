@@ -81,6 +81,7 @@ class CNOBaseline(_TorchGridFieldBaseline):
 
         torch = self.torch
         nn = torch.nn
+        output_head_group_options = dict(getattr(self, "output_head_group_options", {}) or {})
 
         class _CNOBlock(nn.Module):
             def __init__(self, width: int, kernel_size: int, padding: int, dropout: float) -> None:
@@ -137,6 +138,7 @@ class CNOBaseline(_TorchGridFieldBaseline):
                         in_channels=width,
                         output_keys=output_keys,
                         target_groups=target_groups,
+                        group_options=output_head_group_options,
                         with_rho_eff_head=with_rho_eff_head,
                     )
                 else:

@@ -39,15 +39,15 @@ def save_leaderboard_metric_tables(
     leaderboard_path = store.save_csv(
         "leaderboard.csv",
         core_header,
-        [[row.get(h, 0.0) for h in core_header] for row in (core_rows or leaderboard)],
+        [[row.get(h, "") for h in core_header] for row in (core_rows or leaderboard)],
     )
-    store.save_csv("core_metrics.csv", core_header, [[row.get(h, 0.0) for h in core_header] for row in core_rows])
+    store.save_csv("core_metrics.csv", core_header, [[row.get(h, "") for h in core_header] for row in core_rows])
     if diagnostic_rows:
         diagnostic_header = sorted({key for row in diagnostic_rows for key in row.keys()})
         store.save_csv(
             "diagnostics/diagnostics.csv",
             diagnostic_header,
-            [[row.get(h, 0.0) for h in diagnostic_header] for row in diagnostic_rows],
+            [[row.get(h, "") for h in diagnostic_header] for row in diagnostic_rows],
         )
     return leaderboard_path
 

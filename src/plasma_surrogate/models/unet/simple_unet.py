@@ -262,6 +262,7 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                         in_channels=base_ch,
                         output_keys=list(self_output_keys),
                         target_groups=dict(self_target_groups),
+                        group_options=dict(self_output_head_group_options),
                         with_rho_eff_head=self.with_rho_eff_head,
                     )
 
@@ -309,6 +310,7 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         self.output_heads_mode = output_heads_mode
         self_output_keys = list(self.output_keys)
         self_target_groups = dict(getattr(self, "target_groups", {}) or {})
+        self_output_head_group_options = dict(getattr(self, "output_head_group_options", {}) or {})
         self.net = _ConvUNetModel(
             in_ch=in_channels,
             base_ch=base_channels,

@@ -17,13 +17,68 @@ from plasma_surrogate.core.input_modes import (
 )
 from plasma_surrogate.core.model_families import POD_DEEPONET_FAMILY_MODELS
 from plasma_surrogate.core.vector_pack import load_vector_from_pack
+from plasma_surrogate.features.structure_feature_registry import (
+    GEOM_V1_MAINLINE_CHANNELS,
+    validate_coord_feature_channels,
+)
 from plasma_surrogate.models.deeponet.pod_deeponet_torch import normalize_pod_deeponet_model_cfg
+from plasma_surrogate.train.selection import SPATIAL_SELECTION_MODE, resolve_spatial_selection_config
 from plasma_surrogate.train.target_contracts import validate_mainline_selection_contract
 
 
 def _normalize_profile_name(value: Any, *, default: str = "none") -> str:
     text = str(value if value is not None else default).strip().lower()
     return text if text else default
+
+
+def _load_descriptor_input_from_pack(
+    *,
+    pack: dict[str, Any] | None,
+) -> tuple[np.ndarray, str]:
+    payload = dict(pack or {})
+    if "vectors" not in payload:
+        vector, _ = load_vector_from_pack(
+            pack=payload,
+            pack_name="structure_descriptor_pack",
+        )
+        return vector.astype(np.float32), "static_provider_geometry"
+
+    rows = np.asarray(payload["vectors"], dtype=np.float32)
+    if rows.ndim != 2 or int(rows.shape[0]) < 1 or int(rows.shape[1]) < 1:
+        raise ValueError(
+            "structure_descriptor_pack vectors must be a non-empty [N,D] matrix; "
+            f"got shape={rows.shape}"
+        )
+    if not np.all(np.isfinite(rows)):
+        raise ValueError("structure_descriptor_pack vectors must contain finite values")
+    if "vector" in payload:
+        static_vector, _ = load_vector_from_pack(
+            pack=payload,
+            pack_name="structure_descriptor_pack",
+        )
+        if int(static_vector.shape[0]) != int(rows.shape[1]):
+            raise ValueError(
+                "structure_descriptor_pack vector/vectors dimension mismatch: "
+                f"vector={static_vector.shape[0]}, vectors={rows.shape[1]}"
+            )
+    if "feature_names" in payload:
+        names = [str(v) for v in np.asarray(payload["feature_names"]).reshape(-1).tolist()]
+        if names and len(names) != int(rows.shape[1]):
+            raise ValueError(
+                "structure_descriptor_pack feature_names length mismatch: "
+                f"len(names)={len(names)}, dim={int(rows.shape[1])}"
+            )
+    if "case_ids" not in payload:
+        raise ValueError("case-specific structure_descriptor_pack must include case_ids")
+    case_ids = [str(v) for v in np.asarray(payload["case_ids"]).reshape(-1).tolist()]
+    if len(case_ids) != int(rows.shape[0]):
+        raise ValueError(
+            "structure_descriptor_pack case_ids length mismatch: "
+            f"len(case_ids)={len(case_ids)}, rows={int(rows.shape[0])}"
+        )
+    if len(set(case_ids)) != len(case_ids):
+        raise ValueError("structure_descriptor_pack case_ids must be unique")
+    return rows.astype(np.float32), "case_specific"
 
 
 def resolve_pod_descriptor_and_latent_contract(
@@ -48,14 +103,13 @@ def resolve_pod_descriptor_and_latent_contract(
     if mode == TABLE_ONLY:
         return None, meta
 
-    descriptor_vector: np.ndarray | None = None
+    descriptor_input: np.ndarray | None = None
     descriptor_dim = 0
     if desc_profile != "none":
-        descriptor_vector, _ = load_vector_from_pack(
-            pack=descriptor_pack,
-            pack_name="structure_descriptor_pack",
-        )
-        descriptor_dim = int(descriptor_vector.shape[0])
+        descriptor_input, descriptor_scope = _load_descriptor_input_from_pack(pack=descriptor_pack)
+        descriptor_dim = int(descriptor_input.shape[-1])
+    else:
+        descriptor_scope = "none"
 
     latent_hook = False
     if lat_profile != "none":
@@ -65,11 +119,12 @@ def resolve_pod_descriptor_and_latent_contract(
         )
         latent_hook = True
 
-    return descriptor_vector, {
+    return descriptor_input, {
         DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(descriptor_dim),
         DEEPONET_POD_DESCRIPTOR_PROFILE_EFFECTIVE_KEY: str(desc_profile),
         DEEPONET_POD_LATENT_PROFILE_EFFECTIVE_KEY: str(lat_profile),
         DEEPONET_POD_LATENT_HOOK_EFFECTIVE_KEY: bool(latent_hook),
+        "deeponet_pod_descriptor_scope_effective": str(descriptor_scope),
     }
 
 
@@ -103,8 +158,13 @@ def validate_pod_deeponet_experimental_contract(
         raise ValueError(f"{cfg_prefix}.model_cfg.basis.per_var must be true")
     center = bool(basis_cfg.get("center", True))
     selection_mode = str(dict(selection_cfg or {}).get("mode", "best_val_allvars_balance")).strip().lower()
-    if selection_mode not in {"best_val_allvars_balance", "best_val_loss"}:
-        raise ValueError(f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, best_val_loss")
+    if selection_mode not in {"best_val_allvars_balance", SPATIAL_SELECTION_MODE, "best_val_loss"}:
+        raise ValueError(
+            f"{cfg_prefix}.selection.mode must be one of: best_val_allvars_balance, "
+            "best_val_spatial_objective, best_val_loss"
+        )
+    if selection_mode == SPATIAL_SELECTION_MODE:
+        resolve_spatial_selection_config(selection_cfg)
     return {
         "rank": int(rank),
         "fit_scope": fit_scope,
@@ -187,10 +247,12 @@ def validate_deeponet_mainline_contract(
         raise ValueError(f"{cfg_prefix}.target_vars must match allvars order: expected={expected}, got={target_vars}")
     if str(input_features_mode).strip().lower() != "geom_feature_pack":
         raise ValueError(f"{cfg_prefix}.input_features.mode must be geom_feature_pack for mainline")
-    required_channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
-    if [str(v) for v in list(input_feature_channels)] != required_channels:
+    required_channels = list(GEOM_V1_MAINLINE_CHANNELS)
+    channels = list(validate_coord_feature_channels(input_feature_channels))
+    if channels[: len(required_channels)] != required_channels:
         raise ValueError(
-            f"{cfg_prefix}.input_features.features must be {required_channels} for mainline; got={input_feature_channels}"
+            f"{cfg_prefix}.input_features.features must start with the ordered mainline channels "
+            f"{required_channels}; additional registered structure channels are allowed; got={channels}"
         )
     input_features_cfg = dict(deeponet_cfg.get("input_features", {}))
     distance_transform_cfg = dict(input_features_cfg.get("distance_transform", {}))
@@ -207,11 +269,17 @@ def validate_deeponet_mainline_contract(
     if trunk_mode != "geom_feature_pack":
         raise ValueError(f"{cfg_prefix}.model_cfg.trunk_input_mode must be geom_feature_pack for mainline")
     branch_mode = str(model_cfg.get("branch_mode", "moments")).strip().lower()
-    if branch_mode != "cond_only":
-        raise ValueError(f"{cfg_prefix}.model_cfg.branch_mode must be cond_only for mainline")
+    if branch_mode not in {"cond_only", "set_mlp_pool"}:
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch_mode must be one of: cond_only, set_mlp_pool"
+        )
     sensor_pool_mode = str(model_cfg.get("sensor_pool_mode", "moments")).strip().lower()
-    if sensor_pool_mode != "moments":
-        raise ValueError(f"{cfg_prefix}.model_cfg.sensor_pool_mode must be moments for cond_only mainline")
+    expected_pool_mode = "moments" if branch_mode == "cond_only" else "set_mlp_pool"
+    if sensor_pool_mode != expected_pool_mode:
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.sensor_pool_mode must be {expected_pool_mode} "
+            f"when branch_mode={branch_mode}"
+        )
     output_path_cfg = dict(model_cfg.get("output_path", {}))
     output_path_mode = str(output_path_cfg.get("mode", "dot")).strip().lower()
     if output_path_mode not in {"dot", "fused"}:

@@ -23,6 +23,11 @@ runtime target value transforms, scaler type, fit scope, and clipping. The
 resolved contract is written to scaler artifacts and loaded through
 `TransformBundle`.
 
+Clipping modes are `none`, train-only `quantile`, and explicit
+`physical_bounds`. Prefer `physical_bounds` when low-power, off-state, or other
+rare physical regimes are meaningful; quantile clipping intentionally removes
+the clipped tails from both training and inverse prediction.
+
 `dataset.targets[]` describes how to read raw fields and attach metadata. It
 does not replace preprocessing target transform config.
 
@@ -54,3 +59,7 @@ requires a concrete feature profile.
 - Descriptor and latent profiles are optional lane metadata, not required
   product runtime keys.
 - Missing required feature artifacts should fail before model construction.
+- `smooth_structure_v1` is the order-invariant grid default when structure
+  imprinting is a risk. It uses coordinates, plasma mask, signed distance,
+  boundary proximity, and union-of-solids proximity, and excludes raw normals,
+  curvature, and nearest/second-part summaries.

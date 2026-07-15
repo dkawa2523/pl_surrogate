@@ -18,7 +18,9 @@ def _safe_logit(prob: float) -> float:
 class DeepONetPlasmaOperatorTorch:
     """Lightweight DeepONet-like operator with branch/trunk factorization."""
 
-    model_type = "deeponet_plasma_torch"
+    model_type = "deeponet_plasma"
+    requires_spatial_features = True
+    requires_scaled_spatial_features = False
 
     def __init__(
         self,
@@ -31,6 +33,7 @@ class DeepONetPlasmaOperatorTorch:
         query_indices: np.ndarray | None = None,
         flatten_order: str = "C",
         sensor_feature_names: list[str] | None = None,
+        query_feature_names: list[str] | None = None,
         trunk_input_mode: str = "geom_feature_pack",
         sensor_pool_mode: str = "moments",
         sensor_embed_dim: int = 32,
@@ -69,8 +72,23 @@ class DeepONetPlasmaOperatorTorch:
         self.hidden_dim = int(hidden_dim)
         self.n_points = int(self.grid_shape[0] * self.grid_shape[1])
         self.sensor_feature_names = list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"])
+        # Use the same public channel contract as the other spatial models.  The
+        # rows themselves are deliberately not checkpointed: inference rebuilds
+        # them from the run bundle's coordinate pack and transform artifacts.
+        self.input_feature_channels = list(self.sensor_feature_names)
         self.sensor_feature_dim = int(max(len(self.sensor_feature_names), 1))
-        self.query_feature_names = ["mask_plasma", "distance_signed", "distance_any"]
+        derived_query_features = [name for name in self.sensor_feature_names if name not in {"x", "y"}]
+        self.query_feature_names = list(
+            derived_query_features if query_feature_names is None else query_feature_names
+        )
+        missing_query_features = [
+            name for name in self.query_feature_names if name not in set(self.sensor_feature_names)
+        ]
+        if missing_query_features:
+            raise ValueError(
+                "query_feature_names must be a subset of sensor_feature_names; "
+                f"missing={missing_query_features}"
+            )
         self.trunk_input_mode = str(trunk_input_mode).strip().lower()
         if self.trunk_input_mode != "geom_feature_pack":
             raise ValueError("trunk_input_mode must be geom_feature_pack")
@@ -398,21 +416,79 @@ class DeepONetPlasmaOperatorTorch:
         if hasattr(op, "to"):
             op.to(self.device)
 
-    def set_static_spatial_features(self, rows: np.ndarray, *, channels: list[str]) -> None:
+    def set_static_spatial_features(
+        self,
+        rows: np.ndarray,
+        *,
+        channels: list[str] | None = None,
+    ) -> None:
         arr = np.asarray(rows, dtype=np.float32)
+        effective_channels = list(self.input_feature_channels if channels is None else channels)
         if arr.ndim != 2:
             raise ValueError("DeepONet static feature rows must be rank-2 [n_points, n_channels]")
         if int(arr.shape[0]) != int(self.n_points):
             raise ValueError(
                 f"DeepONet static feature rows n_points mismatch: expected={self.n_points}, got={arr.shape[0]}"
             )
-        if len(channels) != int(arr.shape[1]):
+        if len(effective_channels) != int(arr.shape[1]):
             raise ValueError(
                 "DeepONet static feature rows channel count mismatch: "
-                f"expected={arr.shape[1]} from rows, got={len(channels)} channels"
+                f"expected={arr.shape[1]} from rows, got={len(effective_channels)} channels"
             )
         self._static_feature_rows = arr.copy()
-        self._static_feature_channels = [str(v) for v in channels]
+        self._static_feature_channels = [str(v) for v in effective_channels]
+
+    def _spatial_feature_tensor(
+        self,
+        spatial_features: Any | None,
+        *,
+        batch_size: int,
+        dtype: Any,
+        device: Any,
+    ) -> tuple[Any | None, list[str]]:
+        raw = self._static_feature_rows if spatial_features is None else spatial_features
+        channels = (
+            list(self._static_feature_channels)
+            if spatial_features is None
+            else list(self.input_feature_channels)
+        )
+        if raw is None or not channels:
+            return None, []
+        if self._torch.is_tensor(raw):
+            rows = raw.to(device=device, dtype=dtype)
+        else:
+            rows = self._torch.as_tensor(np.asarray(raw, dtype=np.float32), dtype=dtype, device=device)
+        h, w = self.grid_shape
+        n_points = int(h * w)
+        if rows.ndim == 2:
+            rows = rows[None, ...]
+        elif rows.ndim == 3 and tuple(int(v) for v in rows.shape[:2]) == (h, w):
+            rows = rows.reshape(1, n_points, int(rows.shape[-1]))
+        elif rows.ndim == 4 and tuple(int(v) for v in rows.shape[1:3]) == (h, w):
+            rows = rows.reshape(int(rows.shape[0]), n_points, int(rows.shape[-1]))
+        elif rows.ndim != 3:
+            raise ValueError(
+                "DeepONet spatial features must be [N,C], [H,W,C], [B,N,C], or [B,H,W,C]; "
+                f"got shape={tuple(int(v) for v in rows.shape)}"
+            )
+        if int(rows.shape[1]) != n_points:
+            raise ValueError(
+                "DeepONet spatial feature point count mismatch: "
+                f"expected={n_points}, got={int(rows.shape[1])}"
+            )
+        if int(rows.shape[2]) != len(channels):
+            raise ValueError(
+                "DeepONet spatial feature channel count mismatch: "
+                f"expected={len(channels)}, got={int(rows.shape[2])}"
+            )
+        if int(rows.shape[0]) == 1 and int(batch_size) > 1:
+            rows = rows.expand(int(batch_size), -1, -1)
+        elif int(rows.shape[0]) != int(batch_size):
+            raise ValueError(
+                "DeepONet spatial feature batch mismatch: "
+                f"expected=1 or {int(batch_size)}, got={int(rows.shape[0])}"
+            )
+        return rows, channels
 
     @property
     def poisson_head(self) -> Any | None:
@@ -612,31 +688,56 @@ class DeepONetPlasmaOperatorTorch:
             result[key] = out[:, :, i : i + 1]
         return result
 
-    def predict_fields_torch(self, cond_t, geom_ctx: Any) -> dict[str, Any]:
+    def predict_fields_torch(
+        self,
+        cond_t,
+        geom_ctx: Any | None,
+        spatial_features: Any | None = None,
+    ) -> dict[str, Any]:
         torch = self._torch
         cond_t = cond_t.to(self.device)
         bsz = int(cond_t.shape[0])
-        coord = torch.as_tensor(
-            np.asarray(geom_ctx.coord_grid, dtype=np.float32).reshape(2, -1).T,
+        rows, spatial_channels = self._spatial_feature_tensor(
+            spatial_features,
+            batch_size=bsz,
             dtype=torch.float32,
             device=self.device,
         )
-        x_q = coord[None, ...].expand(bsz, -1, -1)
+        if geom_ctx is not None:
+            coord = torch.as_tensor(
+                np.asarray(geom_ctx.coord_grid, dtype=np.float32).reshape(2, -1).T,
+                dtype=torch.float32,
+                device=self.device,
+            )
+            x_q = coord[None, ...].expand(bsz, -1, -1)
+        else:
+            if rows is None or not spatial_channels:
+                raise ValueError(
+                    "geom_ctx is required unless preprocessed DeepONet spatial features are available"
+                )
+            ch_pos_initial = {name: i for i, name in enumerate(spatial_channels)}
+            missing_coord = [name for name in ("x", "y") if name not in ch_pos_initial]
+            if missing_coord:
+                raise ValueError(
+                    "DeepONet spatial features must contain x/y when geom_ctx is absent; "
+                    f"missing={missing_coord}"
+                )
+            x_q = rows[:, :, [ch_pos_initial["x"], ch_pos_initial["y"]]]
+            coord = x_q[0]
         query_idx_np = np.arange(int(coord.shape[0]), dtype=np.int64)
         v_s = None
         q_f = None
         sensor_idx_np: np.ndarray | None = None
         x_s = None
-        if self._static_feature_rows is not None and self._static_feature_channels:
-            rows = self._torch.as_tensor(self._static_feature_rows, dtype=coord.dtype, device=coord.device)
-            ch_pos = {name: i for i, name in enumerate(self._static_feature_channels)}
+        if rows is not None and spatial_channels:
+            ch_pos = {name: i for i, name in enumerate(spatial_channels)}
             if self.trunk_fourier_mode == "symmetric" and "x" in ch_pos and "y" in ch_pos:
-                xy = rows[:, [int(ch_pos["x"]), int(ch_pos["y"])]]
-                xy_min = xy.amin(dim=0, keepdim=True)
-                xy_max = xy.amax(dim=0, keepdim=True)
+                xy = rows[:, :, [int(ch_pos["x"]), int(ch_pos["y"])]]
+                xy_min = xy.amin(dim=1, keepdim=True)
+                xy_max = xy.amax(dim=1, keepdim=True)
                 xy_span = self._torch.clamp(xy_max - xy_min, min=1.0e-6)
                 xy_norm = (xy - xy_min) / xy_span
-                x_q = xy_norm[None, ...].expand(int(bsz), -1, -1)
+                x_q = xy_norm
             sensor_pos = [ch_pos[name] for name in self.sensor_feature_names if name in ch_pos]
             missing_sensor_names = [name for name in self.sensor_feature_names if name not in ch_pos]
             query_pos = [ch_pos[name] for name in self.query_feature_names if name in ch_pos]
@@ -656,8 +757,8 @@ class DeepONetPlasmaOperatorTorch:
                         f"expected={self.sensor_feature_dim}, got={len(sensor_pos)}"
                     )
                 sensor_idx = torch.as_tensor(sensor_idx_np, dtype=torch.int64, device=coord.device)
-                sampled = rows[:, sensor_pos][sensor_idx]
-                v_s = sampled[None, ...].expand(int(bsz), -1, -1)
+                sampled = rows[:, sensor_idx, :][:, :, sensor_pos]
+                v_s = sampled
             self._handle_missing_geom_features(
                 role="static_feature_rows.query",
                 missing_names=missing_query_names,
@@ -667,13 +768,16 @@ class DeepONetPlasmaOperatorTorch:
                     "static_feature_rows.query feature dim mismatch: "
                     f"expected={len(self.query_feature_names)}, got={len(query_pos)}"
                 )
-            q = rows[:, query_pos]
-            q_f = q[None, ...].expand(int(bsz), -1, -1)
+            q_f = rows[:, :, query_pos]
         if self.branch_mode != "cond_only" and sensor_idx_np is None:
             sensor_idx_np = np.asarray(self.sensor_indices, dtype=np.int64).reshape(-1)
             sensor_idx = torch.as_tensor(sensor_idx_np, dtype=torch.int64, device=coord.device)
             x_s = x_q[:, sensor_idx, :]
         if v_s is None and self.branch_mode != "cond_only" and sensor_idx_np is not None:
+            if geom_ctx is None:
+                raise ValueError(
+                    "DeepONet sensor values require geom_ctx when they are absent from spatial features"
+                )
             v_s = self._sensor_values_from_geom(
                 geom_ctx=geom_ctx,
                 coord_flat=np.asarray(x_q[0].detach().cpu().numpy(), dtype=np.float32),
@@ -683,6 +787,10 @@ class DeepONetPlasmaOperatorTorch:
                 device=coord.device,
             )
         if q_f is None:
+            if geom_ctx is None:
+                raise ValueError(
+                    "DeepONet query features require geom_ctx when they are absent from spatial features"
+                )
             q_f = self._query_values_from_geom(
                 geom_ctx=geom_ctx,
                 coord_flat=np.asarray(x_q[0].detach().cpu().numpy(), dtype=np.float32),
@@ -698,17 +806,25 @@ class DeepONetPlasmaOperatorTorch:
             out[key] = val.permute(0, 2, 1).reshape(bsz, 1, h, w)
         return out
 
-    def predict_fields(self, cond_vec: np.ndarray, geom_ctx: Any | None = None, cache_key: str = "poisson_head_v1") -> dict[str, np.ndarray]:
+    def predict_fields(
+        self,
+        cond_vec: np.ndarray,
+        geom_ctx: Any | None = None,
+        cache_key: str = "poisson_head_v1",
+        spatial_features: Any | None = None,
+    ) -> dict[str, np.ndarray]:
         del cache_key
         torch = self._torch
         cond_t = torch.as_tensor(np.asarray(cond_vec, dtype=np.float32), dtype=torch.float32, device=self.device)
         if cond_t.ndim == 1:
             cond_t = cond_t[None, :]
-        if geom_ctx is None:
-            raise ValueError("geom_ctx is required for DeepONet plasma prediction")
         self.eval()
         with torch.no_grad():
-            pred = self.predict_fields_torch(cond_t, geom_ctx=geom_ctx)
+            pred = self.predict_fields_torch(
+                cond_t,
+                geom_ctx=geom_ctx,
+                spatial_features=spatial_features,
+            )
         return {k: v.detach().cpu().numpy().astype(np.float32) for k, v in pred.items()}
 
     def predict_phi(self, rho_eff, cond_vec, geom_ctx: Any, refine_iters: int = 0):
@@ -733,6 +849,7 @@ class DeepONetPlasmaOperatorTorch:
             "sensor_indices": [int(v) for v in self.sensor_indices.tolist()],
             "query_indices": [int(v) for v in self.query_indices.tolist()],
             "sensor_feature_names": list(self.sensor_feature_names),
+            "input_feature_channels": list(self.input_feature_channels),
             "sensor_feature_dim": int(self.sensor_feature_dim),
             "trunk_input_mode": str(self.trunk_input_mode),
             "trunk_fourier_n_freq": int(self.trunk_fourier_n_freq),

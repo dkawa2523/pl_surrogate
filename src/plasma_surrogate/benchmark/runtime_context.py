@@ -24,6 +24,7 @@ from plasma_surrogate.core.run_bundle import RunBundle, RunBundleLoader, ensure_
 from plasma_surrogate.data.geometry_provider import GeometryProviderLike, build_geometry_provider
 from plasma_surrogate.features.geometry_feature_store import GeometryFeatureStore, hash_json
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
+from plasma_surrogate.preprocessing.spatial_features import resolve_shared_distance_transform_cfg
 
 
 def _write_benchmark_run_metadata(
@@ -176,8 +177,10 @@ def build_benchmark_data_context(
         geom_ref={"geom_id": "default"},
     )
     axis_harmonics = int(cfg.get("preprocessing", {}).get("axis_schema", {}).get("harmonics", 1))
+    effective_split_cfg = dict(split_cfg or {})
+    effective_split_cfg.update({"seed": split_seed, "ratios": list(split_ratios), "interp_mode": interp_mode})
     pre_cfg: dict[str, Any] = {
-        "split": {"seed": split_seed, "ratios": list(split_ratios), "interp_mode": interp_mode},
+        "split": effective_split_cfg,
         "cond_order": cond_order,
         "axis_schema": {
             "mode": requested_axis_mode,
@@ -234,6 +237,13 @@ def build_benchmark_data_context(
         output_root / "preprocessing",
         runtime_input_mode_meta=input_mode_meta,
         runtime_cfg=dict(cfg.get("runtime", {})),
+        coord_distance_transform_cfg=resolve_shared_distance_transform_cfg(
+            train_cfg=dict(cfg.get("train", {})),
+            model_names=[str(name) for name in profile_lock["models"]],
+            scaling_enabled=bool(
+                dict(dict(pre_cfg.get("coord_features", {})).get("scaling", {})).get("enabled", False)
+            ),
+        ),
     )
     pre.run(
         cases=dataset.cases,

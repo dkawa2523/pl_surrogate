@@ -12,6 +12,7 @@ from plasma_surrogate.core.input_modes import (
     GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY,
 )
 from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
+from plasma_surrogate.train.grid_contracts import resolve_geom_deeponet_siren_descriptor_contract
 from plasma_surrogate.train.trainer import TrainOutput, Trainer
 
 
@@ -139,3 +140,22 @@ def test_geom_deeponet_siren_accepts_hybrid_descriptor_contract(
     assert set(out.metrics.keys()) == set(ctx.y_vars)
     assert int(out.extra_artifacts[GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY]) == 4
     assert out.extra_artifacts[GEOM_DEEPONET_SIREN_DESCRIPTOR_PROFILE_EFFECTIVE_KEY] == "struct_desc_v1"
+
+
+def test_geom_deeponet_siren_contract_preserves_case_descriptor_rows() -> None:
+    vectors = np.arange(24, dtype=np.float32).reshape(6, 4)
+    case_ids = np.asarray([f"case_{idx}" for idx in range(6)])
+    resolved, meta = resolve_geom_deeponet_siren_descriptor_contract(
+        input_mode="table_plus_structure",
+        adapter_mode="hybrid_pack_descriptor",
+        descriptor_profile="struct_desc_v2",
+        descriptor_pack={
+            "vectors": vectors,
+            "case_ids": case_ids,
+            "feature_names": np.asarray(["d0", "d1", "d2", "d3"]),
+        },
+    )
+
+    np.testing.assert_array_equal(resolved, vectors)
+    assert meta["descriptor_scope_effective"] == "case_specific"
+    assert meta[GEOM_DEEPONET_SIREN_DESCRIPTOR_DIM_EFFECTIVE_KEY] == 4

@@ -96,6 +96,14 @@ def test_resolve_loss_protocol_v2_without_role_schema_uses_global_mask_only():
     assert resolved["group_weighting"] == {"mode": "none"}
 
 
+def test_v2_rejects_unknown_supervised_mask_instead_of_falling_back_to_all_pixels() -> None:
+    with pytest.raises(ValueError, match="supervised.mask"):
+        resolve_loss_protocol(
+            {"protocol": "plasma_surrogate_v2", "supervised": {"mask": "plamsa_only"}},
+            target_role_schema=_role_schema(),
+        )
+
+
 @pytest.mark.parametrize(
     "deprecated_key",
     REMOVED_SUPERVISED_KEYS,
@@ -120,12 +128,53 @@ def test_resolve_loss_protocol_v2_accepts_group_weighting_override():
     assert resolved["group_weighting"] == {"mode": "uniform_by_group"}
 
 
+def test_resolve_loss_protocol_v2_accepts_weighted_group_weighting():
+    resolved = resolve_loss_protocol(
+        {
+            "protocol": "plasma_surrogate_v2",
+            "group_weighting": {
+                "mode": "weighted_by_group",
+                "weights": {"density": 1.5, "temperature": 1.0, "electrostatic": 1.0},
+            },
+        },
+        target_role_schema=_role_schema(),
+    )
+
+    assert resolved["group_weighting"] == {
+        "mode": "weighted_by_group",
+        "weights": {"density": 1.5, "temperature": 1.0, "electrostatic": 1.0},
+    }
+
+
 def test_resolve_loss_protocol_v2_rejects_unknown_group_weighting_mode():
     with pytest.raises(ValueError, match="group_weighting.mode"):
         resolve_loss_protocol(
             {
                 "protocol": "plasma_surrogate_v2",
                 "group_weighting": {"mode": "positive_penalty"},
+            },
+            target_role_schema=_role_schema(),
+        )
+
+
+def test_resolve_loss_protocol_v2_rejects_group_weights_without_weighted_mode():
+    with pytest.raises(ValueError, match="weighted_by_group"):
+        resolve_loss_protocol(
+            {
+                "protocol": "plasma_surrogate_v2",
+                "group_weighting": {"mode": "uniform_by_group", "weights": {"density": 1.0}},
+            },
+            target_role_schema=_role_schema(),
+        )
+
+
+@pytest.mark.parametrize("bad_weight", [0.0, -1.0, float("inf"), float("nan")])
+def test_resolve_loss_protocol_v2_rejects_bad_group_weight(bad_weight):
+    with pytest.raises(ValueError, match="group_weighting.weights"):
+        resolve_loss_protocol(
+            {
+                "protocol": "plasma_surrogate_v2",
+                "group_weighting": {"mode": "weighted_by_group", "weights": {"density": bad_weight}},
             },
             target_role_schema=_role_schema(),
         )

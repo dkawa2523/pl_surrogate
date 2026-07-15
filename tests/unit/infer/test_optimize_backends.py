@@ -71,6 +71,62 @@ def test_optimize_runner_random_backend_reproducible():
     assert a.objective_mode == "weighted_sum"
 
 
+def test_optimize_runner_random_backend_evaluates_initial_cond_first():
+    runner = OptimizeRunner(_FakeEngine())
+    out = runner.run(
+        space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+        geom_space={},
+        n_trials=3,
+        geom_ref={"geom_id": "default"},
+        seed=7,
+        backend="random",
+        backend_cfg={"initial_cond": {"c0": 0.25, "c1": 0.75}},
+    )
+
+    assert out.trials[0]["cond"] == {"c0": 0.25, "c1": 0.75}
+    assert out.backend_cfg["effective_sampler"] == "random"
+
+
+def test_optimize_runner_rejects_unknown_optuna_sampler():
+    pytest.importorskip("optuna")
+    runner = OptimizeRunner(_FakeEngine())
+    with pytest.raises(ValueError, match="sampler must be one of"):
+        runner.run(
+            space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+            geom_space={},
+            n_trials=2,
+            geom_ref={"geom_id": "default"},
+            backend="optuna",
+            backend_cfg={"sampler": "not-cmaes"},
+        )
+
+
+def test_optimize_runner_cmaes_sampler_smoke():
+    pytest.importorskip("optuna")
+    pytest.importorskip("cmaes")
+    runner = OptimizeRunner(_FakeEngine())
+    initial = {"c0": 0.5, "c1": 0.5}
+    out = runner.run(
+        space={"c0": (0.0, 1.0), "c1": (0.0, 1.0)},
+        geom_space={},
+        n_trials=10,
+        geom_ref={"geom_id": "default"},
+        seed=7,
+        backend="optuna",
+        backend_cfg={
+            "sampler": "cmaes",
+            "initial_cond": initial,
+            "x0": initial,
+            "sigma0": 0.25,
+            "popsize": 4,
+        },
+    )
+
+    assert len(out.trials) == 10
+    assert out.trials[0]["cond"] == initial
+    assert out.backend_cfg["effective_sampler"] == "cmaes"
+
+
 def test_optimize_runner_unknown_backend_raises():
     runner = OptimizeRunner(_FakeEngine())
     with pytest.raises(ValueError, match="Unsupported optimize backend"):

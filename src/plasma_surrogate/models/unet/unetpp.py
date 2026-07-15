@@ -41,6 +41,7 @@ def _build_unetpp_modules(
     head_mode: str,
     output_keys: list[str],
     target_groups: dict[str, Any],
+    group_options: dict[str, Any] | None = None,
 ):
     class _DoubleConv(nn.Module):
         def __init__(self, in_channels: int, out_channels: int):
@@ -111,6 +112,7 @@ def _build_unetpp_modules(
                     in_channels=base_ch,
                     output_keys=list(output_keys),
                     target_groups=dict(target_groups),
+                    group_options=dict(group_options or {}),
                     with_rho_eff_head=bool(with_rho_eff_head),
                 )
             else:
@@ -292,6 +294,7 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
             head_mode=str(self.output_heads_mode),
             output_keys=list(self.output_keys),
             target_groups=dict(self.target_groups),
+            group_options=dict(getattr(self, "output_head_group_options", {}) or {}),
         )
         self._ensure_net_device()
         self.net.train()

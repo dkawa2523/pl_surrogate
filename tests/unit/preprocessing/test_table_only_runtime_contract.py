@@ -40,6 +40,53 @@ def test_table_only_rejects_channels_from_profile(tmp_path: Path) -> None:
         )
 
 
+def test_table_only_allows_explicit_supervision_only_profile(tmp_path: Path) -> None:
+    pre = PreprocessRunner(
+        cfg={
+            "coord_features": {
+                "enabled": True,
+                "usage": "supervision_only",
+                "channels_from_profile": "part_lite_v1",
+            }
+        },
+        output_dir=tmp_path / "pre",
+        runtime_cfg={
+            "input_mode": "table_only",
+            "structure": {
+                "feature_profile": "none",
+                "descriptor_profile": "none",
+                "latent_profile": "none",
+            },
+        },
+    )
+
+    channels = pre._resolve_coord_feature_channels(  # noqa: SLF001
+        pre.cfg["coord_features"]
+    )
+    assert channels == list(resolve_spatial_channels_for_feature_profile("part_lite_v1"))
+
+
+def test_table_only_supervision_only_usage_requires_enabled_pack(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="requires enabled=true"):
+        PreprocessRunner(
+            cfg={
+                "coord_features": {
+                    "usage": "supervision_only",
+                    "channels_from_profile": "part_lite_v1",
+                }
+            },
+            output_dir=tmp_path / "pre",
+            runtime_cfg={
+                "input_mode": "table_only",
+                "structure": {
+                    "feature_profile": "none",
+                    "descriptor_profile": "none",
+                    "latent_profile": "none",
+                },
+            },
+        )
+
+
 def test_table_only_populates_effective_metadata(tmp_path: Path) -> None:
     pre = PreprocessRunner(
         cfg={},

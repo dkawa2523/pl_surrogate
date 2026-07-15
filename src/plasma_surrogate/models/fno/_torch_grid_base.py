@@ -15,6 +15,9 @@ from plasma_surrogate.models.heads.role_grouped import (
 class _TorchGridFieldBaseline:
     """Shared wrapper for torch-based grid field models with spatial features."""
 
+    requires_spatial_features = True
+    requires_scaled_spatial_features = False
+
     def __init__(
         self,
         *,

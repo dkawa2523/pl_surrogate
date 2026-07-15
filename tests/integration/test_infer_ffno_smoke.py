@@ -81,7 +81,10 @@ def test_infer_ffno_smoke(tmp_path: Path, local_skip_enabled: bool) -> None:
                 },
             },
         },
-        "inference": {"single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}}},
+        "inference": {
+            "single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}},
+            "qoi": {"uniformity": {"target": "ne"}},
+        },
     }
     cfg_path = tmp_path / "ffno.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:

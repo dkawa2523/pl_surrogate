@@ -14,6 +14,7 @@ from plasma_surrogate.eval.spatial_metrics import (
     build_spatial_distribution_summary_rows,
     build_spatial_error_by_case_rows,
     build_spatial_error_summary_rows,
+    build_structure_residual_correlation_rows,
 )
 
 
@@ -54,9 +55,13 @@ def write_eval_diagnostics(
     pred_eval: dict[str, Any],
     true_eval: dict[str, Any],
     metric_mask: np.ndarray | None,
+    distance_any: np.ndarray | None = None,
+    distance_signed: np.ndarray | None = None,
     te_idx: np.ndarray,
     target_vars_for_score: list[str],
     region_band_cfg: dict[str, Any],
+    target_transforms: dict[str, Any] | None = None,
+    target_scalers: dict[str, Any] | None = None,
 ) -> None:
     diagnostics_cfg = resolve_eval_diagnostics_cfg(eval_cfg)
     pred_spatial = dict(pred_eval)
@@ -83,6 +88,8 @@ def write_eval_diagnostics(
             true_spatial=true_spatial,
             geom_ctx=geom_ctx,
             metric_mask=metric_mask,
+            distance_any=distance_any,
+            distance_signed=distance_signed,
             wafer_mask=wafer_mask,
             spatial_vars=spatial_vars,
             case_ids=eval_case_ids,
@@ -112,6 +119,8 @@ def write_eval_diagnostics(
         case_ids=eval_case_ids,
         region_by_var=distribution_region_by_var,
         top_fraction=float(distribution_cfg.get("top_fraction", 0.10)),
+        target_transforms=target_transforms,
+        target_scalers=target_scalers,
     )
     distribution_summary_rows = build_spatial_distribution_summary_rows(distribution_case_rows)
     _write_distribution_tables(
@@ -120,6 +129,15 @@ def write_eval_diagnostics(
         case_rows=distribution_case_rows,
         summary_rows=distribution_summary_rows,
     )
+    structure_features = _materialize_eval_structure_features(context=context, te_idx=te_idx)
+    correlation_rows = build_structure_residual_correlation_rows(
+        pred_eval=pred_spatial,
+        true_eval=true_spatial,
+        structure_features=structure_features,
+        mask_plasma=metric_mask,
+        case_ids=eval_case_ids,
+    )
+    _write_structure_residual_correlation_tables(model_dir=model_dir, rows=correlation_rows)
     _plot_worst_distribution_cases(
         distribution_cfg=distribution_cfg,
         distribution_case_rows=distribution_case_rows,
@@ -131,6 +149,68 @@ def write_eval_diagnostics(
     )
 
 
+def _pack_channels(pack: dict[str, Any]) -> list[str]:
+    raw = np.asarray(pack.get("channels", [])).reshape(-1).tolist()
+    return [value.decode("utf-8") if isinstance(value, bytes) else str(value) for value in raw]
+
+
+def _materialize_eval_structure_features(*, context: Any, te_idx: np.ndarray) -> dict[str, np.ndarray]:
+    indices = np.asarray(te_idx, dtype=np.int64).reshape(-1)
+    out: dict[str, np.ndarray] = {}
+    static_pack = dict(getattr(context, "static_spatial_feature_pack", {}) or {})
+    if "data" in static_pack:
+        data = np.asarray(static_pack["data"], dtype=np.float32)
+        for channel_idx, name in enumerate(_pack_channels(static_pack)):
+            out[name] = np.repeat(data[channel_idx][None, ...], len(indices), axis=0)
+    case_pack = dict(getattr(context, "case_structure_feature_pack", {}) or {})
+    if "data" in case_pack:
+        data = np.asarray(case_pack["data"], dtype=np.float32)
+        if indices.size and int(np.max(indices)) >= int(data.shape[0]):
+            raise ValueError("evaluation case index exceeds case structure feature pack")
+        for channel_idx, name in enumerate(_pack_channels(case_pack)):
+            out[name] = data[indices, channel_idx]
+    return out
+
+
+def _write_structure_residual_correlation_tables(*, model_dir: Path, rows: list[dict[str, Any]]) -> None:
+    if not rows:
+        return
+    store = ArtifactStore(model_dir / "eval")
+    header = list(rows[0].keys())
+    store.save_csv(
+        "structure_residual_correlation_by_case.csv",
+        header,
+        [[row.get(key, "") for key in header] for row in rows],
+    )
+    targets = sorted({str(row["var"]) for row in rows})
+    summary_rows: list[dict[str, Any]] = []
+    for target in targets:
+        values = np.asarray(
+            [
+                float(row["absolute_correlation"])
+                for row in rows
+                if str(row["var"]) == target and np.isfinite(float(row["absolute_correlation"]))
+            ],
+            dtype=np.float64,
+        )
+        if values.size:
+            summary_rows.append(
+                {
+                    "var": target,
+                    "absolute_correlation_median": float(np.median(values)),
+                    "absolute_correlation_p90": float(np.percentile(values, 90.0)),
+                    "absolute_correlation_worst": float(np.max(values)),
+                }
+            )
+    if summary_rows:
+        summary_header = list(summary_rows[0].keys())
+        store.save_csv(
+            "structure_residual_correlation_summary.csv",
+            summary_header,
+            [[row.get(key, "") for key in summary_header] for row in summary_rows],
+        )
+
+
 def _write_spatial_error_tables(
     *,
     model_dir: Path,
@@ -138,6 +218,8 @@ def _write_spatial_error_tables(
     true_spatial: dict[str, Any],
     geom_ctx: Any,
     metric_mask: np.ndarray | None,
+    distance_any: np.ndarray | None,
+    distance_signed: np.ndarray | None,
     wafer_mask: np.ndarray | None,
     spatial_vars: list[str],
     case_ids: list[str],
@@ -149,8 +231,16 @@ def _write_spatial_error_tables(
         "pred_eval": pred_spatial,
         "true_eval": true_spatial,
         "mask_plasma": metric_mask,
-        "distance_signed": (geom_ctx.distance_signed if geom_ctx is not None else None),
-        "distance_any": (geom_ctx.distance_any if geom_ctx is not None else None),
+        "distance_signed": (
+            distance_signed
+            if distance_signed is not None
+            else (geom_ctx.distance_signed if geom_ctx is not None else None)
+        ),
+        "distance_any": (
+            distance_any
+            if distance_any is not None
+            else (geom_ctx.distance_any if geom_ctx is not None else None)
+        ),
         "bc_dir_mask": (geom_ctx.bc_dir_mask if geom_ctx is not None else None),
         "wafer_mask": wafer_mask,
         "boundary_type_breakdown": boundary_type_breakdown,
@@ -261,20 +351,37 @@ def _plot_worst_distribution_cases(
     viz: Any,
 ) -> None:
     plot_worst_cases = int(distribution_cfg.get("plot_worst_cases", 0))
-    if plot_worst_cases <= 0 or not distribution_case_rows:
+    plot_representative = bool(distribution_cfg.get("plot_representative_cases", False))
+    if (plot_worst_cases <= 0 and not plot_representative) or not distribution_case_rows:
         return
-    worst_rows = sorted(
-        [
-            r
-            for r in distribution_case_rows
-            if np.isfinite(float(r.get("distribution_error_score", float("nan"))))
-        ],
-        key=lambda r: float(r.get("distribution_error_score", float("nan"))),
-        reverse=True,
-    )[:plot_worst_cases]
-    for worst in worst_rows:
-        var_name = str(worst.get("var", ""))
-        case_idx = int(float(worst.get("case_index", 0.0)))
+    finite_rows = [
+        row
+        for row in distribution_case_rows
+        if np.isfinite(float(row.get("distribution_error_score", float("nan"))))
+    ]
+    selected: list[tuple[str, dict[str, Any]]] = [
+        ("worst", row)
+        for row in sorted(
+            finite_rows,
+            key=lambda item: float(item.get("distribution_error_score", float("nan"))),
+            reverse=True,
+        )[:plot_worst_cases]
+    ]
+    if plot_representative:
+        for var_name in sorted({str(row.get("var", "")) for row in finite_rows}):
+            var_rows = [row for row in finite_rows if str(row.get("var", "")) == var_name]
+            values = np.asarray([float(row["distribution_error_score"]) for row in var_rows], dtype=np.float64)
+            for label, percentile in (("median", 50.0), ("p90", 90.0), ("worst", 100.0)):
+                target = float(np.percentile(values, percentile))
+                selected.append((label, min(var_rows, key=lambda row: abs(float(row["distribution_error_score"]) - target))))
+    seen: set[tuple[str, str, int]] = set()
+    for label, selected_row in selected:
+        var_name = str(selected_row.get("var", ""))
+        case_idx = int(float(selected_row.get("case_index", 0.0)))
+        identity = (label, var_name, case_idx)
+        if identity in seen:
+            continue
+        seen.add(identity)
         if var_name not in true_spatial or var_name not in pred_spatial:
             continue
         true_arr = np.asarray(true_spatial[var_name], dtype=np.float32)
@@ -296,12 +403,12 @@ def _plot_worst_distribution_cases(
         )
         case_token = "".join(
             ch if ch.isalnum() or ch in {"-", "_"} else "_"
-            for ch in str(worst.get("case_id", case_idx))
+            for ch in str(selected_row.get("case_id", case_idx))
         )[:80]
         viz.plot_field_triplet(
             true_field,
             pred_field,
-            rel_path=f"plots/spatial_distribution_worst_{var_name}_{case_token}.png",
+            rel_path=f"plots/spatial_distribution_{label}_{var_name}_{case_token}.png",
             mask=plot_mask,
         )
 

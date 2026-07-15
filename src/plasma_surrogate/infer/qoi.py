@@ -24,6 +24,23 @@ def _config_string_list(raw: Any) -> list[str]:
     return [str(v).strip() for v in list(raw) if str(v).strip()]
 
 
+def axisymmetric_weighted_cv(values: np.ndarray, radial_weights: np.ndarray) -> tuple[float, float]:
+    """Return area-weighted mean and CV for an axisymmetric radial sample."""
+
+    vals = np.asarray(values, dtype=np.float64).reshape(-1)
+    weights = np.asarray(radial_weights, dtype=np.float64).reshape(-1)
+    if vals.size == 0 or vals.shape != weights.shape:
+        return float("nan"), float("nan")
+    if np.any(~np.isfinite(vals)) or np.any(~np.isfinite(weights)) or np.any(weights < 0.0):
+        return float("nan"), float("nan")
+    denom = float(np.sum(weights))
+    if denom <= 0.0:
+        return float("nan"), float("nan")
+    mean = float(np.sum(weights * vals) / denom)
+    variance = float(np.sum(weights * (vals - mean) ** 2) / denom)
+    return mean, float(np.sqrt(max(variance, 0.0)) / (abs(mean) + 1.0e-12))
+
+
 def pick_uniformity_target(
     fields_phys: dict[str, np.ndarray],
     *,
@@ -131,6 +148,45 @@ def uniformity_values_for_region(
             "uniformity_mean_height_row": float(target_mid),
             "uniformity_sample_count": float(vals.size),
         }
+    if region_norm in {"wafer_near", "wafer_near_band"}:
+        if wafer_mask is None:
+            return np.asarray([], dtype=np.float32), {
+                "uniformity_region": "wafer_near",
+                "uniformity_sample_count": 0.0,
+            }
+        wafer = np.asarray(wafer_mask, dtype=np.float32) > 0.5
+        layers = max(1, int(mid_height_band_px))
+        overlap = wafer & plasma
+        if np.any(overlap):
+            # ICP wafer_mask marks the volume below the wafer surface. Select
+            # only its top in-plasma layers, independently in each r column.
+            selector = np.zeros_like(overlap, dtype=bool)
+            for col in range(overlap.shape[1]):
+                active = np.flatnonzero(overlap[:, col])
+                if active.size == 0:
+                    continue
+                top = int(active[-1])
+                selector[max(0, top - layers + 1) : top + 1, col] = overlap[
+                    max(0, top - layers + 1) : top + 1, col
+                ]
+        else:
+            expanded = wafer
+            for _ in range(layers):
+                padded = np.pad(expanded, 1, mode="constant", constant_values=False)
+                expanded = (
+                    expanded
+                    | padded[:-2, 1:-1]
+                    | padded[2:, 1:-1]
+                    | padded[1:-1, :-2]
+                    | padded[1:-1, 2:]
+                )
+            selector = expanded & plasma
+        vals = target[selector]
+        return vals, {
+            "uniformity_region": "wafer_near",
+            "uniformity_wafer_near_layers": float(layers),
+            "uniformity_sample_count": float(vals.size),
+        }
     if region_norm == "plasma":
         vals = target[plasma]
         return vals, {"uniformity_region": "plasma", "uniformity_sample_count": float(vals.size)}
@@ -221,6 +277,57 @@ def compute_inference_qoi(
     }
     qoi.update(uniformity_meta)
 
+    bohm_qoi_cfg = _dict_or_empty(qoi_cfg.get("bohm_flux"))
+    density_key = str(bohm_qoi_cfg.get("density_target", "ni")).strip()
+    temperature_key = str(bohm_qoi_cfg.get("temperature_target", "Te")).strip()
+    missing_bohm = [key for key in (density_key, temperature_key) if key not in fields_phys]
+    if missing_bohm and bohm_qoi_cfg:
+        raise ValueError(
+            "qoi.bohm_flux targets did not match prediction fields; "
+            f"missing={missing_bohm}, available={sorted(fields_phys)}"
+        )
+    if not missing_bohm:
+        density_field = np.asarray(fields_phys[density_key], dtype=np.float32)
+        temperature_field = np.asarray(fields_phys[temperature_key], dtype=np.float32)
+        if density_field.ndim == 3:
+            density_field = density_field[0]
+        if temperature_field.ndim == 3:
+            temperature_field = temperature_field[0]
+        bohm_flux = np.maximum(density_field, 0.0) * np.sqrt(np.maximum(temperature_field, 0.0) + 1.0e-6)
+        bohm_vals, _ = uniformity_values_for_region(
+            bohm_flux,
+            mask_plasma=geom_ctx.mask_plasma,
+            wafer_mask=wafer,
+            region=str(region_raw),
+            mid_height_band_px=int(band_px_raw or 0),
+            row_index=None if row_index_raw is None else int(row_index_raw),
+            col_start=None if col_start_raw is None else int(col_start_raw),
+            col_end=None if col_end_raw is None else int(col_end_raw),
+        )
+        qoi["bohm_flux_mean"] = float(np.mean(bohm_vals)) if bohm_vals.size > 0 else 0.0
+        qoi["bohm_flux_uniformity"] = uniformity(bohm_vals)
+        coord = np.asarray(geom_ctx.coord_grid, dtype=np.float32)
+        if coord.shape != (2, *bohm_flux.shape):
+            raise ValueError(
+                "Bohm flux axisymmetric weighting requires coord_grid [2,H,W], "
+                f"got={coord.shape}"
+            )
+        radial_vals, _ = uniformity_values_for_region(
+            coord[0],
+            mask_plasma=geom_ctx.mask_plasma,
+            wafer_mask=wafer,
+            region=str(region_raw),
+            mid_height_band_px=int(band_px_raw or 0),
+            row_index=None if row_index_raw is None else int(row_index_raw),
+            col_start=None if col_start_raw is None else int(col_start_raw),
+            col_end=None if col_end_raw is None else int(col_end_raw),
+        )
+        area_mean, area_cv = axisymmetric_weighted_cv(bohm_vals, radial_vals)
+        qoi["bohm_flux_area_mean"] = float(area_mean)
+        qoi["bohm_flux_area_cv"] = float(area_cv)
+        qoi["bohm_flux_density_target"] = density_key
+        qoi["bohm_flux_temperature_target"] = temperature_key
+
     bo_cfg = _dict_or_empty(ood_cfg.get("boundary_operator"))
     band_mask = boundary_band_mask(
         mask_plasma=geom_ctx.mask_plasma,
@@ -251,4 +358,9 @@ def compute_inference_qoi(
     return qoi, band_mask, op_inputs, bo_cfg
 
 
-__all__ = ["compute_inference_qoi", "pick_uniformity_target", "uniformity_values_for_region"]
+__all__ = [
+    "axisymmetric_weighted_cv",
+    "compute_inference_qoi",
+    "pick_uniformity_target",
+    "uniformity_values_for_region",
+]

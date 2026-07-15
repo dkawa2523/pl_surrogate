@@ -18,6 +18,8 @@ class _TorchSpatialFieldMixin:
     """Shared torch wrapper for models that consume [cond + spatial feature] maps."""
 
     _spatial_label = "grid"
+    requires_spatial_features = True
+    requires_scaled_spatial_features = False
 
     def _torch_forward(self, xt):
         return self.net(xt)

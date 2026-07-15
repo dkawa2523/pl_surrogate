@@ -19,6 +19,7 @@ from plasma_surrogate.core.model_specs import (
     benchmark_scope_model_map,
     model_names_by_product_category,
     model_names_by_product_status,
+    model_names_where,
 )
 
 
@@ -41,6 +42,30 @@ def test_model_family_constants_are_derived_from_model_specs() -> None:
         "geom_deeponet_pod",
     )
     assert "deeponet_plasma" not in model_families.MAINLINE_GEOM_PACK_MODELS
+
+
+def test_spatial_input_capabilities_are_canonical_model_metadata() -> None:
+    assert set(model_names_where("requires_spatial_features")) == {
+        "unet",
+        "unetpp",
+        "unetpp_attn",
+        "unet_operator_v2",
+        "fno",
+        "ffno",
+        "coord_mlp_fourier",
+        "coord_mlp_siren",
+        "coord_mlp_pod_residual",
+        "u_no",
+        "cno",
+        "cno_operator_unet",
+        "geom_deeponet_siren",
+        "deeponet_plasma",
+    }
+    assert set(model_names_where("requires_scaled_spatial_features")) == {
+        "coord_mlp_fourier",
+        "coord_mlp_siren",
+        "coord_mlp_pod_residual",
+    }
 
 
 def test_first_class_model_catalog_is_explicit() -> None:

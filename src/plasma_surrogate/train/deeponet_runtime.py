@@ -16,6 +16,7 @@ from plasma_surrogate.models.deeponet.boundary_operator_torch import BoundaryOpe
 from plasma_surrogate.models.deeponet.plasma_operator_torch import DeepONetPlasmaOperatorTorch
 from plasma_surrogate.models.deeponet.poisson_head_torch import (
     POISSON_POTENTIAL_OUTPUT_KEY,
+    POISSON_SENSOR_FEATURE_NAMES,
     DeepONetPoissonHeadTorch,
 )
 
@@ -142,11 +143,12 @@ def resolve_deeponet_runtime(
         sensor_indices=np.asarray(ctx.deeponet_poisson_index["sensor_indices"], dtype=np.int64),
         query_indices=np.asarray(ctx.deeponet_poisson_index["query_indices"], dtype=np.int64),
         flatten_order=str(ctx.deeponet_poisson_meta.get("flatten_order", "C")),
-        sensor_feature_names=list(sensor_feature_names or ["x", "y", "mask_plasma", "distance_signed", "distance_any"]),
+        sensor_feature_names=list(POISSON_SENSOR_FEATURE_NAMES),
+        query_feature_names=[],
         trunk_input_mode=str(poisson_cfg.get("trunk_input_mode", model_cfg.get("trunk_input_mode", "geom_feature_pack"))),
-        sensor_pool_mode=str(poisson_cfg.get("sensor_pool_mode", model_cfg.get("sensor_pool_mode", "moments"))),
+        sensor_pool_mode=str(poisson_cfg.get("sensor_pool_mode", "moments")),
         sensor_embed_dim=int(poisson_cfg.get("sensor_embed_dim", model_cfg.get("sensor_embed_dim", 32))),
-        branch_mode=str(poisson_cfg.get("branch_mode", model_cfg.get("branch_mode", "moments"))),
+        branch_mode=str(poisson_cfg.get("branch_mode", "moments")),
         trunk_fourier_n_freq=int(poisson_cfg.get("trunk_fourier_n_freq", model_cfg.get("trunk_fourier_n_freq", 1))),
         trunk_fourier_mode=str(poisson_cfg.get("trunk_fourier_mode", model_cfg.get("trunk_fourier_mode", "symmetric"))),
         trunk_cond_modulation=str(poisson_cfg.get("trunk_cond_modulation", model_cfg.get("trunk_cond_modulation", "none"))),

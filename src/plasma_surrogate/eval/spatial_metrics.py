@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.preprocessing.scalers import transform_target_with_artifact
+
 from plasma_surrogate.core.spatial_regions import (
     build_boundary_type_masks,
     build_region_masks,
@@ -358,6 +360,36 @@ def _shape_corr(true_vals: np.ndarray, pred_vals: np.ndarray) -> float:
     return float(np.corrcoef(true_vals, pred_vals)[0, 1])
 
 
+def _relative_l2(true_vals: np.ndarray, pred_vals: np.ndarray, *, eps: float) -> float:
+    return float(np.linalg.norm(pred_vals - true_vals) / max(float(np.linalg.norm(true_vals)), eps))
+
+
+def _gradient_relative_l2(true_field: np.ndarray, pred_field: np.ndarray, mask: np.ndarray, *, eps: float) -> float:
+    numer = 0.0
+    denom = 0.0
+    active = np.asarray(mask, dtype=bool)
+    for axis in (0, 1):
+        pair_mask = (active[1:, :] & active[:-1, :]) if axis == 0 else (active[:, 1:] & active[:, :-1])
+        true_diff = np.diff(true_field, axis=axis)[pair_mask]
+        pred_diff = np.diff(pred_field, axis=axis)[pair_mask]
+        numer += float(np.sum((pred_diff - true_diff) ** 2))
+        denom += float(np.sum(true_diff**2))
+    return float(np.sqrt(numer) / max(np.sqrt(denom), eps))
+
+
+def _masked_pool2d(field: np.ndarray, mask: np.ndarray, *, scale: int) -> tuple[np.ndarray, np.ndarray]:
+    h, w = field.shape
+    h_eff = (h // scale) * scale
+    w_eff = (w // scale) * scale
+    if h_eff <= 0 or w_eff <= 0:
+        return np.asarray(field, dtype=np.float64), np.asarray(mask, dtype=bool)
+    values = np.asarray(field[:h_eff, :w_eff], dtype=np.float64).reshape(h_eff // scale, scale, w_eff // scale, scale)
+    weights = np.asarray(mask[:h_eff, :w_eff], dtype=np.float64).reshape(h_eff // scale, scale, w_eff // scale, scale)
+    denom = np.sum(weights, axis=(1, 3))
+    pooled = np.sum(values * weights, axis=(1, 3)) / np.maximum(denom, 1.0)
+    return pooled, denom > 0.0
+
+
 def build_spatial_distribution_by_case_rows(
     *,
     pred_eval: dict[str, np.ndarray],
@@ -368,6 +400,8 @@ def build_spatial_distribution_by_case_rows(
     region_by_var: dict[str, str] | None = None,
     top_fraction: float = 0.10,
     eps: float = 1.0e-12,
+    target_transforms: dict[str, Any] | None = None,
+    target_scalers: dict[str, Any] | None = None,
 ) -> list[dict[str, float | str]]:
     """Build case-level distribution-shape metrics beyond pointwise R2/RMSE."""
 
@@ -427,6 +461,13 @@ def build_spatial_distribution_by_case_rows(
                         "top10_rmse": float("nan"),
                         "shape_corr": float("nan"),
                         "distribution_error_score": float("nan"),
+                        "physical_rel_l2": float("nan"),
+                        "gradient_rel_l2": float("nan"),
+                        "multiscale_rel_l2_s2": float("nan"),
+                        "multiscale_rel_l2_s4": float("nan"),
+                        "mean_rel_error": float("nan"),
+                        "physical_bound_fraction": float("nan"),
+                        "transformed_huber": float("nan"),
                     }
                 )
                 continue
@@ -455,6 +496,47 @@ def build_spatial_distribution_by_case_rows(
             grad = _grad_rmse(t, p, m)
             top_rmse = _top_fraction_rmse(t, p, m, fraction=top_fraction)
             corr = _shape_corr(t_vals, p_vals)
+            physical_rel_l2 = _relative_l2(t_vals, p_vals, eps=eps)
+            gradient_rel_l2 = _gradient_relative_l2(t, p, m, eps=eps)
+            multiscale_errors: dict[int, float] = {}
+            for scale in (2, 4):
+                t_pool, pool_mask = _masked_pool2d(t, m, scale=scale)
+                p_pool, _ = _masked_pool2d(p, m, scale=scale)
+                multiscale_errors[scale] = _relative_l2(
+                    t_pool[pool_mask],
+                    p_pool[pool_mask],
+                    eps=eps,
+                )
+            true_mean = float(np.mean(t_vals))
+            pred_mean = float(np.mean(p_vals))
+            mean_rel_error = _safe_rel_abs(pred_mean, true_mean, eps=eps)
+            transform_spec = dict((target_transforms or {}).get(name, {}) or {})
+            if transform_spec:
+                true_transformed = transform_target_with_artifact(
+                    t,
+                    var=name,
+                    scaler_artifact=dict((target_scalers or {}).get(name, {}) or {}),
+                    transform_artifact=transform_spec,
+                )
+                pred_transformed = transform_target_with_artifact(
+                    p,
+                    var=name,
+                    scaler_artifact=dict((target_scalers or {}).get(name, {}) or {}),
+                    transform_artifact=transform_spec,
+                )
+                transformed_error = np.abs(pred_transformed[m] - true_transformed[m])
+                transformed_huber = float(
+                    np.mean(np.where(transformed_error <= 1.0, 0.5 * transformed_error**2, transformed_error - 0.5))
+                )
+            else:
+                transformed_huber = float("nan")
+            clip_spec = dict(transform_spec.get("clip", {}) or {})
+            if str(clip_spec.get("mode", "none")).strip().lower() == "physical_bounds":
+                lo, hi = float(clip_spec["min"]), float(clip_spec["max"])
+                tolerance = max(abs(hi - lo) * 1.0e-6, eps)
+                physical_bound_fraction = float(np.mean((p_vals <= lo + tolerance) | (p_vals >= hi - tolerance)))
+            else:
+                physical_bound_fraction = 0.0
             true_std = float(np.std(t_vals))
             top_nrmse = float(top_rmse / max(true_std, eps)) if np.isfinite(top_rmse) else float("nan")
             score_parts = [
@@ -490,6 +572,13 @@ def build_spatial_distribution_by_case_rows(
                     "top10_rmse": top_rmse,
                     "shape_corr": corr,
                     "distribution_error_score": float(np.mean(finite_parts)) if finite_parts else float("nan"),
+                    "physical_rel_l2": physical_rel_l2,
+                    "gradient_rel_l2": gradient_rel_l2,
+                    "multiscale_rel_l2_s2": multiscale_errors[2],
+                    "multiscale_rel_l2_s4": multiscale_errors[4],
+                    "mean_rel_error": mean_rel_error,
+                    "physical_bound_fraction": physical_bound_fraction,
+                    "transformed_huber": transformed_huber,
                 }
             )
     return rows
@@ -510,6 +599,13 @@ def build_spatial_distribution_summary_rows(
         "top10_rmse",
         "shape_corr",
         "distribution_error_score",
+        "physical_rel_l2",
+        "gradient_rel_l2",
+        "multiscale_rel_l2_s2",
+        "multiscale_rel_l2_s4",
+        "mean_rel_error",
+        "physical_bound_fraction",
+        "transformed_huber",
     ]
     rows: list[dict[str, float | str]] = []
     vars_seen = sorted({str(r.get("var", "")) for r in by_case_rows if str(r.get("var", ""))})
@@ -540,9 +636,65 @@ def build_spatial_distribution_summary_rows(
     return rows
 
 
+def build_structure_residual_correlation_rows(
+    *,
+    pred_eval: dict[str, np.ndarray],
+    true_eval: dict[str, np.ndarray],
+    structure_features: dict[str, np.ndarray],
+    mask_plasma: np.ndarray | None,
+    case_ids: list[str] | None = None,
+) -> list[dict[str, float | str]]:
+    """Correlate residual-gradient magnitude with structure-feature gradients."""
+
+    common_targets = sorted(set(pred_eval) & set(true_eval))
+    if not common_targets or not structure_features:
+        return []
+    reference = _field_as_nhw(true_eval[common_targets[0]], key="true_eval")
+    n_cases, h, w = reference.shape
+    masks = _mask_as_nhw(mask_plasma, n_cases=n_cases, shape=(h, w))
+    case_keys = [str(value) for value in list(case_ids or [])]
+    if len(case_keys) != n_cases:
+        case_keys = [str(idx) for idx in range(n_cases)]
+    ignored = {"x", "y", "mask_plasma", "valid_field_mask", "outside_mask"}
+    rows: list[dict[str, float | str]] = []
+    for feature_name, raw_feature in sorted(structure_features.items()):
+        if feature_name in ignored:
+            continue
+        feature = _field_as_nhw(raw_feature, key=f"structure_features[{feature_name}]")
+        if int(feature.shape[0]) == 1 and n_cases > 1:
+            feature = np.repeat(feature, n_cases, axis=0)
+        if feature.shape != (n_cases, h, w):
+            raise ValueError(
+                f"structure feature shape mismatch for {feature_name}: expected={(n_cases, h, w)}, got={feature.shape}"
+            )
+        for target_name in common_targets:
+            true_arr = _field_as_nhw(true_eval[target_name], key=f"true_eval[{target_name}]")
+            pred_arr = _field_as_nhw(pred_eval[target_name], key=f"pred_eval[{target_name}]")
+            for case_idx in range(n_cases):
+                residual = np.asarray(pred_arr[case_idx] - true_arr[case_idx], dtype=np.float64)
+                res_y, res_x = np.gradient(residual, edge_order=1)
+                feat_y, feat_x = np.gradient(np.asarray(feature[case_idx], dtype=np.float64), edge_order=1)
+                res_mag = np.hypot(res_y, res_x)
+                feat_mag = np.hypot(feat_y, feat_x)
+                active = masks[case_idx] & np.isfinite(res_mag) & np.isfinite(feat_mag)
+                correlation = _shape_corr(res_mag[active], feat_mag[active]) if np.any(active) else float("nan")
+                rows.append(
+                    {
+                        "case_id": case_keys[case_idx],
+                        "case_index": float(case_idx),
+                        "var": target_name,
+                        "feature": feature_name,
+                        "residual_gradient_feature_correlation": correlation,
+                        "absolute_correlation": abs(correlation) if np.isfinite(correlation) else float("nan"),
+                    }
+                )
+    return rows
+
+
 __all__ = [
     "build_spatial_distribution_by_case_rows",
     "build_spatial_distribution_summary_rows",
     "build_spatial_error_by_case_rows",
     "build_spatial_error_summary_rows",
+    "build_structure_residual_correlation_rows",
 ]

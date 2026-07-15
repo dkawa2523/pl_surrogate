@@ -23,6 +23,10 @@ def test_cli_unet_train_and_infer_smoke(tmp_path: Path):
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
             "scalers": {"target_transforms": default_target_transforms_four_field_example()},
+            "coord_features": {
+                "enabled": True,
+                "channels_from_profile": "geom_v1_mainline",
+            },
         },
         "model": {"name": "unet", "phi_mode": "poisson_hybrid", "phi_hybrid_alpha": 0.15, "phi_hybrid_steps": 1},
         "train": {
@@ -40,7 +44,10 @@ def test_cli_unet_train_and_infer_smoke(tmp_path: Path):
                 },
             },
         },
-        "inference": {"single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}}},
+        "inference": {
+            "single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}},
+            "qoi": {"uniformity": {"target": "ne"}},
+        },
     }
     cfg_path = tmp_path / "m3_unet.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:

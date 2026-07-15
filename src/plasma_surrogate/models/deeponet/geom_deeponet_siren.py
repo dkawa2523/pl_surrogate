@@ -55,6 +55,8 @@ class GeomDeepONetSIREN:
 
     model_type = "geom_deeponet_siren"
     geom_deeponet_siren_impl_version = "geom_deeponet_siren_v1"
+    requires_spatial_features = True
+    requires_scaled_spatial_features = False
 
     def __init__(
         self,

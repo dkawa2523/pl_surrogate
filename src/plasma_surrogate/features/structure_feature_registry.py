@@ -24,6 +24,8 @@ ALLOWED_SPATIAL_CHANNELS: tuple[str, ...] = (
     "part_sdf_second",
     "part_gap_proxy",
     "solid_proximity",
+    "part_sdf_union",
+    "part_source_sum",
     "sdf_coil_01",
     "sdf_coil_02",
     "sdf_coil_03",
@@ -52,6 +54,42 @@ FEATURE_PROFILE_CHANNELS: dict[str, tuple[str, ...]] = {
         "normal_x",
         "normal_y",
         "curvature_proxy",
+    ),
+    # Static subset shared with part_lite_v1.  This profile is used by
+    # dimension-conditioned ablations so the chamber/boundary information is
+    # identical without admitting case-varying part maps.
+    "part_lite_static_v1": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "normal_x",
+        "normal_y",
+        "curvature_proxy",
+        "boundary_band",
+    ),
+    # Smooth, order-invariant structure contract for general grid surrogates.
+    # Derivative channels and per-part nearest/second summaries are deliberately
+    # excluded because their medial-axis discontinuities can be copied into the
+    # predicted physical fields.
+    "smooth_structure_v1": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "boundary_band",
+        "solid_proximity",
+    ),
+    # Geometry-generation-ready contract.  The union SDF carries shape while
+    # the additive source field preserves the number and proximity of parts
+    # without assigning semantic meaning to their storage order.
+    "part_source_v1": (
+        "x",
+        "y",
+        "distance_signed",
+        "part_sdf_union",
+        "part_source_sum",
     ),
     # part_lite_v1 uses order-invariant summaries; semantic/ICP profiles keep their existing shapes.
     "part_lite_v1": (

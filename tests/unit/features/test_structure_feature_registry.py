@@ -17,10 +17,36 @@ def test_feature_profiles_include_reserved_names() -> None:
     assert names == (
         "geom_v1_mainline",
         "boundary_plus_v1",
+        "part_lite_static_v1",
+        "smooth_structure_v1",
+        "part_source_v1",
         "part_lite_v1",
         "part_semantic_v1",
         "icp_struct_spatial_v1",
         "icp_part_sdf_lite_v1",
+    )
+
+
+def test_smooth_structure_v1_excludes_derivative_and_per_part_channels() -> None:
+    channels = resolve_spatial_channels_for_feature_profile("smooth_structure_v1")
+    assert channels == (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "boundary_band",
+        "solid_proximity",
+    )
+    assert not {"normal_x", "normal_y", "curvature_proxy", "part_sdf_nearest"} & set(channels)
+
+
+def test_part_source_v1_is_minimal_and_generation_ready() -> None:
+    assert resolve_spatial_channels_for_feature_profile("part_source_v1") == (
+        "x",
+        "y",
+        "distance_signed",
+        "part_sdf_union",
+        "part_source_sum",
     )
 
 
@@ -50,6 +76,23 @@ def test_part_lite_v1_resolves_lightweight_boundary_and_part_channels() -> None:
         "part_gap_proxy",
         "solid_proximity",
     )
+
+
+def test_part_lite_static_v1_matches_part_lite_static_prefix() -> None:
+    static_channels = resolve_spatial_channels_for_feature_profile("part_lite_static_v1")
+    part_lite_channels = resolve_spatial_channels_for_feature_profile("part_lite_v1")
+    assert static_channels == (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "normal_x",
+        "normal_y",
+        "curvature_proxy",
+        "boundary_band",
+    )
+    assert part_lite_channels[: len(static_channels)] == static_channels
 
 
 def test_part_semantic_v1_keeps_existing_boundary_plus_channels() -> None:

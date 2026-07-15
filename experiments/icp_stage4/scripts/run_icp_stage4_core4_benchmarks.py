@@ -10,7 +10,17 @@ import traceback
 from pathlib import Path
 
 
-CORE_MODELS = ("global_mlp", "unet", "ffno", "cno_operator_unet")
+CORE_MODELS = (
+    "global_mlp",
+    "deeponet_pod",
+    "unet",
+    "unetpp",
+    "unetpp_attn",
+    "fno",
+    "ffno",
+    "cno",
+    "cno_operator_unet",
+)
 SIZE_ORDER = ("smoke", "full")
 STATUS_FIELDS = (
     "dataset_size",

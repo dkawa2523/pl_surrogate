@@ -28,6 +28,10 @@ def test_train_deeponet_pde_coupled_smoke(tmp_path: Path):
             "scalers": {
                 "target_transforms": default_target_transforms_four_field_example(),
             },
+            "coord_features": {
+                "enabled": True,
+                "channels_from_profile": "geom_v1_mainline",
+            },
             "sampling": {
                 "deeponet": {
                     "tasks": {
@@ -69,7 +73,7 @@ def test_train_deeponet_pde_coupled_smoke(tmp_path: Path):
 
     with (run_dir / "checkpoints" / "meta.json").open("r", encoding="utf-8") as f:
         meta = json.load(f)
-    assert meta["model_type"] == "deeponet_plasma_torch"
+    assert meta["model_type"] == "deeponet_plasma"
     assert (run_dir / "train" / "trainable_params_stage1.json").exists()
     assert (run_dir / "train" / "trainable_params_stage2.json").exists()
     assert (run_dir / "train" / "scalars" / "physics_terms.csv").exists()

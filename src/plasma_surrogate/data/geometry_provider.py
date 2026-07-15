@@ -49,6 +49,17 @@ def _normalize_geom_ref(geom_ref: dict[str, object] | None) -> dict[str, Any]:
     if not isinstance(geom_ref, dict):
         raise TypeError("geom_ref must be dict when provided")
     out: dict[str, Any] = {"geom_id": str(geom_ref.get("geom_id", "default"))}
+    structure_id_raw = geom_ref.get("structure_id")
+    alternative_id_raw = geom_ref.get("alternative_id")
+    if structure_id_raw is not None and alternative_id_raw is not None:
+        if str(structure_id_raw).strip() != str(alternative_id_raw).strip():
+            raise ValueError("geom_ref.structure_id and geom_ref.alternative_id must match when both are provided")
+    selected_raw = alternative_id_raw if alternative_id_raw is not None else structure_id_raw
+    if selected_raw is not None:
+        selected = str(selected_raw).strip()
+        if not selected:
+            raise ValueError("geom_ref alternative/structure id must be a non-empty string")
+        out["alternative_id"] = selected
     if "geom_param" in geom_ref:
         raw = geom_ref["geom_param"]
         if not isinstance(raw, dict):
@@ -183,6 +194,8 @@ class FixedGeometryProvider:
         norm = _normalize_geom_ref(geom_ref)
         if "geom_param" in norm:
             raise ValueError("provider_mode=fixed does not allow geom_ref.geom_param")
+        if "alternative_id" in norm:
+            raise ValueError("provider_mode=fixed does not allow geom_ref.structure_id/alternative_id")
         if self._ctx is None:
             self._ctx = self._build()
         return self._ctx
@@ -321,6 +334,12 @@ class ParametricPartsGeometryProvider:
         manifest = json.loads(self._manifest_path.read_text(encoding="utf-8"))
         if not isinstance(manifest, dict):
             raise ValueError("parts_manifest.json must be a JSON object")
+        part_semantics = str(manifest.get("part_semantics", "simultaneous")).strip().lower()
+        if part_semantics not in {"simultaneous", "alternatives"}:
+            raise ValueError(
+                "parts_manifest.json part_semantics must be one of: simultaneous, alternatives; "
+                f"got={part_semantics!r}"
+            )
         param_specs_raw = manifest.get("param_specs")
         if not isinstance(param_specs_raw, dict) or len(param_specs_raw) == 0:
             raise ValueError("parts_manifest.json must include non-empty param_specs object")
@@ -364,6 +383,13 @@ class ParametricPartsGeometryProvider:
                 raise ValueError(
                     "parts_pack.npz part_ids length mismatch with mask_stack[0]: "
                     f"{len(part_ids)} != {int(mask_stack.shape[0])}"
+                )
+        if part_semantics == "alternatives":
+            default_alternative_id = str(manifest.get("default_alternative_id", part_ids[0] if part_ids else "")).strip()
+            if default_alternative_id not in set(part_ids):
+                raise ValueError(
+                    "parts_manifest.json default_alternative_id must reference part_ids; "
+                    f"got={default_alternative_id!r}, known={part_ids}"
                 )
         part_set = set(part_ids)
         specs: dict[str, dict[str, Any]] = {}
@@ -466,6 +492,7 @@ class ParametricPartsGeometryProvider:
         base_ctx: GeometryContext,
         params: dict[str, float],
         geom_id: str,
+        alternative_id: str | None = None,
     ) -> GeometryContext:
         if self._part_ids is None or self._mask_stack is None:
             raise RuntimeError("parts data is not loaded")
@@ -474,13 +501,81 @@ class ParametricPartsGeometryProvider:
         global_ty = float(params.get("offset.y", params.get("offset.ty", 0.0)))
         per_part_masks: list[np.ndarray] = []
         manifest = dict(self._manifest or {})
-        for idx, part_id in enumerate(self._part_ids):
-            layout_prefix = f"layout.{part_id}."
+        part_semantics = str(manifest.get("part_semantics", "simultaneous")).strip().lower()
+        selected_id: str | None = None
+        indexed_parts = list(enumerate(self._part_ids))
+        structure_mask_base: np.ndarray | None = None
+        mask_sources: list[tuple[str, str, np.ndarray]] = []
+        if part_semantics == "alternatives":
+            selected_id = str(
+                alternative_id
+                or (geom_id if geom_id in set(self._part_ids) else "")
+                or manifest.get("default_alternative_id", self._part_ids[0] if self._part_ids else "")
+            ).strip()
+            if selected_id not in set(self._part_ids):
+                raise ValueError(
+                    f"unknown alternative structure id={selected_id!r}; known={self._part_ids}"
+                )
+            selected_idx = self._part_ids.index(selected_id)
+            indexed_parts = [(selected_idx, selected_id)]
+            structure_map = manifest.get("structure_npz_by_alternative", {})
+            if isinstance(structure_map, dict) and selected_id in structure_map:
+                structure_path = Path(str(structure_map[selected_id]))
+                if not structure_path.is_absolute():
+                    structure_path = self.dataset_root / structure_path
+                if not structure_path.exists():
+                    raise FileNotFoundError(
+                        f"structure npz not found for alternative={selected_id!r}: {structure_path}"
+                    )
+                with np.load(structure_path, allow_pickle=True) as structure:
+                    if "part_mask_stack" not in structure.files or "mask_plasma" not in structure.files:
+                        raise ValueError(
+                            "alternative structure npz must include mask_plasma and part_mask_stack: "
+                            f"{structure_path}"
+                        )
+                    selected_stack = np.asarray(structure["part_mask_stack"], dtype=np.float32)
+                    structure_mask_base = np.asarray(structure["mask_plasma"], dtype=np.float32)
+                    if "part_ids" in structure.files:
+                        selected_part_ids = [
+                            str(v).strip() for v in np.asarray(structure["part_ids"]).reshape(-1).tolist()
+                        ]
+                    else:
+                        selected_part_ids = [f"{selected_id}_{idx:02d}" for idx in range(selected_stack.shape[0])]
+                if selected_stack.ndim != 3 or tuple(selected_stack.shape[1:]) != (h, w):
+                    raise ValueError(
+                        f"alternative structure part_mask_stack must be [P,{h},{w}]; got={selected_stack.shape}"
+                    )
+                if structure_mask_base.shape != (h, w):
+                    raise ValueError(
+                        f"alternative structure mask_plasma must be [{h},{w}]; got={structure_mask_base.shape}"
+                    )
+                if len(selected_part_ids) != selected_stack.shape[0] or any(not v for v in selected_part_ids):
+                    raise ValueError("alternative structure part_ids must match part_mask_stack slots")
+                if not np.all(np.isfinite(selected_stack)) or not np.all(np.isfinite(structure_mask_base)):
+                    raise ValueError("alternative structure npz arrays must contain only finite values")
+                mask_sources = [
+                    (selected_part_ids[idx], selected_id, selected_stack[idx])
+                    for idx in range(selected_stack.shape[0])
+                ]
+        elif alternative_id is not None:
+            raise ValueError(
+                "geom_ref.structure_id/alternative_id requires "
+                "parts_manifest.json part_semantics='alternatives'"
+            )
+        if not mask_sources:
+            mask_sources = [
+                (part_id, part_id, self._mask_stack[idx]) for idx, part_id in indexed_parts
+            ]
+        region_part_ids = [region_part_id for region_part_id, _, _ in mask_sources]
+        for region_part_id, param_part_id, source_mask in mask_sources:
+            layout_prefix = f"layout.{param_part_id}."
             has_layout = any((layout_prefix + key) in params for key in ("r_center", "z_center", "width", "height"))
             if has_layout:
                 missing = [key for key in ("r_center", "z_center", "width", "height") if (layout_prefix + key) not in params]
                 if missing:
-                    raise ValueError(f"layout params for {part_id} require r_center/z_center/width/height; missing={missing}")
+                    raise ValueError(
+                        f"layout params for {param_part_id} require r_center/z_center/width/height; missing={missing}"
+                    )
                 per_part_masks.append(
                     self._rect_mask_from_layout(
                         base_ctx.coord_grid,
@@ -491,7 +586,7 @@ class ParametricPartsGeometryProvider:
                     ).astype(np.float32)
                 )
                 continue
-            prefix = f"part.{part_id}."
+            prefix = f"part.{param_part_id}."
             tx = float(params.get(prefix + "tx", 0.0)) + global_tx
             ty = float(params.get(prefix + "ty", 0.0)) + global_ty
             sx = float(params.get(prefix + "scale_x", 1.0))
@@ -499,7 +594,7 @@ class ParametricPartsGeometryProvider:
             rot = float(params.get(prefix + "rotation_deg", 0.0))
             fillet = float(params.get(prefix + "fillet", 0.0))
             warped = self._warp_mask_affine(
-                self._mask_stack[idx],
+                source_mask,
                 tx=tx,
                 ty=ty,
                 scale_x=sx,
@@ -512,7 +607,8 @@ class ParametricPartsGeometryProvider:
         gap_delta = float(sum(value for key, value in params.items() if _GAP_PARAM_RE.match(key) is not None))
         if gap_delta != 0.0:
             union_solid = self._morph_binary(union_solid, delta=gap_delta, scale_ref=max(h, w))
-        mask_base = (np.asarray(base_ctx.mask_plasma, dtype=np.float32) > 0.5).astype(np.float32)
+        mask_base_source = base_ctx.mask_plasma if structure_mask_base is None else structure_mask_base
+        mask_base = (np.asarray(mask_base_source, dtype=np.float32) > 0.5).astype(np.float32)
         plasma_mode = str(manifest.get("plasma_mode", "subtract_solid")).strip().lower()
         if plasma_mode == "preserve":
             mask_plasma = mask_base.astype(np.float32)
@@ -535,6 +631,10 @@ class ParametricPartsGeometryProvider:
         regions = dict(base_ctx.regions or {})
         regions["solid_union_mask"] = union_solid.astype(np.float32)
         regions["part_mask_stack"] = np.stack(per_part_masks, axis=0).astype(np.float32) if per_part_masks else np.zeros((0, h, w), dtype=np.float32)
+        regions["part_ids"] = np.asarray(region_part_ids, dtype=object)
+        if selected_id is not None:
+            regions["alternative_id"] = np.asarray(selected_id)
+        regions["part_semantics"] = np.asarray(part_semantics)
         effective_params = dict(params)
         regions["geom_param_values"] = np.array([params[k] for k in sorted(params.keys())], dtype=np.float32)
         regions["geom_param_keys"] = np.array(sorted(params.keys()), dtype=object)
@@ -558,9 +658,13 @@ class ParametricPartsGeometryProvider:
         )
 
     @staticmethod
-    def _cache_key(*, geom_id: str, params: dict[str, float]) -> str:
+    def _cache_key(*, geom_id: str, params: dict[str, float], alternative_id: str | None = None) -> str:
         payload = json.dumps(
-            {"geom_id": str(geom_id), "geom_param": {k: float(params[k]) for k in sorted(params.keys())}},
+            {
+                "geom_id": str(geom_id),
+                "alternative_id": None if alternative_id is None else str(alternative_id),
+                "geom_param": {k: float(params[k]) for k in sorted(params.keys())},
+            },
             sort_keys=True,
             ensure_ascii=True,
             separators=(",", ":"),
@@ -570,16 +674,36 @@ class ParametricPartsGeometryProvider:
     def get(self, geom_ref: dict[str, object] | None = None) -> GeometryContext:
         norm = _normalize_geom_ref(geom_ref)
         base_ctx = self._base_provider.get({"geom_id": str(norm.get("geom_id", "default"))})
-        if "geom_param" not in norm:
-            return base_ctx
+        alternative_id = str(norm["alternative_id"]) if "alternative_id" in norm else None
+        if "geom_param" not in norm and alternative_id is None:
+            if not self._manifest_path.exists():
+                return base_ctx
+            manifest_preview = json.loads(self._manifest_path.read_text(encoding="utf-8"))
+            if str(dict(manifest_preview).get("part_semantics", "simultaneous")).strip().lower() != "alternatives":
+                return base_ctx
         self._load_manifest_and_pack(base_ctx)
+        manifest = dict(self._manifest or {})
+        part_semantics = str(manifest.get("part_semantics", "simultaneous")).strip().lower()
+        if part_semantics != "alternatives" and "geom_param" not in norm:
+            return base_ctx
+        if part_semantics == "alternatives" and alternative_id is None:
+            geom_id = str(norm.get("geom_id", "default"))
+            if self._part_ids is not None and geom_id in set(self._part_ids):
+                alternative_id = geom_id
+            else:
+                alternative_id = str(manifest.get("default_alternative_id", "")).strip() or None
         params = self._resolve_effective_params(dict(norm.get("geom_param", {})))
-        cache_key = self._cache_key(geom_id=str(norm.get("geom_id", "default")), params=params)
+        cache_key = self._cache_key(
+            geom_id=str(norm.get("geom_id", "default")),
+            params=params,
+            alternative_id=alternative_id,
+        )
         if cache_key not in self._ctx_cache:
             self._ctx_cache[cache_key] = self._build_context_for_params(
                 base_ctx=base_ctx,
                 params=params,
                 geom_id=str(norm.get("geom_id", "default")),
+                alternative_id=alternative_id,
             )
         return self._ctx_cache[cache_key]
 

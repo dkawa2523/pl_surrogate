@@ -20,6 +20,51 @@ def test_run_bundle_loader_loads_assets(run_dir):
     assert bundle.transforms["cond_scaler"]["type"] == "zscore"
 
 
+def test_run_bundle_checkpoint_scaler_uses_recorded_protocol(monkeypatch, run_dir):
+    bundle = RunBundleLoader.load(run_dir)
+    bundle.transforms["protocol_transforms"] = {
+        "interp": {"cond_scaler": {"type": "sentinel"}, "y_scalers": {"phi": {"type": "sentinel"}}}
+    }
+    captured = {}
+
+    def _fake_transform(split_name=None, *, require_protocol=False):
+        captured["split_name"] = split_name
+        captured["require_protocol"] = require_protocol
+        return object()
+
+    monkeypatch.setattr(bundle, "transform_bundle", _fake_transform)
+    bundle.transform_bundle_for_checkpoint({"scaler_fit_split": "interp"})
+
+    assert captured == {"split_name": "interp", "require_protocol": True}
+
+
+def test_run_bundle_checkpoint_scaler_rejects_missing_split_provenance(run_dir):
+    bundle = RunBundleLoader.load(run_dir)
+    bundle.transforms["protocol_transforms"] = {
+        "extrap": {"cond_scaler": {"type": "sentinel"}, "y_scalers": {"phi": {"type": "sentinel"}}}
+    }
+
+    with pytest.raises(ValueError, match="missing scaler_fit_split"):
+        bundle.transform_bundle_for_checkpoint({})
+
+
+def test_run_bundle_checkpoint_spatial_scaler_uses_recorded_protocol(run_dir):
+    bundle = RunBundleLoader.load(run_dir)
+    bundle.transforms["protocol_transforms"] = {
+        "extrap": {
+            "cond_scaler": {"type": "sentinel"},
+            "y_scalers": {"phi": {"type": "sentinel"}},
+            "coord_feature_scaler": {"contract_version": 3, "enabled": False},
+            "distance_transform_stats": {"enabled": True, "signed_tanh_tau_auto": 2.0},
+        }
+    }
+
+    selected = bundle.spatial_transform_artifacts_for_checkpoint({"scaler_fit_split": "extrap"})
+
+    assert selected["coord_feature_scaler"]["contract_version"] == 3
+    assert selected["distance_transform_stats"]["signed_tanh_tau_auto"] == 2.0
+
+
 def test_run_bundle_loader_loads_optional_deeponet_schema(run_dir):
     dpath = run_dir / "preprocessing" / "sampling" / "deeponet" / "default"
     dpath.mkdir(parents=True)

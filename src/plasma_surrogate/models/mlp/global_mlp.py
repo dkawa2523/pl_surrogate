@@ -10,6 +10,9 @@ import numpy as np
 class GlobalMLP:
     """Condition-to-field model with optional hidden layers."""
 
+    requires_spatial_features = False
+    requires_scaled_spatial_features = False
+
     def __init__(
         self,
         input_dim: int,

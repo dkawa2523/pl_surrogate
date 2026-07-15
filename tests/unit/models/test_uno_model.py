@@ -55,6 +55,23 @@ def test_uno_forward_shape() -> None:
     assert np.isfinite(out).all()
 
 
+def test_uno_reflect_padding_preserves_output_shape() -> None:
+    require_torch_runtime()
+    model = UNOBaseline(
+        input_dim=3,
+        grid_shape=(9, 13),
+        out_channels=2,
+        output_keys=["density", "temperature"],
+        input_feature_channels=["x", "y"],
+        n_modes=3,
+        uno_cfg={**_uno_cfg(), "padding_fraction": 0.1, "padding_mode": "reflect"},
+        backend="torch",
+    )
+    model.set_static_spatial_features(np.zeros((9, 13, 2), dtype=np.float32))
+    out = model.forward(np.zeros((2, 3), dtype=np.float32))
+    assert out.shape == (2, 2, 9, 13)
+
+
 def test_uno_checkpoint_roundtrip(tmp_path: Path) -> None:
     require_torch_runtime()
     model = UNOBaseline(

@@ -39,9 +39,22 @@ class RunBundle:
             raise FileNotFoundError(f"Missing axis_schema.json under {self.run_dir / 'preprocessing' / 'schema'}")
         return AxisSchema.from_dict(raw)
 
-    def transform_bundle(self) -> TransformBundle:
-        cond_scaler = self.transforms.get("cond_scaler", {})
-        y_scalers = self.transforms.get("y_scalers", {})
+    def transform_bundle(
+        self,
+        split_name: str | None = None,
+        *,
+        require_protocol: bool = False,
+    ) -> TransformBundle:
+        protocol_name = "" if split_name is None else str(split_name).strip().lower()
+        protocol_transforms = dict(self.transforms.get("protocol_transforms", {}) or {})
+        selected = dict(protocol_transforms.get(protocol_name, {}) or {}) if protocol_name else {}
+        if protocol_name and require_protocol and not selected:
+            expected = self.run_dir / "preprocessing" / "scalers" / "by_split" / protocol_name
+            raise FileNotFoundError(
+                f"Missing train-only scaler artifacts for evaluation split={protocol_name!r}: {expected}"
+            )
+        cond_scaler = selected.get("cond_scaler", self.transforms.get("cond_scaler", {}))
+        y_scalers = selected.get("y_scalers", self.transforms.get("y_scalers", {}))
         if not cond_scaler or not y_scalers:
             raise FileNotFoundError(f"Missing scaler artifacts under {self.run_dir / 'preprocessing' / 'scalers'}")
         layout = self.schemas.get("output_layout", {})
@@ -55,6 +68,73 @@ class RunBundle:
             y_scalers=y_scalers,
             y_order=y_order,
         )
+
+    def transform_bundle_for_checkpoint(self, checkpoint_meta: dict[str, Any] | None) -> TransformBundle:
+        """Load the scaler fitted for the checkpoint's evaluation protocol.
+
+        Split-aware preprocessing stores independent train-only scalers under
+        ``scalers/by_split``.  Once those artifacts exist, silently falling
+        back to the root scaler would put checkpoint inputs and targets in a
+        different space, so missing checkpoint provenance is an error.  Runs
+        predating split-aware artifacts retain their legacy root-scaler path.
+        """
+
+        protocol_transforms = dict(self.transforms.get("protocol_transforms", {}) or {})
+        available = sorted(
+            str(name)
+            for name, payload in protocol_transforms.items()
+            if dict(payload or {}).get("cond_scaler") and dict(payload or {}).get("y_scalers")
+        )
+        split_name = str(dict(checkpoint_meta or {}).get("scaler_fit_split", "")).strip().lower()
+        if split_name:
+            return self.transform_bundle(split_name, require_protocol=True)
+        if available:
+            raise ValueError(
+                "checkpoint meta.json is missing scaler_fit_split while split-specific scaler artifacts exist; "
+                f"available={available}"
+            )
+        return self.transform_bundle()
+
+    def spatial_transform_artifacts_for_checkpoint(
+        self,
+        checkpoint_meta: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]]:
+        """Select spatial scaler/stat artifacts from the checkpoint's scaler lane."""
+
+        protocol_transforms = dict(self.transforms.get("protocol_transforms", {}) or {})
+        available = sorted(
+            str(name)
+            for name, payload in protocol_transforms.items()
+            if dict(payload or {}).get("cond_scaler") and dict(payload or {}).get("y_scalers")
+        )
+        split_name = str(dict(checkpoint_meta or {}).get("scaler_fit_split", "")).strip().lower()
+        if split_name:
+            selected = dict(protocol_transforms.get(split_name, {}) or {})
+            if not selected:
+                expected = self.run_dir / "preprocessing" / "scalers" / "by_split" / split_name
+                raise FileNotFoundError(
+                    f"Missing train-only spatial scaler artifacts for checkpoint split={split_name!r}: {expected}"
+                )
+            coord_feature_scaler = dict(selected.get("coord_feature_scaler", {}) or {})
+            distance_transform_stats = dict(selected.get("distance_transform_stats", {}) or {})
+            if not coord_feature_scaler or not distance_transform_stats:
+                raise FileNotFoundError(
+                    "Checkpoint scaler lane is missing coord_feature_scaler or distance_transform_stats: "
+                    f"split={split_name!r}"
+                )
+            return {
+                "coord_feature_scaler": coord_feature_scaler,
+                "distance_transform_stats": distance_transform_stats,
+            }
+        if available:
+            raise ValueError(
+                "checkpoint meta.json is missing scaler_fit_split while split-specific spatial scaler "
+                f"artifacts exist; available={available}"
+            )
+        return {
+            "coord_feature_scaler": dict(self.transforms.get("coord_feature_scaler", {}) or {}),
+            "distance_transform_stats": dict(self.transforms.get("distance_transform_stats", {}) or {}),
+        }
 
     def split_random(self) -> dict[str, list[str]]:
         split_path = self.run_dir / "preprocessing" / "split" / "split_random_v1.json"
@@ -129,6 +209,36 @@ class RunBundleLoader:
                 run_path / "preprocessing" / "scalers" / "distance_transform_stats.json"
             ),
             "xgrid_channel_scalers": cls._load_json_if_exists(run_path / "preprocessing" / "scalers" / "xgrid_channel_scalers.json"),
+            "protocol_transforms": {
+                split_name: {
+                    "cond_scaler": cls._load_json_if_exists(
+                        run_path / "preprocessing" / "scalers" / "by_split" / split_name / "cond_scaler.json"
+                    ),
+                    "y_scalers": cls._load_json_if_exists(
+                        run_path / "preprocessing" / "scalers" / "by_split" / split_name / "y_scalers.json"
+                    ),
+                    "fit_policy": cls._load_json_if_exists(
+                        run_path / "preprocessing" / "scalers" / "by_split" / split_name / "fit_policy.json"
+                    ),
+                    "coord_feature_scaler": cls._load_json_if_exists(
+                        run_path
+                        / "preprocessing"
+                        / "scalers"
+                        / "by_split"
+                        / split_name
+                        / "coord_feature_scaler.json"
+                    ),
+                    "distance_transform_stats": cls._load_json_if_exists(
+                        run_path
+                        / "preprocessing"
+                        / "scalers"
+                        / "by_split"
+                        / split_name
+                        / "distance_transform_stats.json"
+                    ),
+                }
+                for split_name in ("random", "interp", "extrap", "structure_holdout")
+            },
         }
 
         preprocess_report = cls._load_json_if_exists(run_path / "preprocessing" / "validation" / "report.json")
@@ -196,6 +306,9 @@ class RunBundleLoader:
             ),
             "geometry_cache_index": cls._load_json_if_exists(run_path / "featurization" / "geometry_cache_index.json"),
             "preprocess_report": preprocess_report,
+            "structure_holdout_meta": cls._load_json_if_exists(
+                run_path / "preprocessing" / "split" / "split_structure_holdout_meta_v1.json"
+            ),
             "coord_feature_pack_meta": cls._load_json_if_exists(coord_pack_meta_path) if coord_pack_meta_path else {},
             "coord_feature_pack": cls._load_npz_if_exists(coord_pack_path) if coord_pack_path else None,
             "structure_descriptor_pack_meta": cls._load_json_if_exists(descriptor_pack_meta_path) if descriptor_pack_meta_path else {},

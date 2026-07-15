@@ -61,13 +61,19 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run ICP part-SDF-lite shape optimization.")
     parser.add_argument("--config", required=True)
     parser.add_argument("--run-dir", required=True, help="Benchmark model run dir, e.g. runs/.../full/unet")
-    parser.add_argument("--model", default="ffno", choices=("unet", "ffno", "cno", "cno_operator_unet"))
+    parser.add_argument("--model", default="ffno", choices=("unet", "ffno", "u_no", "cno", "cno_operator_unet"))
+    parser.add_argument(
+        "--eval-protocol",
+        choices=("auto", "structure_holdout", "extrap", "interp"),
+        default="auto",
+        help="Checkpoint protocol. auto prefers structure_holdout, then extrap and interp.",
+    )
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--reference-case-id", default="case_g002_op01")
     parser.add_argument("--n-trials", type=int, default=512)
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--uniformity-target", default="ne")
-    parser.add_argument("--uniformity-region", default="plasma_mid_height")
+    parser.add_argument("--uniformity-target", default="ni")
+    parser.add_argument("--uniformity-region", default="wafer_near")
     parser.add_argument("--uniformity-score-mode", choices=("relative", "cv"), default="relative")
     parser.add_argument("--mid-height-band-px", type=int, default=2)
     parser.add_argument("--uniformity-row-index", type=int, default=None)
@@ -78,14 +84,14 @@ def _parse_args() -> argparse.Namespace:
         choices=("random", "optuna", "csv", "two_stage", "structure_diversity", "feature_archive"),
         default="two_stage",
     )
-    parser.add_argument("--objective-key", default="uniformity")
+    parser.add_argument("--objective-key", default="bohm_flux_uniformity")
     parser.add_argument("--objective-density-key", default="uniformity_max_density")
     parser.add_argument("--n-initial", type=int, default=256)
     parser.add_argument("--top-k", type=int, default=16)
     parser.add_argument("--local-trials-per-seed", type=int, default=16)
     parser.add_argument("--local-radius-frac", type=float, default=0.25)
-    parser.add_argument("--physics-term-weight", type=float, default=0.05)
-    parser.add_argument("--boundary-term-weight", type=float, default=0.1)
+    parser.add_argument("--physics-term-weight", type=float, default=0.0)
+    parser.add_argument("--boundary-term-weight", type=float, default=0.0)
     parser.add_argument("--positive-vars", nargs="*", default=["ne", "ni", "Te"])
     parser.add_argument("--positive-floor", type=float, default=1.0e-30)
     parser.add_argument("--space-mode", choices=("layout", "transform", "coil_series"), default="transform")
@@ -583,11 +589,24 @@ def _lhs_unit(rng: np.random.Generator, n: int, d: int) -> np.ndarray:
     return out
 
 
+def _sobol_unit(*, n: int, d: int, seed: int) -> np.ndarray:
+    """Return a deterministic scrambled Sobol design for this torch workflow."""
+
+    if n <= 0 or d <= 0:
+        return np.zeros((max(0, n), max(0, d)), dtype=np.float32)
+    try:
+        from torch.quasirandom import SobolEngine
+    except ImportError as exc:  # pragma: no cover - inference also requires torch
+        raise RuntimeError("scrambled Sobol sampling requires the torch optional dependency") from exc
+    engine = SobolEngine(dimension=int(d), scramble=True, seed=int(seed))
+    return engine.draw(int(n)).cpu().numpy().astype(np.float32, copy=False)
+
+
 def _series_structure_descriptor(
     *,
-    cond: dict[str, float],
     geom_param: dict[str, float],
     min_gap_frac: float,
+    length_scale: float = 1.5,
 ) -> tuple[np.ndarray, dict[str, float | str]]:
     rows, effective = _coil_series_layout(
         nncoil=float(geom_param["series.nncoil"]),
@@ -615,28 +634,22 @@ def _series_structure_descriptor(
     area_proxy = float(np.sum(widths * heights, dtype=np.float32))
     r_hist_edges = np.linspace(0.0, 30.0, 7, dtype=np.float32)
     r_hist = np.histogram(r_centers, bins=r_hist_edges)[0].astype(np.float32) / max(n, 1.0)
-    descriptor = np.asarray(
-        [
-            n,
-            ll,
-            span_r,
-            pitch,
-            min_gap,
-            fill_ratio,
-            area_proxy,
-            float(np.mean(r_centers, dtype=np.float32)),
-            float(np.std(r_centers, dtype=np.float32)),
-            float(np.min(r_centers)),
-            float(np.max(r_centers)),
-            float(np.mean(z_centers, dtype=np.float32)),
-            z_min,
-            z_max,
-            float(cond.get("pp", 0.0)) * 0.25,
-            float(cond.get("pp0", 0.0)) * 0.25,
-            *[float(v) for v in r_hist.tolist()],
-        ],
-        dtype=np.float32,
-    )
+    # Fixed, dimensionless geometry fingerprint. Operating conditions are
+    # deliberately excluded: pp/pp0 changes do not create a new structure.
+    safe_length_scale = max(abs(float(length_scale)), 1.0e-12)
+    descriptor_values: list[float] = []
+    for row in rows:
+        active = int(row.get("active", 0)) > 0
+        descriptor_values.extend(
+            [
+                1.0 if active else 0.0,
+                float(row["r_center"]) / 30.0 if active else 0.0,
+                float(row["z_center"]) / 22.0 if active else 0.0,
+                float(row["width"]) / safe_length_scale if active else 0.0,
+                float(row["height"]) / safe_length_scale if active else 0.0,
+            ]
+        )
+    descriptor = np.asarray([*descriptor_values, *[float(v) for v in r_hist.tolist()]], dtype=np.float32)
     meta = {
         "sampler_nncoil_effective": n,
         "sampler_pitch": pitch,
@@ -656,8 +669,23 @@ def _signature_from_descriptor(desc: np.ndarray, *, bins: int) -> str:
     vals = np.asarray(desc, dtype=np.float32).reshape(-1)
     finite = np.where(np.isfinite(vals), vals, 0.0)
     rounded = np.rint(finite * float(max(1, int(bins)))).astype(np.int32)
-    digest = hashlib.sha1(rounded.tobytes()).hexdigest()[:16]
+    digest = hashlib.sha256(rounded.tobytes()).hexdigest()[:16]
     return digest
+
+
+def _canonical_series_signature(rows: list[dict[str, float | int | str]], *, decimals: int = 8) -> str:
+    """Hash active rectangles in canonical order, ignoring inactive slot data."""
+
+    canonical: list[tuple[float, float, float, float]] = []
+    for row in rows:
+        if int(row.get("active", 0)) <= 0:
+            continue
+        canonical.append(
+            tuple(round(float(row[key]), int(decimals)) for key in ("r_min", "r_max", "z_min", "z_max"))
+        )
+    canonical.sort()
+    payload = json.dumps(canonical, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()[:16]
 
 
 def _farthest_indices(features: np.ndarray, n_select: int, *, rng: np.random.Generator) -> list[int]:
@@ -703,8 +731,13 @@ def _write_structure_diversity_candidates(
 
     candidates: list[dict[str, Any]] = []
     descriptors: list[np.ndarray] = []
+    exact_signatures: set[str] = set()
+    near_signatures: set[str] = set()
+    rejected_exact_duplicates = 0
+    rejected_near_duplicates = 0
+    length_scale = max(abs(float(v)) for v in args.llcoil_range)
     for count in counts:
-        unit = _lhs_unit(rng, n_per_count, len(continuous_keys))
+        unit = _sobol_unit(n=n_per_count, d=len(continuous_keys), seed=int(args.seed) + int(count))
         for row_idx in range(n_per_count):
             cond: dict[str, float] = {}
             geom: dict[str, float] = {"series.nncoil": float(count)}
@@ -719,7 +752,11 @@ def _write_structure_diversity_candidates(
                 else:
                     geom[key] = value
             try:
-                desc, meta = _series_structure_descriptor(cond=cond, geom_param=geom, min_gap_frac=float(args.min_gap_frac))
+                desc, meta = _series_structure_descriptor(
+                    geom_param=geom,
+                    min_gap_frac=float(args.min_gap_frac),
+                    length_scale=length_scale,
+                )
                 rows, _ = _coil_series_layout(
                     nncoil=float(geom["series.nncoil"]),
                     llcoil=float(geom["series.llcoil"]),
@@ -732,17 +769,35 @@ def _write_structure_diversity_candidates(
                 )
             except ValueError:
                 continue
+            exact_sig = _canonical_series_signature(rows)
+            if exact_sig in exact_signatures:
+                rejected_exact_duplicates += 1
+                continue
+            near_sig = _signature_from_descriptor(desc, bins=int(args.feature_dedupe_bins))
+            if near_sig in near_signatures:
+                rejected_near_duplicates += 1
+                continue
+            exact_signatures.add(exact_sig)
+            near_signatures.add(near_sig)
             descriptors.append(desc)
-            candidates.append({"cond": cond, "geom": _layout_param_values_from_rows(rows), "series_meta": geom, **meta})
+            candidates.append(
+                {
+                    "cond": cond,
+                    "geom": _layout_param_values_from_rows(rows),
+                    "series_meta": geom,
+                    "sampler_structure_signature": exact_sig,
+                    "sampler_near_signature": near_sig,
+                    **meta,
+                }
+            )
 
     if not candidates:
         raise ValueError("structure_diversity sampler generated no valid candidates")
 
     desc_mat = np.vstack(descriptors).astype(np.float32)
-    lo = np.nanmin(desc_mat, axis=0)
-    hi = np.nanmax(desc_mat, axis=0)
-    scale = np.where((hi - lo) > 1.0e-12, hi - lo, 1.0)
-    norm = (desc_mat - lo.reshape(1, -1)) / scale.reshape(1, -1)
+    # Channels use fixed physical scales, so distances do not change with the
+    # candidate pool or random seed.
+    norm = desc_mat
 
     selected: list[int] = []
     selected_set: set[int] = set()
@@ -772,16 +827,10 @@ def _write_structure_diversity_candidates(
 
     selected = selected[:n_trials]
     rows: list[dict[str, Any]] = []
-    seen_signatures: set[str] = set()
     for rank, idx in enumerate(selected):
         cand = candidates[idx]
-        sig = _signature_from_descriptor(norm[idx], bins=int(args.feature_dedupe_bins))
-        if sig in seen_signatures:
-            continue
-        seen_signatures.add(sig)
         row: dict[str, Any] = {
             "sampler_rank": int(rank),
-            "sampler_structure_signature": sig,
             **cand["cond"],
             **cand["geom"],
             **cand.get("series_meta", {}),
@@ -802,11 +851,17 @@ def _write_structure_diversity_candidates(
         "pool_size_requested": int(n_pool),
         "pool_size_valid": int(len(candidates)),
         "selected_count": int(len(rows)),
-        "unique_signature_count": int(len(seen_signatures)),
+        "unique_signature_count": int(len(exact_signatures)),
+        "unique_near_signature_count": int(len(near_signatures)),
+        "rejected_exact_duplicates": int(rejected_exact_duplicates),
+        "rejected_near_duplicates": int(rejected_near_duplicates),
         "coil_counts": counts,
         "continuous_keys": continuous_keys,
         "descriptor_dim": int(desc_mat.shape[1]),
         "dedupe_bins": int(args.feature_dedupe_bins),
+        "sampler": "scrambled_sobol",
+        "descriptor_scaling": "fixed_physical",
+        "condition_features_in_descriptor": False,
     }
 
 
@@ -1223,6 +1278,17 @@ def _plot_qoi_and_curve(out_dir: Path, base_qoi: dict[str, Any], best_qoi: dict[
         plt.close(fig)
 
 
+def _resolve_checkpoint_dir(run_dir: Path, model_name: str, protocol: str) -> tuple[Path, str]:
+    protocol_norm = str(protocol).strip().lower()
+    protocols = [protocol_norm] if protocol_norm != "auto" else ["structure_holdout", "extrap", "interp"]
+    for candidate_protocol in protocols:
+        candidate = run_dir / "models" / model_name / "eval_protocol" / candidate_protocol / "checkpoints"
+        if candidate.is_dir() and (candidate / "meta.json").is_file():
+            return candidate, candidate_protocol
+    searched = [str(run_dir / "models" / model_name / "eval_protocol" / p / "checkpoints") for p in protocols]
+    raise FileNotFoundError(f"no checkpoint directory found; searched: {searched}")
+
+
 def main() -> int:
     args = _parse_args()
     config_path = Path(args.config)
@@ -1260,9 +1326,10 @@ def main() -> int:
         provider_dataset_root = overlay_root
         manifest = json.loads((overlay_root / "geometry" / "parts_manifest.json").read_text(encoding="utf-8"))
         layout_specs = {str(k): dict(v) for k, v in dict(manifest["param_specs"]).items()}
-    model = load_checkpoint(run_dir / "models" / args.model / "eval_protocol" / "extrap" / "checkpoints")
+    checkpoint_dir, resolved_protocol = _resolve_checkpoint_dir(run_dir, str(args.model), str(args.eval_protocol))
+    model = load_checkpoint(checkpoint_dir)
     bundle = RunBundleLoader.load(run_dir, model=model)
-    checkpoint_meta_path = run_dir / "models" / args.model / "eval_protocol" / "extrap" / "checkpoints" / "meta.json"
+    checkpoint_meta_path = checkpoint_dir / "meta.json"
     checkpoint_meta = json.loads(checkpoint_meta_path.read_text(encoding="utf-8"))
     input_mode_meta = extract_input_mode_metadata(checkpoint_meta)
     strict_input_mode, allow_mode_fallback = resolve_benchmark_runtime_controls(cfg)
@@ -1390,6 +1457,7 @@ def main() -> int:
                 "uniformity_cfg": _uniformity_cfg(args),
                 "backend": backend,
                 "backend_requested": str(args.backend),
+                "eval_protocol": resolved_protocol,
                 "backend_cfg": backend_cfg,
                 "structure_sampler": sampler_summary,
                 "objective": objective_cfg,

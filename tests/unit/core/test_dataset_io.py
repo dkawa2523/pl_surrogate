@@ -197,3 +197,84 @@ def test_load_csv_npz_dataset_duplicate_case_id_fails_fast(tmp_path: Path):
             _csv_npz_cfg(root),
             run_dir=tmp_path,
         )
+
+
+def test_load_csv_npz_dataset_reads_case_structure_reference_and_metadata(tmp_path: Path):
+    root = tmp_path / "csv_ds"
+    root.mkdir(parents=True)
+    _write_geometry(root)
+    _write_case_npz(root / "a.npz")
+    structure_dir = root / "structure_features"
+    structure_dir.mkdir()
+    mask = np.ones((6, 6), dtype=np.float32)
+    part_stack = np.zeros((2, 6, 6), dtype=np.float32)
+    part_stack[0, 1, :] = 1.0
+    part_stack[1, 4, :] = 1.0
+    np.savez_compressed(
+        structure_dir / "base2.npz",
+        mask_plasma=mask,
+        valid_field_mask=mask,
+        outside_mask=np.zeros_like(mask),
+        part_mask_stack=part_stack,
+    )
+    (root / "index.csv").write_text(
+        "case_id,axis,c0,c1,c2,base_name,structure_output_key,structure_relative_path,structure_npz,fields_npz\n"
+        "case_a,0.0,0.1,0.2,0.3,base2,structure:model_mphtxt,structure/base2/model.mphtxt,"
+        "structure_features/base2.npz,a.npz\n",
+        encoding="utf-8",
+    )
+    cfg = {
+        **_csv_npz_cfg(root),
+        "structure_npz_column": "structure_npz",
+        "structure_base_name_column": "base_name",
+        "structure_output_key_column": "structure_output_key",
+        "structure_source_path_column": "structure_relative_path",
+    }
+
+    ds = load_csv_npz_dataset(cfg, run_dir=tmp_path)
+
+    case = ds.cases[0]
+    assert case["structure_npz"] == str(structure_dir / "base2.npz")
+    assert case["base_name"] == "base2"
+    assert case["geom_id"] == "base2"
+    assert case["structure_output_key"] == "structure:model_mphtxt"
+    assert case["structure_relative_path"] == "structure/base2/model.mphtxt"
+
+
+def test_load_csv_npz_dataset_validation_rejects_missing_pa_condition(tmp_path: Path):
+    root = tmp_path / "csv_ds"
+    root.mkdir(parents=True)
+    _write_geometry(root)
+    _write_case_npz(root / "a.npz")
+    (root / "index.csv").write_text(
+        "case_id,axis,c0,c1,c2,fields_npz\ncase_a,0.0,0.1,0.2,0.3,a.npz\n",
+        encoding="utf-8",
+    )
+    cfg = _csv_npz_cfg(root)
+    cfg["validation"] = {"required_condition_columns": ["PA"]}
+
+    with pytest.raises(ValueError, match="missing from dataset.cond_columns.*PA"):
+        load_csv_npz_dataset(cfg, run_dir=tmp_path)
+
+
+def test_load_csv_npz_dataset_validation_rejects_same_input_different_output(tmp_path: Path):
+    root = tmp_path / "csv_ds"
+    root.mkdir(parents=True)
+    _write_geometry(root)
+    _write_case_npz(root / "a.npz")
+    _write_case_npz(root / "b.npz")
+    with np.load(root / "b.npz") as payload:
+        changed = {key: np.asarray(payload[key]).copy() for key in payload.files}
+    changed["ne"][2, 2] = 9.0
+    np.savez_compressed(root / "b.npz", **changed)
+    (root / "index.csv").write_text(
+        "case_id,axis,c0,c1,c2,fields_npz\n"
+        "case_a,0.0,0.1,0.2,0.3,a.npz\n"
+        "case_b,0.0,0.1,0.2,0.3,b.npz\n",
+        encoding="utf-8",
+    )
+    cfg = _csv_npz_cfg(root)
+    cfg["validation"] = {"reject_same_input_different_output": True}
+
+    with pytest.raises(ValueError, match="identical model inputs with different outputs.*PA"):
+        load_csv_npz_dataset(cfg, run_dir=tmp_path)

@@ -76,6 +76,18 @@ diagnostics table.
 sign component uses `target_role_schema.positive_targets`; without positive
 metadata, that component contributes zero.
 
+Every quality row records the effective quality protocol version and a SHA-256
+definition hash over all resolved defaults. Legacy `pool_scale` and
+`pool_kernel` inputs are normalized to the canonical `multiscale_scales`
+definition before hashing; conflicting aliases fail fast.
+
+Dual-axis reports keep interpolation and extrapolation diagnostics explicitly
+suffixed. Only metric quantities with defined aggregation semantics are
+combined; epochs, counts, booleans, and provenance are never averaged. A
+missing or unreliable lane, a non-finite score, or a quality-definition hash
+mismatch makes the combined quality and validation selection value unreliable
+instead of silently reweighting the surviving lane.
+
 ## Optimization Objective
 
 The product objective mode is `weighted_sum`. Terms read scalar QoI first and
