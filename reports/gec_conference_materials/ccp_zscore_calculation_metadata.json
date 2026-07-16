@@ -1,0 +1,28 @@
+{
+  "figure": "GEC-CCP electron-density linear Z-score calculation sheet",
+  "fit_split": "interp train only",
+  "fit_case_count": 54,
+  "fit_region": "plasma_only",
+  "fit_pixel_count": 1321920,
+  "value_transform": "identity",
+  "clip": "none",
+  "std_ddof": 0,
+  "mean_m3": 1291523868075286.8,
+  "std_m3": 1871264003629447.2,
+  "forward_formula": "z=(ne-mu)/sigma",
+  "inverse_formula": "ne=mu+sigma*z",
+  "example": {
+    "ne_m3": 3000000000000000.0,
+    "z": 0.9130064644064143
+  },
+  "sources": {
+    "scalers": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/fno/preprocessing/scalers/by_split/interp/y_scalers.json",
+    "fit_policy": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/fno/preprocessing/scalers/by_split/interp/fit_policy.json",
+    "split": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/fno/preprocessing/split/split_interp_v1.json"
+  },
+  "output_files": [
+    "ccp_zscore_calculation.png",
+    "ccp_zscore_calculation.pdf",
+    "ccp_zscore_calculation.svg"
+  ]
+}

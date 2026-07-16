@@ -1,0 +1,36 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-ICP 2D electron density map is tilted as a flat plate for perspective presentation",
+  "sources": {
+    "field": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/fields/case_g002_op01.npz",
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz"
+  },
+  "system": "GEC-ICP",
+  "case_id": "case_g002_op01",
+  "view": "flat 2D map tilted in depth",
+  "shown_field": "ne",
+  "unit": "m^-3",
+  "height_encoding": "none; the plate is flat",
+  "color_encoding": "logarithmic ne [m^-3]",
+  "colormap": "viridis",
+  "display_stride": 6,
+  "display_limits": [
+    1e+16,
+    1e+19
+  ],
+  "display_only_plate_depth": 1.6,
+  "camera": {
+    "elevation_deg": 9.0,
+    "azimuth_deg": -58.0
+  },
+  "display_limits_m3": [
+    1e+16,
+    1e+19
+  ],
+  "output_stem": "icp_electron_density_perspective",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_electron_density_perspective.png",
+    "reports/gec_conference_materials/independent_assets/icp_electron_density_perspective.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_electron_density_perspective.svg"
+  ]
+}

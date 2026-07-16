@@ -1,0 +1,45 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The ICP dataset spans all five geometry parameters across 60 designs",
+  "sources": {
+    "index": "data/outputs_icp_stage4_enriched_360_csv_npz_core4_part_lite_v2/index.csv"
+  },
+  "parameters": {
+    "llcoil": {
+      "min": 0.5085,
+      "median": 1.0063499999999999,
+      "max": 1.4857,
+      "unique": 60
+    },
+    "rrc": {
+      "min": 2.018,
+      "median": 5.98745,
+      "max": 9.923,
+      "unique": 60
+    },
+    "nncoil": {
+      "min": 2.0,
+      "median": 4.0,
+      "max": 6.0,
+      "unique": 5
+    },
+    "rrce": {
+      "min": 20.0582,
+      "median": 25.05095,
+      "max": 29.8473,
+      "unique": 60
+    },
+    "zzc": {
+      "min": 0.0705,
+      "median": 2.5387500000000003,
+      "max": 4.9224,
+      "unique": 60
+    }
+  },
+  "output_stem": "icp_dataset_geometry_coverage",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_dataset_geometry_coverage.png",
+    "reports/gec_conference_materials/independent_assets/icp_dataset_geometry_coverage.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_dataset_geometry_coverage.svg"
+  ]
+}

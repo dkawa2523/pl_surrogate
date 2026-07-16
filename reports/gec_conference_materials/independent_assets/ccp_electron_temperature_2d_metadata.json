@@ -1,0 +1,26 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-CCP case shows the spatial electron temperature distribution",
+  "sources": {
+    "field": "data/outputs_merged_td_csv_periodic_ext0520_v2/fields/case_td003_pp0_3_gamma_007__steady.npz",
+    "structure": "data/outputs_merged_td_csv_periodic_ext0520_v2/structure_features/base4.npz"
+  },
+  "system": "GEC-CCP",
+  "case_id": "case_td003_pp0_3_gamma_007__steady",
+  "view": "2D axisymmetric map",
+  "shown_field": "Te",
+  "unit": "eV",
+  "normalization": "linear color scale",
+  "color_encoding": "linear Te [eV]",
+  "colormap": "plasma",
+  "display_limits": [
+    2.8287999629974365,
+    35.1058784484863
+  ],
+  "output_stem": "ccp_electron_temperature_2d",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/ccp_electron_temperature_2d.png",
+    "reports/gec_conference_materials/independent_assets/ccp_electron_temperature_2d.pdf",
+    "reports/gec_conference_materials/independent_assets/ccp_electron_temperature_2d.svg"
+  ]
+}

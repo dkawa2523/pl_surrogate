@@ -1,0 +1,25 @@
+{
+  "optimization_root": "runs\\gec_ccp_multi_sensor_input_optimization_cpu",
+  "surrogate_run_root": "runs\\gec_ccp_spatial_v3\\seed_413\\n78\\fno",
+  "method": "tpe",
+  "optimizer_seed": 20260715,
+  "measurement_ids": [
+    "M1",
+    "M2",
+    "M3"
+  ],
+  "case_ids": [
+    "case_td003_pa050_pp0_3_gamma_010__steady",
+    "case_td016_pp0_1_gamma_007__steady",
+    "case_td030_pa200_pp0_5_gamma_004__steady"
+  ],
+  "trials_per_measurement": 100,
+  "profile_evaluations": 300,
+  "sensor_points_per_measurement": 19,
+  "plot_points_per_profile": 181,
+  "plot_radial_step_mm": 0.5,
+  "colormap": "viridis",
+  "line_color_mapping": "continuous TPE trial number",
+  "cpu_threads": 20,
+  "wall_s": 57.89692919998197
+}

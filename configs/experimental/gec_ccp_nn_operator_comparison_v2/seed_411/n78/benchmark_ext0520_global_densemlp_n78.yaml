@@ -1,0 +1,273 @@
+benchmark:
+  output_dir: runs/gec_ccp_nn_operator_comparison_v2/seed_411/n78/global_densemlp
+  profile: m7_global_densemlp_isolated
+  seed: 411
+  phi_mode: direct
+  eval:
+    mask_metrics: plasma_only
+    interp_mode: marginal
+    protocol_variant: global_densemlp_gec_ccp_nn_operator_comparison_v2_n78_seed411
+    target_vars_for_score:
+    - ne
+    - ni
+    - Te
+    - phi
+    primary_metric: surrogate_quality_score
+    objective_mode: min
+    target_family_for_score: allvars
+    region_bands:
+      mode: fixed_px
+      boundary_in_px: 2.0
+      deep_plasma_px: 10.0
+    quality_score:
+      mode: spatial_huber
+      delta: 1.0
+      boundary_alpha: 2.0
+      boundary_band_px: 2.0
+      avgpool_lambda: 0.05
+      multiscale_scales:
+      - 3
+  eval_protocol:
+    mode: primary_axis
+    scope: global_densemlp_isolated
+    primary_split: interp
+    frozen_ref_tag: periodic_global_frozen_v2
+    interp_mode: marginal
+  dataset:
+    type: csv_npz
+    root: data/outputs_merged_td_csv_periodic_ext0520_v2
+    index_csv: index_78.csv
+    targets:
+    - id: ne
+      source_key: ne
+      value_transform: identity
+      units: m^-3
+      dtype: float32
+      role: density_electron
+      positive: true
+      field_family: density
+      default_region: plasma_only
+    - id: ni
+      source_key: ni
+      value_transform: identity
+      units: m^-3
+      dtype: float32
+      role: density_ion
+      positive: true
+      field_family: density
+      default_region: plasma_only
+    - id: Te
+      source_key: Te
+      value_transform: identity
+      units: eV
+      dtype: float32
+      role: temperature_electron
+      positive: true
+      field_family: temperature
+      default_region: plasma_only
+    - id: phi
+      source_key: phi
+      value_transform: identity
+      units: V
+      dtype: float32
+      role: potential
+      positive: false
+      field_family: electrostatic
+      default_region: plasma_only
+    cond_columns:
+    - PP0
+    - Td
+    - gamma
+    - PA
+    axis_column: axis
+    fields_npz_column: fields_npz
+    case_id_column: case_id
+    base_case_id_column: base_case_id
+    split_group_column: split_group
+    geometry_root: geometry
+    structure_npz_column: structure_npz
+    structure_base_name_column: base_name
+    structure_output_key_column: structure_output_key
+    structure_source_path_column: structure_relative_path
+    validation:
+      required_condition_columns:
+      - PA
+      reject_same_input_different_output: true
+      same_input_output_rtol: 0.0
+      same_input_output_atol: 0.0
+  split:
+    seed: 7
+    ratios:
+    - 0.7
+    - 0.15
+    - 0.15
+    structure_holdout:
+      enabled: true
+      required: true
+      group_key: base_name
+  preprocessing:
+    scalers:
+      enforce_target_transforms: true
+      y_fit_policy: plasma_only
+      target_transforms:
+        ne:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        ni:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        Te:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        phi:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+    distance_contract:
+      require_negative_outside: error
+    coord_grid_contract:
+      require_requested_source: 'off'
+    coord_grid_source: coord_grid
+    coord_features:
+      enabled: true
+      usage: supervision_only
+      channels_from_profile: part_lite_v1
+      output: features/coord_feature_pack.npz
+      static_output: features/static_spatial_feature_pack.npz
+      case_structure_output: features/case_structure_feature_pack.npz
+      require_case_variation: true
+      distance_transform_stats:
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
+        signed_quantile: 0.45
+        proximity_quantile: 0.25
+      scaling:
+        enabled: true
+        mode: zscore
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
+  train:
+    loss:
+      protocol: plasma_surrogate_v3
+      supervised:
+        type: huber
+        huber_delta: 1.0
+        mask: plasma_only
+        normalization: sample_mean
+        spatial:
+          gradient_weight: 0.1
+          gradient_spacing:
+          - 1.0
+          - 1.0
+          multiscale_weight: 0.05
+          multiscale_scales:
+          - 2
+          - 4
+          boundary_weight: 0.25
+          boundary_band_px: 2.0
+          boundary_distance_channels:
+          - distance_any
+          - part_sdf_nearest
+      group_weighting:
+        mode: uniform_by_group
+    global_densemlp:
+      epochs: 220
+      lr: 0.0004
+      batch_size_cases: 6
+      shuffle_cases: true
+      grad_scale:
+        mode: auto
+        auto_ref: active_pixels
+        auto_power: 0.5
+      layer_lr_multiplier:
+        hidden: 1.0
+        output: 10.0
+      grad_clip:
+        mode: per_sample
+        norm: 1.0
+        adaptive_by_dim: true
+      output_head_refresh:
+        enabled: true
+        every_n_epochs: 5
+        ridge: 0.0003
+      model_cfg:
+        backend: torch
+        width: 48
+        blocks: 3
+        growth_rate: 12
+        activation: gelu
+        dropout: 0.02
+        weight_decay: 0.0001
+      selection:
+        mode: best_val_spatial_objective
+        eval_every_n_epochs: 2
+        warmup_epochs: 8
+        weights:
+          ne: 0.25
+          ni: 0.25
+          Te: 0.25
+          phi: 0.25
+        spatial:
+          point_weight: 1.0
+          gradient_weight: 0.1
+          boundary_weight: 0.25
+          boundary_band_px: 2.0
+          gradient_spacing:
+          - 1.0
+          - 1.0
+        case_aggregation:
+          median_weight: 1.0
+          p90_weight: 0.25
+          worst_weight: 0.1
+      optimizer:
+        lr: 0.0004
+  boundary_operator:
+    primary_qoi_key: Gamma_i
+  physics:
+    enabled: false
+  inference:
+    axis:
+      mode: steady
+      value: 0.0
+    ood:
+      physics:
+        enabled: true
+        symbols:
+          density: ne
+          temperature: Te
+          potential: phi
+      qoi:
+        uniformity:
+          target: ne
+  runtime:
+    input_mode: table_only
+    strict_input_mode: error
+    structure:
+      feature_profile: none
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: none
+      provider_mode: fixed
+runtime:
+  input_mode: table_only
+  strict_input_mode: error
+  structure:
+    feature_profile: none
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: none
+    provider_mode: fixed

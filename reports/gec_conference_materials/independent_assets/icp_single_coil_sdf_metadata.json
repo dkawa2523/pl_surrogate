@@ -1,0 +1,21 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "A signed-distance field represents a coil boundary and distance locally",
+  "sources": {
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz"
+  },
+  "case_id": "case_g002_op01",
+  "kind": "single_coil",
+  "display_unit": "cm",
+  "display_limits_cm": [
+    -0.25,
+    3.0
+  ],
+  "strict_sign_contradiction_cells": 0,
+  "output_stem": "icp_single_coil_sdf",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_single_coil_sdf.png",
+    "reports/gec_conference_materials/independent_assets/icp_single_coil_sdf.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_single_coil_sdf.svg"
+  ]
+}

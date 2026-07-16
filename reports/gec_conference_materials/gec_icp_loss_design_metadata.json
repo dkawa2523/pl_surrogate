@@ -1,0 +1,104 @@
+{
+  "figure": "GEC-ICP training loss design",
+  "status": "trained_part_source_v1_baseline",
+  "model": "unet",
+  "representation": "part_source_v1",
+  "input_channels": [
+    "x",
+    "y",
+    "distance_signed",
+    "part_sdf_union",
+    "part_source_sum"
+  ],
+  "target_space": {
+    "fit_split": "structure_holdout_train_only",
+    "fit_region": "plasma_only",
+    "ne": {
+      "physical_clip": [
+        100000000.0,
+        1e+19
+      ],
+      "value_transform": "log10_floor",
+      "floor": 1e-30,
+      "scaler": "zscore"
+    },
+    "ni": {
+      "physical_clip": [
+        100000000.0,
+        1e+19
+      ],
+      "value_transform": "log10_floor",
+      "floor": 1e-30,
+      "scaler": "zscore"
+    },
+    "Te": {
+      "physical_clip": [
+        0.0,
+        20.0
+      ],
+      "value_transform": "log1p",
+      "scaler": "robust"
+    },
+    "phi": {
+      "physical_clip": [
+        -50.0,
+        50.0
+      ],
+      "value_transform": "signed_log1p",
+      "scaler": "robust"
+    }
+  },
+  "huber": {
+    "delta": 1.0
+  },
+  "per_target_loss": {
+    "point_weight": 1.0,
+    "gradient_weight": 0.02,
+    "gradient_normalization": "target_rms",
+    "gradient_epsilon": 0.05,
+    "multiscale_weight": 0.05,
+    "multiscale_scales": [
+      2,
+      4
+    ],
+    "boundary_weight": 0.0,
+    "mask": "plasma_only",
+    "normalization": "sample_mean"
+  },
+  "target_weights": {
+    "ne": 1.0,
+    "ni": 1.0,
+    "Te": 1.2,
+    "phi": 0.5
+  },
+  "physics_training_term": {
+    "enabled": false,
+    "weight": 0.0
+  },
+  "sources": {
+    "resolved_config": "runs/icp_stage4_coil_structure_v1/unet/resolved_config.yaml",
+    "effective_run_manifest": "runs/icp_stage4_coil_structure_v1/unet/manifest.json",
+    "trained_leaderboard": "runs/icp_stage4_coil_structure_v1/unet/leaderboard.csv",
+    "loss_composer": "src/plasma_surrogate/train/loss_composer.py"
+  },
+  "alternative_contract_not_plotted": {
+    "status": "configuration_only_not_yet_trained",
+    "purpose": "controlled dimension-vector versus coil-SDF/source representation study",
+    "loss": "axisymmetric-volume and electron-density-weighted MSE; no auxiliary terms",
+    "dimension_config": "configs/experimental/icp_stage4/generated_dimension_parameter_v1/benchmark_icp_stage4_dimension_parameter_v1_uno.yaml",
+    "sdf_config": "configs/experimental/icp_stage4/generated_axisymmetric_energy_weighted_v1/benchmark_icp_stage4_axisymmetric_energy_weighted_v1_uno.yaml",
+    "reason_not_plotted": "the main figure prioritizes the completed trained baseline"
+  },
+  "output_files": [
+    "gec_icp_loss_design.png",
+    "gec_icp_loss_design.pdf",
+    "gec_icp_loss_design.svg"
+  ],
+  "presentation_revision": "two_equations_three_ideas_v2",
+  "main_slide_message": "robust point fit with light gradient and multiscale shape preservation",
+  "omitted_from_main_figure": [
+    "target transform details",
+    "Huber piecewise definition",
+    "untrained alternative contract"
+  ]
+}

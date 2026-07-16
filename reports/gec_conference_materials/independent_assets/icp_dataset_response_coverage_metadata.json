@@ -1,0 +1,34 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "Train, Validation, and Test cover comparable ICP response ranges",
+  "sources": {
+    "index": "data/outputs_icp_stage4_enriched_360_csv_npz_core4_part_lite_v2/index.csv",
+    "split": "runs/icp_stage4_coil_structure_v1/unet/preprocessing/split/split_structure_holdout_v1.json"
+  },
+  "by_split": {
+    "train": {
+      "q05": 1.2934587919200418e+16,
+      "median": 3.2328267456021786e+17,
+      "q95": 3.396284725027676e+18
+    },
+    "val": {
+      "q05": 1.8724841438209636e+16,
+      "median": 4.4615058383133734e+17,
+      "q95": 2.1378806972676042e+18
+    },
+    "test": {
+      "q05": 7060753419232870.0,
+      "median": 3.224613548361514e+17,
+      "q95": 2.4678756652591084e+18
+    }
+  },
+  "overall_q05": 1.2838967945598074e+16,
+  "overall_q95": 3.325702335432816e+18,
+  "minimum": 279381771.2,
+  "output_stem": "icp_dataset_response_coverage",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_dataset_response_coverage.png",
+    "reports/gec_conference_materials/independent_assets/icp_dataset_response_coverage.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_dataset_response_coverage.svg"
+  ]
+}

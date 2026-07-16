@@ -1,0 +1,32 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-CCP 2D electric potential map is tilted as a flat plate for perspective presentation",
+  "sources": {
+    "field": "data/outputs_merged_td_csv_periodic_ext0520_v2/fields/case_td003_pp0_3_gamma_007__steady.npz",
+    "structure": "data/outputs_merged_td_csv_periodic_ext0520_v2/structure_features/base4.npz"
+  },
+  "system": "GEC-CCP",
+  "case_id": "case_td003_pp0_3_gamma_007__steady",
+  "view": "flat 2D map tilted in depth",
+  "shown_field": "phi",
+  "unit": "V",
+  "height_encoding": "none; the plate is flat",
+  "color_encoding": "linear phi [V], centered at zero",
+  "colormap": "coolwarm",
+  "display_stride": 3,
+  "display_limits": [
+    -163.07000732421875,
+    29.863000869750977
+  ],
+  "display_only_plate_depth": 0.75,
+  "camera": {
+    "elevation_deg": 9.0,
+    "azimuth_deg": -58.0
+  },
+  "output_stem": "ccp_electric_potential_perspective",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/ccp_electric_potential_perspective.png",
+    "reports/gec_conference_materials/independent_assets/ccp_electric_potential_perspective.pdf",
+    "reports/gec_conference_materials/independent_assets/ccp_electric_potential_perspective.svg"
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "figure": "Conference-ready GEC-ICP computational geometry overview",
+  "figure_variant": "color",
+  "case_id": "case_g002_op01",
+  "coordinate_system": "2D axisymmetric r-z section",
+  "length_unit": "cm",
+  "active_coil_count": 6,
+  "fixed_geometry_cm": {
+    "chamber_width": 30.0,
+    "chamber_height": 22.0,
+    "substrate_width": 15.0,
+    "substrate_height": 2.0,
+    "dielectric_block_width": 5.0,
+    "dielectric_block_height": 2.0,
+    "plasma_gap": 10.0,
+    "dielectric_window_width": 30.0,
+    "dielectric_window_height": 2.0
+  },
+  "derived_geometry_cm": {
+    "plasma_top": 12.0,
+    "dielectric_window_top": 14.0,
+    "dielectric_block_right": 20.0
+  },
+  "coils": [
+    {
+      "index": 1,
+      "order": 1,
+      "r_min": 3.7458,
+      "r_max": 4.3001,
+      "z_min": 14.9013,
+      "z_max": 15.4556
+    },
+    {
+      "index": 2,
+      "order": 2,
+      "r_min": 8.071466667,
+      "r_max": 8.625766667,
+      "z_min": 14.9013,
+      "z_max": 15.4556
+    },
+    {
+      "index": 3,
+      "order": 3,
+      "r_min": 12.39713333,
+      "r_max": 12.95143333,
+      "z_min": 14.9013,
+      "z_max": 15.4556
+    },
+    {
+      "index": 4,
+      "order": 4,
+      "r_min": 16.7228,
+      "r_max": 17.2771,
+      "z_min": 14.9013,
+      "z_max": 15.4556
+    },
+    {
+      "index": 5,
+      "order": 5,
+      "r_min": 21.04846667,
+      "r_max": 21.60276667,
+      "z_min": 14.9013,
+      "z_max": 15.4556
+    },
+    {
+      "index": 6,
+      "order": 6,
+      "r_min": 25.37413333,
+      "r_max": 25.92843333,
+      "z_min": 14.9013,
+      "z_max": 15.4556
+    }
+  ],
+  "sources": {
+    "case_structure_npz": "data\\outputs_icp_stage4_enriched_360_csv_npz_core4_part_lite_v2\\structure_features\\case_g002_op01.npz",
+    "coil_layout_csv": "data\\outputs_icp_stage4_enriched_360\\structure\\coil_layout\\case_g002_op01__coil_layout.csv",
+    "selection_labels_csv": "data\\outputs_icp_stage4_enriched_360\\labels\\case_g002_op01__selection_entities.csv",
+    "geometry_summary_json": "data\\outputs_icp_stage4_enriched_360\\structure\\geometry_summary\\case_g002_op01__geometry_summary.json",
+    "comsol_model_definition": "https://doc.comsol.com/6.4/doc/com.comsol.help.models.plasma.icp_coil_optimization/icp_coil_optimization.html",
+    "comsol_parameter_file": "https://www.comsol.com/model/download/1570841/icp_coil_optimization_parameters.txt"
+  },
+  "omitted_nonphysical_geometry": "Optimization integration segment at z=7 cm, 0<=r<=18 cm",
+  "output_files": [
+    "gec_icp_geometry_overview.png",
+    "gec_icp_geometry_overview.pdf",
+    "gec_icp_geometry_overview.svg"
+  ]
+}

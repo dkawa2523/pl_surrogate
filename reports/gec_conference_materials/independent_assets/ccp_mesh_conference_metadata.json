@@ -1,0 +1,19 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative CCP case uses the exported COMSOL quadrilateral mesh",
+  "sources": {
+    "mphtxt": "data/outputs_merged_td_all_success_pa_ext0520/structure/base4/argon_gec_ccp_base4.mphtxt"
+  },
+  "system": "GEC-CCP",
+  "case_id": "case_td003_pp0_3_gamma_007__steady",
+  "mesh_kind": "COMSOL quadrilateral mesh",
+  "mesh_vertices": 1520,
+  "mesh_elements": 1425,
+  "displayed_elements": 1425,
+  "output_stem": "ccp_mesh_conference",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/ccp_mesh_conference.png",
+    "reports/gec_conference_materials/independent_assets/ccp_mesh_conference.pdf",
+    "reports/gec_conference_materials/independent_assets/ccp_mesh_conference.svg"
+  ]
+}

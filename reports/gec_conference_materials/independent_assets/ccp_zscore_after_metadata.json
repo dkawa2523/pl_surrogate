@@ -1,0 +1,21 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "standardized electron density has zero mean and unit population standard deviation",
+  "sources": {
+    "split": "runs/gec_ccp_nn_operator_comparison_v1/seed_411/n78/ffno/preprocessing/split/split_interp_v1.json",
+    "scaler": "runs/gec_ccp_nn_operator_comparison_v1/seed_411/n78/ffno/preprocessing/scalers/by_split/interp/y_scalers.json"
+  },
+  "stage": "after",
+  "train_cases": 54,
+  "samples": 1321920,
+  "mean_m3": 1291523868075286.8,
+  "std_m3": 1871264003629447.2,
+  "z_mean": 4.953674846257779e-17,
+  "z_std_ddof0": 1.0000000000000002,
+  "output_stem": "ccp_zscore_after",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/ccp_zscore_after.png",
+    "reports/gec_conference_materials/independent_assets/ccp_zscore_after.pdf",
+    "reports/gec_conference_materials/independent_assets/ccp_zscore_after.svg"
+  ]
+}

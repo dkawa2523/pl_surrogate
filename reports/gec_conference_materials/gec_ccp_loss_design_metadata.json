@@ -1,0 +1,86 @@
+{
+  "figure": "GEC-CCP training loss design",
+  "status": "trained_comparison_contract",
+  "target_space": {
+    "physical_value_transform": "identity",
+    "scaler": "zscore",
+    "fit_split": "train_only",
+    "fit_region": "plasma_only",
+    "clip": "none",
+    "formula": "y_tilde=(y-mu_train_plasma)/sigma_train_plasma"
+  },
+  "targets": [
+    "ne",
+    "ni",
+    "Te",
+    "phi"
+  ],
+  "huber": {
+    "delta": 1.0
+  },
+  "per_target_loss": {
+    "point_weight": 1.0,
+    "boundary_weight": 0.25,
+    "boundary_band_px": 2.0,
+    "boundary_distance_channels": [
+      "distance_any",
+      "part_sdf_nearest"
+    ],
+    "gradient_weight": 0.1,
+    "gradient_spacing_px": [
+      1.0,
+      1.0
+    ],
+    "multiscale_weight": 0.05,
+    "multiscale_scales": [
+      2,
+      4
+    ],
+    "mask": "plasma_only",
+    "normalization": "sample_mean"
+  },
+  "field_family_weighting": {
+    "density": {
+      "share": 0.3333333333333333,
+      "targets": {
+        "ne": 0.16666666666666666,
+        "ni": 0.16666666666666666
+      }
+    },
+    "temperature": {
+      "share": 0.3333333333333333,
+      "targets": {
+        "Te": 0.3333333333333333
+      }
+    },
+    "electrostatic": {
+      "share": 0.3333333333333333,
+      "targets": {
+        "phi": 0.3333333333333333
+      }
+    }
+  },
+  "physics_training_term": {
+    "enabled": false,
+    "weight": 0.0
+  },
+  "sources": {
+    "config": "configs/experimental/gec_ccp_nn_operator_comparison_v1/seed_412/n78/benchmark_ext0520_fno_n78.yaml",
+    "effective_run_manifest": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/fno/manifest.json",
+    "loss_composer": "src/plasma_surrogate/train/loss_composer.py",
+    "target_group_weighting": "src/plasma_surrogate/core/target_groups.py",
+    "boundary_distance": "src/plasma_surrogate/core/boundary_distance.py"
+  },
+  "output_files": [
+    "gec_ccp_loss_design.png",
+    "gec_ccp_loss_design.pdf",
+    "gec_ccp_loss_design.svg"
+  ],
+  "presentation_revision": "two_equations_four_ideas_v2",
+  "main_slide_message": "robust point fit plus boundary, gradient, and multiscale structure",
+  "omitted_from_main_figure": [
+    "Huber piecewise definition",
+    "target standardization equation",
+    "implementation details"
+  ]
+}

@@ -1,0 +1,30 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-CCP case shows the spatial ion density distribution",
+  "sources": {
+    "field": "data/outputs_merged_td_csv_periodic_ext0520_v2/fields/case_td003_pp0_3_gamma_007__steady.npz",
+    "structure": "data/outputs_merged_td_csv_periodic_ext0520_v2/structure_features/base4.npz"
+  },
+  "system": "GEC-CCP",
+  "case_id": "case_td003_pp0_3_gamma_007__steady",
+  "view": "2D axisymmetric map",
+  "shown_field": "ni",
+  "unit": "m^-3",
+  "normalization": "logarithmic color scale",
+  "color_encoding": "logarithmic ni [m^-3]",
+  "colormap": "viridis",
+  "display_limits": [
+    10000000000000.0,
+    1e+16
+  ],
+  "display_limits_m3": [
+    10000000000000.0,
+    1e+16
+  ],
+  "output_stem": "ccp_ion_density_2d",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/ccp_ion_density_2d.png",
+    "reports/gec_conference_materials/independent_assets/ccp_ion_density_2d.pdf",
+    "reports/gec_conference_materials/independent_assets/ccp_ion_density_2d.svg"
+  ]
+}

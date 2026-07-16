@@ -1,0 +1,32 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-ICP 2D electric potential map is tilted as a flat plate for perspective presentation",
+  "sources": {
+    "field": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/fields/case_g002_op01.npz",
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz"
+  },
+  "system": "GEC-ICP",
+  "case_id": "case_g002_op01",
+  "view": "flat 2D map tilted in depth",
+  "shown_field": "phi",
+  "unit": "V",
+  "height_encoding": "none; the plate is flat",
+  "color_encoding": "linear phi [V]",
+  "colormap": "cividis",
+  "display_stride": 6,
+  "display_limits": [
+    0.166909858584404,
+    10.528311729431152
+  ],
+  "display_only_plate_depth": 1.6,
+  "camera": {
+    "elevation_deg": 9.0,
+    "azimuth_deg": -58.0
+  },
+  "output_stem": "icp_electric_potential_perspective",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_electric_potential_perspective.png",
+    "reports/gec_conference_materials/independent_assets/icp_electric_potential_perspective.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_electric_potential_perspective.svg"
+  ]
+}
