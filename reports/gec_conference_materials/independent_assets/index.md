@@ -1,5 +1,7 @@
 # GEC学会発表用・独立パーツ集
 
+[プロジェクト入口](../../../README.md) → [レポート一覧](../../index.md) → [GEC-CCP専用目次](../gec_ccp_index.md) → 独立パーツ集
+
 合成図から切り出した画像ではなく、現行データとsplitから一つずつ再描画した独立材料です。各図は4:3、PNG 3200×2400、PDF、SVG、metadata JSONを収録しています。
 
 ## 第三者向け・最初の選び方
@@ -11,6 +13,7 @@
 | データが応答範囲を覆うか | [CCP応答多様性](ccp_dataset_response_coverage.svg) / [ICP応答カバレッジ](icp_dataset_response_coverage.svg) | ICP形状カバレッジ、運転条件・応答面 |
 | モデル間の総合差は何か | [値・空間勾配誤差](ccp_model_accuracy_scatter.svg) | 高精度域拡大、物性別散布図 |
 | 物性ごとの予測性能は何か | [電子密度–電子温度 R²](ccp_model_r2_ne_vs_te.svg) / [イオン密度–電位 R²](ccp_model_r2_ni_vs_phi.svg) | 実測値CSV |
+| センサー計測から入力を最適化できるか | [multi-seed達成率](../optimization_assets/ccp_opt_multiseed_attainment_rate.png) / [TPE trial profile](../optimization_assets/ccp_opt_tpe_trial_profiles_all_measurements.png) | 収束、費用、最適化後電子密度場は[最適化グラフ集](../optimization_assets/index.md) |
 | 入力表現・前処理を説明したい | Z-score、寸法ベクトル、SDF | 本編ではなく手法・付録向け |
 
 形式は、編集する場合はSVG、投稿・配布はPDF、スライドへ直接貼る場合はPNGを推奨します。metadataは出典と再生成条件の確認用です。全素材の機械可読一覧は[asset_catalog.csv](asset_catalog.csv)にあります。
@@ -76,6 +79,26 @@ GEC-CCPは元のCOMSOLメッシュを表示しています。GEC-ICPはFEM要素
 ともに13テストケースの中央値を物性間で平均した値です。左下ほど、物理量の値と
 空間分布形状の両方を正しく再現しています。青丸はNeural Network系、橙菱形は
 Neural Operator系で、全点にモデル名を直接表示しています。
+
+### 比較対象モデルと位置づけ
+
+ここでの分類は、モデル比較図の色分けと一致します。全モデルはGEC-CCPの同じ固定格子上で、運転条件から電子密度 $n_e$、イオン密度 $n_i$、電子温度 $T_e$、電位 $\phi$ の空間分布を予測します。「Neural Operator」は本比較におけるアーキテクチャ系列を示す名称であり、未学習の解像度や異なる装置形状への汎化を実証したことを意味しません。
+
+| 表示名（実装ID） | 系列 | 本コードでの構成と特徴 | 比較上の位置づけ | 参考文献 |
+|---|---|---|---|---|
+| Global MLP (`global_mlp`) | Neural Network | 運転条件ベクトルを多層全結合層へ入力し、4物性の全格子値を一括出力する。空間畳み込みや座標ごとの演算を持たない。 | 最も単純なベクトル→場の基準モデル。固定格子には適用しやすいが、局所性・平滑性はアーキテクチャとして保証しない。 | Hornik, Stinchcombe & White, [*Multilayer feedforward networks are universal approximators* (1989)](https://doi.org/10.1016/0893-6080%2889%2990020-8) |
+| ResMLP (`global_resmlp`) | Neural Network | 条件ベクトルから全格子値を出力するMLPに、LayerNorm付き残差ブロックを導入する。 | 深い全結合モデルの最適化安定性を見る比較。画像用ResMLPの移植ではなく、残差結合をベクトル回帰へ適用した本コード独自の簡素な派生。 | 残差結合の原典：He et al., [*Deep Residual Learning for Image Recognition* (2016)](https://arxiv.org/abs/1512.03385) |
+| DenseMLP (`global_densemlp`) | Neural Network | 各全結合ブロックの新規特徴を既存特徴へ連結し、最後に圧縮して全格子値を出力する。 | 特徴再利用の効果を見るベクトル回帰モデル。畳み込みDenseNetそのものではなく、dense connectivityをMLPへ移した本コード独自の派生。 | 密結合の原典：Huang et al., [*Densely Connected Convolutional Networks* (2017)](https://arxiv.org/abs/1608.06993) |
+| U-Net (`unet`) | Neural Network | 条件・空間特徴マップを2D encoder–decoderへ入力し、同解像度の4物性場を出力する。encoderとdecoderをskip connectionで接続する。 | 局所構造と多尺度情報を明示的に扱うCNN基準モデル。固定格子上の場予測として使用。 | Ronneberger, Fischer & Brox, [*U-Net: Convolutional Networks for Biomedical Image Segmentation* (2015)](https://arxiv.org/abs/1505.04597) |
+| U-Net++ (`unetpp`) | Neural Network | U-Netのskip経路を入れ子状・密結合にしたdepth-2の2D encoder–decoder。本採用設定ではattentionを使用しない。 | U-Netより細かな特徴融合が有効かを1回のスクリーニング学習で確認する追加比較。 | Zhou et al., [*UNet++: A Nested U-Net Architecture for Medical Image Segmentation* (2018)](https://arxiv.org/abs/1807.10165) |
+| FNO (`fno`) | Neural Operator | 2D FFT上の低周波モードに学習可能なspectral convolutionを適用し、pointwise経路と加算する。 | 大域的な空間相関を周波数領域で扱う代表的operator基準モデル。 | Li et al., [*Fourier Neural Operator for Parametric Partial Differential Equations* (2021)](https://arxiv.org/abs/2010.08895) |
+| FFNO (`ffno`) | Neural Operator | 2D spectral演算を各空間軸の1D Fourier演算へ因子分解し、局所経路と組み合わせる。 | FNOに対し、スペクトル演算の軽量化・深層化による差を見る比較。 | Tran et al., [*Factorized Fourier Neural Operators* (2023)](https://arxiv.org/abs/2111.13802) |
+| U-NO (`u_no`) | Neural Operator | 低周波Fourier大域混合、局所畳み込み、残差結合を組み合わせた本コードの **U-NO-lite**。 | 大域成分と局所成分の併用を見る軽量比較。原著の完全なU字型・多解像度U-NOをそのまま再現したものではない。 | Rahman, Ross & Azizzadenesheli, [*U-NO: U-shaped Neural Operators* (2022)](https://arxiv.org/abs/2204.11127) |
+| CNO (`cno`) | Neural Operator | GroupNorm付き局所2D residual convolution blockを積層した本コードの **CNO-lite**。 | 連続場を意識した畳み込み系operatorの軽量スクリーニング。原著CNOの連続–離散等価性を含む全構成の再現ではない。 | Raonić et al., [*Convolutional Neural Operators for robust and accurate learning of PDEs* (2023)](https://arxiv.org/abs/2302.01178) |
+| POD-DeepONet (`deeponet_pod`) | Neural Operator / reduced order | 学習データだけから物性別POD基底を作り、branch MLPが運転条件からPOD係数を推定して全場を再構成する。 | 低次元の空間基底と条件回帰を分離でき、少数データで滑らかな場を表しやすい。本比較ではbranchを調整した採用版。R²図では表示名を「DeepONet」とする。 | Lu et al., [*A comprehensive and fair comparison of two neural operators (with practical extensions) based on FAIR data* (2022)](https://arxiv.org/abs/2111.05512) |
+| DeepONet (`deeponet_plasma`) | Neural Operator | 運転条件・センサー記述量を処理するbranchと、座標・Fourier特徴を処理するtrunkを組み合わせて各位置の値を出力する軽量plasma版。 | branch–trunk分解を直接使う比較。11モデルの誤差図には含むが、採用版との混同を避けるためR²図からは除外する。 | Lu et al., [*Learning nonlinear operators via DeepONet based on the universal approximation theorem of operators* (2021)](https://doi.org/10.1038/s42256-021-00302-5) |
+
+ResMLP、DenseMLP、U-NO、CNOには、原著の着想を本データの固定格子・少数条件回帰へ合わせた派生実装が含まれます。したがって、表中の文献はアーキテクチャ上の出発点であり、原著結果の直接再現を意味しません。R²散布図は調整済み `deeponet_pod` を「DeepONet」と表示し、未採用の `deeponet_plasma` を除外しています。一方、値・空間勾配誤差の全モデル散布図は両者を分けて掲載しています。
 
 | 独立材料 | この図だけで伝える内容 | ファイル |
 |---|---|---|

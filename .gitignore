@@ -29,6 +29,20 @@ tests/fixtures/generated/
 configs/experimental/icp_stage4/generated*/
 external_tools/ext0520/generated_configs/
 
+# Keep report navigation pages in the project while generated report assets stay ignored.
+!reports/
+reports/*
+!reports/index.md
+!reports/gec_conference_materials/
+reports/gec_conference_materials/*
+!reports/gec_conference_materials/gec_ccp_index.md
+!reports/gec_conference_materials/optimization_assets/
+!reports/gec_conference_materials/optimization_assets/**
+!reports/gec_conference_materials/model_detail_assets/
+!reports/gec_conference_materials/model_detail_assets/**
+!reports/icp_conference_materials/
+!reports/icp_conference_materials/**
+
 # Local datasets and generated conversion outputs
 data/
 data/outputs_merged_td_csv*/

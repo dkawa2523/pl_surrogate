@@ -4,6 +4,15 @@
 
 各図は PNG（スライド）、PDF（印刷・投稿）、SVG（編集）と、根拠を記録したmetadata JSONを収録しています。
 
+## GEC-CCPだけを探す場合
+
+GEC-CCPのジオメトリー、4物性の空間分布、モデル別の真値・予測・誤差、モデル比較図、最適化結果を
+まとめて探す場合は、[GEC-CCP専用目次](gec_ccp_index.md)を使用してください。
+プロジェクト直下の[README](../../README.md)と[レポート一覧](../index.md)からも到達できます。
+
+センサー同化・入力最適化の図だけを使う場合は、[GEC-CCP最適化グラフ集](optimization_assets/index.md)に
+収束、trial budget別達成率、最終品質、計算費用、TPE trial profile、最適化後電子密度場をまとめています。
+
 ## 独立パーツ集（スライド再配置用・推奨）
 
 複数パネルを後から分けて使う場合は、[第三者向け選択ガイド付きの独立パーツ集](independent_assets/index.md)を使用してください。機械可読の一覧は[asset_catalog.csv](independent_assets/asset_catalog.csv)です。

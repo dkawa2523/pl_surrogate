@@ -38,6 +38,11 @@ FIELD_DISPLAY_NAMES = {
     "temperature_electron": r"$T_e$",
     "potential": r"$\phi$",
 }
+MODEL_DISPLAY_NAMES = {
+    "ffno": "FFNO",
+    "deeponet_pod": "DeepONet (POD)",
+    "global_mlp": "Global MLP",
+}
 TARGET_COLOR = np.asarray([1.0, 1.0, 1.0, 1.0], dtype=np.float32)
 OUTSIDE_COLOR = np.asarray([0.90, 0.90, 0.90, 1.0], dtype=np.float32)
 PART_COLORS = (
@@ -61,6 +66,9 @@ plt.rcParams.update(
         "axes.linewidth": 0.8,
         "figure.dpi": 150,
         "savefig.dpi": 300,
+        "figure.facecolor": "white",
+        "axes.facecolor": "white",
+        "savefig.facecolor": "white",
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     }
@@ -570,7 +578,8 @@ def _plot_field(
         frameon=False,
     )
     title = fig.suptitle(
-        f"{model.upper()} | {split} {label} | {_field_label(field, metadata)} | rel. RMSE={rel_rmse:.4g}",
+        f"{MODEL_DISPLAY_NAMES.get(model, model.upper())} | {split} {label} | "
+        f"{_field_label(field, metadata)} | rel. RMSE={rel_rmse:.4g}",
         y=1.01,
         fontsize=8.5,
     )
@@ -659,6 +668,7 @@ def _write_model_summary_pages(
     plot_rows: list[dict[str, Any]],
     field_summary_rows: list[dict[str, Any]],
     split_files: dict[str, str] | None = None,
+    fixed_case_id: str | None = None,
 ) -> dict[str, Path]:
     requested_splits = SPLIT_FILES if split_files is None else split_files
     out_dir = OUT_ROOT / "model_summaries"
@@ -675,6 +685,11 @@ def _write_model_summary_pages(
             "",
             f"- validation-only representative seed: `{spec.get('seed', '') or 'not recorded'}`",
             f"- run: `{str(spec['run_root']).replace(chr(92), '/')}`",
+            *(
+                [f"- Common held-out representative case: `{fixed_case_id}`"]
+                if fixed_case_id is not None
+                else []
+            ),
             "- 代表ケースは4物性の平均相対RMSEで best / p25 / median / p75 / worst を選択",
             "- 各図は Structure / Mask、Truth、Prediction、Signed error の順",
             "- Truth と Prediction は同じカラースケール",
@@ -717,12 +732,15 @@ def _write_model_summary_pages(
                     key=lambda row: label_order.get(str(row["case_label"]), 999),
                 )
                 lines.extend([f"### {field}", ""])
-                median = next((row for row in field_plots if row["case_label"] == "median"), None)
-                if median is not None:
-                    png = "../" + str(median["png_path"])
+                preview = next(
+                    (row for row in field_plots if row["case_label"] in {"representative", "median"}),
+                    None,
+                )
+                if preview is not None:
+                    png = "../" + str(preview["png_path"])
                     lines.extend(
                         [
-                            f"[![{model} {split} {field} median]({png})]({png})",
+                            f"[![{model} {split} {field} {preview['case_label']}]({png})]({png})",
                             "",
                         ]
                     )
@@ -767,6 +785,15 @@ def _parse_args() -> argparse.Namespace:
         choices=tuple(SPLIT_FILES),
         default=list(SPLIT_FILES),
         help="Evaluation splits to plot. Defaults to both interp and extrap.",
+    )
+    parser.add_argument(
+        "--fixed-case-id",
+        type=str,
+        default=None,
+        help=(
+            "Plot one explicit held-out case for every model instead of selecting model-specific "
+            "best/quantile/worst cases. The case must occur in every requested test split."
+        ),
     )
     return parser.parse_args()
 
@@ -859,7 +886,20 @@ def main() -> None:
                             rels.append(rel)
                     row["score_mean_rel_rmse"] = float(np.mean(rels)) if rels else float("nan")
                     records.append(row)
-                for idx, label in _select(records).items():
+                if args.fixed_case_id is None:
+                    selected = _select(records)
+                else:
+                    matching = [
+                        idx for idx, row in enumerate(records)
+                        if str(row["case_id"]) == str(args.fixed_case_id)
+                    ]
+                    if len(matching) != 1:
+                        raise ValueError(
+                            f"fixed case {args.fixed_case_id!r} must occur exactly once for "
+                            f"model={model!r}, split={split!r}; found {len(matching)}"
+                        )
+                    selected = {matching[0]: "representative"}
+                for idx, label in selected.items():
                     row = records[idx]
                     row["selected_label"] = label
                     case_id = str(row["case_id"])
@@ -992,6 +1032,7 @@ def main() -> None:
         plot_rows=plot_rows,
         field_summary_rows=field_summaries,
         split_files=split_files,
+        fixed_case_id=args.fixed_case_id,
     )
     field_order = list(dict.fromkeys(str(row["field"]) for row in plot_rows))
     summary_by_key = {

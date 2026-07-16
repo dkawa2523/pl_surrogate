@@ -1,0 +1,13 @@
+{
+  "source_run": "runs/icp_stage4_part_sdf_lite_v1_e80_primary/optimize_process_layout_mean_height_balanced_wide/ffno",
+  "model": "ffno",
+  "reference_case": "case_g002_op01",
+  "optimization_space": "process_conditions_plus_six_coil_rectangles",
+  "optimizer": "random_search",
+  "n_trials": 240,
+  "baseline_objective": 0.3543931414972725,
+  "best_objective": 0.306884105029086,
+  "best_trial_one_based": 158,
+  "objective_improvement_percent": 13.405743764528294,
+  "best_mean_density_ratio": 1.0954779614469523
+}
