@@ -44,6 +44,15 @@ GEC-CCPの発表用画像は、主に[`independent_assets/`](independent_assets/
 これらの詳細図はモデルごとに代表ケースが異なる場合があります。モデル間を同じ座標上で
 比較するときは、次節の共通テスト集約図とCSVを併用してください。
 
+## 学習データ数の比較
+
+学習条件数54・48・36・24に対する全モデルの誤差と、共通Mediumテストケースにおける
+FFNO／DenseMLPの電子密度空間誤差をまとめています。
+
+- [学会用グラフ一式](training_size_ablation/index.md)
+- 全体指標: case-macro relative RMSE／case-macro relative gradient error
+- 空間分布: 真値、54条件モデルの符号付き誤差、24条件モデルの符号付き誤差
+
 ## モデル比較
 
 | 図 | ファイル |

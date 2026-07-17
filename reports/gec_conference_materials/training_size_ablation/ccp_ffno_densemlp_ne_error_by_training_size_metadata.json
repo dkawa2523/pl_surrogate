@@ -1,0 +1,47 @@
+{
+  "case_id": "case_td003_pp0_3_gamma_004__steady",
+  "case_conditions": {
+    "PP0": 3.0,
+    "Td": 0.03,
+    "gamma": 0.04,
+    "PA": 0.1
+  },
+  "split": "interp",
+  "case_label": "medium",
+  "field": "ne",
+  "units": "m^-3",
+  "common_color_scale": true,
+  "color_scale_min_m3": 0.0,
+  "color_scale_max_m3": 6193450215014400.0,
+  "error_definition": "100 * (prediction - truth) / max(abs(truth)) within plasma target",
+  "error_color_scale_percent": [
+    -30.0,
+    30.0
+  ],
+  "panel_layout": [
+    "ground_truth",
+    "signed_error_n54",
+    "signed_error_n24"
+  ],
+  "relative_rmse": {
+    "ffno_n54": 0.013268275189992795,
+    "ffno_n24": 0.07124886708566941,
+    "global_densemlp_n54": 0.08809436725994575,
+    "global_densemlp_n24": 0.2080509615294262
+  },
+  "run_roots": {
+    "ffno_n54": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/ffno",
+    "ffno_n24": "runs/gec_ccp_training_size_ablation_v1/n24/ffno",
+    "global_densemlp_n54": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_densemlp",
+    "global_densemlp_n24": "runs/gec_ccp_training_size_ablation_v1/n24/global_densemlp"
+  },
+  "selection_manifests": {
+    "n54": "runs/gec_ccp_training_size_ablation_v1/summary_all_models/selection_manifest_n54.csv",
+    "n24": "runs/gec_ccp_training_size_ablation_v1/summary_all_models/selection_manifest_n24.csv"
+  },
+  "outputs": [
+    "reports/gec_conference_materials/training_size_ablation/ccp_ffno_densemlp_ne_error_by_training_size.png",
+    "reports/gec_conference_materials/training_size_ablation/ccp_ffno_densemlp_ne_error_by_training_size.pdf",
+    "reports/gec_conference_materials/training_size_ablation/ccp_ffno_densemlp_ne_error_by_training_size.svg"
+  ]
+}
