@@ -1,0 +1,58 @@
+{
+  "title": "GEC-CCP pseudo-PAP inverse problem",
+  "source_run": "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1",
+  "model_run": "runs\\gec_ccp_nn_operator_comparison_v1\\seed_412\\n78\\ffno",
+  "case_id": "case_td030_pa200_pp0_5_gamma_007__steady",
+  "pseudo_truth_source": "COMSOL non-held-out field; not FFNO-generated; presentation-only",
+  "case_is_held_out_interp_test": false,
+  "presentation_scope": "presentation-only near-current-optimum train case; not valid as held-out accuracy evidence",
+  "measurement": {
+    "quantity": "electron density",
+    "height_mm": 12.7,
+    "radial_positions_mm": [
+      0.0,
+      5.0,
+      10.0,
+      15.0,
+      20.0,
+      25.0,
+      30.0,
+      35.0,
+      40.0,
+      45.0,
+      50.0,
+      55.0,
+      60.0,
+      65.0,
+      70.0,
+      75.0,
+      80.0,
+      85.0,
+      90.0
+    ],
+    "n_points": 19,
+    "point_noise_rel": 0.05,
+    "noise_clip_rel": 0.1,
+    "noise_seed": 20260717
+  },
+  "inverse_variables": [
+    "PP0",
+    "PA",
+    "gamma"
+  ],
+  "fixed_conditions": {
+    "Td": 0.3,
+    "geometry": {
+      "geom_id": "base2"
+    }
+  },
+  "objective": "linear electron-density profile relative L2; no logarithm",
+  "outputs": [
+    "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1\\ccp_pseudo_pap_problem_setup.png",
+    "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1\\ccp_pseudo_pap_problem_setup.pdf",
+    "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1\\ccp_pseudo_pap_problem_setup.svg",
+    "reports\\gec_conference_materials\\optimization_assets\\pap_inverse_example\\ccp_pseudo_pap_problem_setup.png",
+    "reports\\gec_conference_materials\\optimization_assets\\pap_inverse_example\\ccp_pseudo_pap_problem_setup.pdf",
+    "reports\\gec_conference_materials\\optimization_assets\\pap_inverse_example\\ccp_pseudo_pap_problem_setup.svg"
+  ]
+}

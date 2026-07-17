@@ -20,7 +20,7 @@ GEC-CCPの発表用画像は、主に[`independent_assets/`](independent_assets/
 | データセットの応答範囲 | [応答多様性 SVG](independent_assets/ccp_dataset_response_coverage.svg) |
 | モデルの値精度と空間形状精度 | [全モデル散布図 SVG](independent_assets/ccp_model_accuracy_scatter.svg) |
 | 物性別のモデル精度 | [電子密度–電子温度 R²](independent_assets/ccp_model_r2_ne_vs_te.svg) / [イオン密度–電位 R²](independent_assets/ccp_model_r2_ni_vs_phi.svg) |
-| センサー同化・入力最適化 | [multi-seed達成率](optimization_assets/ccp_opt_multiseed_attainment_rate.png) / [TPE trial profile](optimization_assets/ccp_opt_tpe_trial_profiles_all_measurements.png) |
+| センサー同化・入力最適化 | [疑似PAP問題設定・500 trialアニメーション](optimization_assets/pap_inverse_example/index.md) / [multi-seed達成率](optimization_assets/ccp_opt_multiseed_attainment_rate.png) / [TPE trial profile](optimization_assets/ccp_opt_tpe_trial_profiles_all_measurements.png) |
 
 ## 4物性の空間分布
 
@@ -81,7 +81,7 @@ FFNO／POD-DeepONet／DenseMLPの54条件Truth・Prediction・Error、およびF
 | データセット品質 | [応答多様性](independent_assets/ccp_dataset_response_coverage.svg) |
 | 前処理 | [Z-score前](independent_assets/ccp_zscore_before.svg) / [Z-score後](independent_assets/ccp_zscore_after.svg) |
 | 計算手順・loss | [Z-score計算](ccp_zscore_calculation.svg) / [loss計算](gec_ccp_loss_calculation.svg) / [簡略loss](gec_ccp_loss_design.svg) |
-| センサー同化・入力最適化 | [学会用最適化グラフ集](optimization_assets/index.md) |
+| センサー同化・入力最適化 | [疑似PAP逆問題](optimization_assets/pap_inverse_example/index.md) / [学会用最適化グラフ集](optimization_assets/index.md) |
 | 全素材の詳細と選択指針 | [独立パーツ集](independent_assets/index.md) |
 | 機械可読カタログ | [asset_catalog.csv](independent_assets/asset_catalog.csv) |
 

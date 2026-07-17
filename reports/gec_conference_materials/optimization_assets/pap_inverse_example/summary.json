@@ -1,0 +1,144 @@
+{
+  "created_utc": "2026-07-17T05:41:26.825971+00:00",
+  "title": "FFNO PAP radial-profile inverse example",
+  "model": "ffno",
+  "device": "cpu",
+  "run_root": "runs\\gec_ccp_nn_operator_comparison_v1\\seed_412\\n78\\ffno",
+  "case_id": "case_td030_pa200_pp0_5_gamma_007__steady",
+  "case_is_held_out_interp_test": false,
+  "case_selection": "presentation-only near-current-optimum train case; not valid as held-out accuracy evidence",
+  "pseudo_truth_source": "COMSOL non-held-out field; not FFNO-generated; presentation-only",
+  "observation": "PAP local electron density sampled as a radial scan at one height",
+  "objective": "linear electron-density profile relative L2; no logarithm",
+  "z_mm": 12.7,
+  "r_max_mm": 90.0,
+  "r_step_mm": 5.0,
+  "sensor_points": 19,
+  "point_noise_rel": 0.05,
+  "noise_clip_rel": 0.1,
+  "noise_seed": 20260717,
+  "optimizer": "CMA-ES",
+  "optimizer_config": {
+    "sampler": "cmaes",
+    "n_startup_trials": 1,
+    "sigma0": 0.25,
+    "popsize": 9,
+    "x0": {
+      "PP0": 1.5,
+      "PA": 0.18,
+      "gamma": 0.045
+    },
+    "initial_cond": {
+      "PP0": 1.5,
+      "PA": 0.18,
+      "gamma": 0.045
+    },
+    "effective_sampler": "cmaes"
+  },
+  "optimizer_seed": 412,
+  "requested_trials": 500,
+  "n_trials": 500,
+  "search_space": {
+    "PP0": [
+      1.0,
+      5.0
+    ],
+    "PA": [
+      0.05,
+      0.2
+    ],
+    "gamma": [
+      0.04,
+      0.1
+    ]
+  },
+  "fixed_conditions": {
+    "Td": 0.3,
+    "geometry": {
+      "geom_id": "base2"
+    }
+  },
+  "truth_conditions": {
+    "PP0": 5.0,
+    "Td": 0.3,
+    "gamma": 0.07,
+    "PA": 0.2
+  },
+  "initial_conditions": {
+    "PP0": 1.5,
+    "PA": 0.18,
+    "gamma": 0.045
+  },
+  "best_conditions": {
+    "PA": 0.19986835218734827,
+    "PP0": 4.9998764652131715,
+    "gamma": 0.0742568200684784
+  },
+  "realized_noise_rel_l2": 0.0481981489923106,
+  "initial_sensor_loss": 0.639858934936014,
+  "truth_input_sensor_loss": 0.04851186836353863,
+  "best_sensor_loss": 0.04856949575318229,
+  "best_profile_truth_rel_l2": 0.006090614682740693,
+  "initial_normalized_shape_l2": 0.08776774559559777,
+  "best_normalized_shape_l2": 0.006084020193584064,
+  "truth_peak_radius_mm": 10.0,
+  "initial_peak_radius_mm": 20.0,
+  "best_peak_radius_mm": 10.0,
+  "PP0_abs_error": 0.00012353478682847197,
+  "PA_abs_error": 0.0001316478126517362,
+  "engine_load_s": 1.5038676999974996,
+  "optimization_wall_s": 87.14583799999673,
+  "mean_existing_comsol_case_s": 283.62753846153845,
+  "direct_comsol_estimated_hours": 39.39271367521367,
+  "online_speedup_estimate": 1627.3154574607975,
+  "direct_cost_is_estimate": true,
+  "best_to_truth_input_loss_ratio": 1.0011879029109292,
+  "best_trial": 482,
+  "first_within_10pct_of_truth_input_trial": 103,
+  "gamma_abs_error": 0.004256820068478398,
+  "pca_response_surface": {
+    "variables": [
+      "PP0",
+      "PA",
+      "gamma"
+    ],
+    "input_normalization": "min-max by configured search bounds",
+    "mean_scaled": [
+      0.9308963095112467,
+      0.9465195439614026,
+      0.6657235726662779
+    ],
+    "components": [
+      [
+        0.5878005396805194,
+        0.2804953063120478,
+        0.7588233712058429
+      ],
+      [
+        -0.6284403581373867,
+        -0.43236479173454506,
+        0.6466246230484084
+      ]
+    ],
+    "explained_variance_ratio": [
+      0.7370194799858593,
+      0.17619617696670245
+    ],
+    "truth_score": [
+      -0.07013471663744224,
+      -0.17371155694193133
+    ],
+    "best_score": [
+      -0.016562804798276685,
+      -0.12743660465043655
+    ],
+    "initial_score": [
+      -0.9380359677019378,
+      0.1643954690560512
+    ],
+    "reference_run": null,
+    "response_trials": 500,
+    "surface": "Gaussian-kernel smoothed log-loss surface across the full rectangular PC1-PC2 plotting range; bandwidth=0.18 in score-standardized PCA coordinates; visualization only; sparse-edge regions are extrapolated estimates",
+    "color_scale_floor_percent": 1.0
+  }
+}

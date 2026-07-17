@@ -15,6 +15,8 @@ GEC-CCPのジオメトリー、4物性の空間分布、モデル別の真値・
 
 センサー同化・入力最適化の図だけを使う場合は、[GEC-CCP最適化グラフ集](optimization_assets/index.md)に
 収束、trial budget別達成率、最終品質、計算費用、TPE trial profile、最適化後電子密度場をまとめています。
+[疑似PAP逆問題の学会用資料](optimization_assets/pap_inverse_example/index.md)では、問題設定図、
+CMA-ESの500 trialアニメーション、静止画、CSV、metadataを一括して参照できます。
 
 ## 独立パーツ集（スライド再配置用・推奨）
 

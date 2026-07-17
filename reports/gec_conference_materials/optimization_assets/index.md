@@ -10,6 +10,15 @@
 
 ## 学会本編の推奨図
 
+### 問題設定
+
+[![疑似PAP問題設定](pap_inverse_example/ccp_pseudo_pap_problem_setup.png)](pap_inverse_example/ccp_pseudo_pap_problem_setup.png)
+
+左はCOMSOL電子密度の空間分布、`z=12.7 mm` の走査線、19点のPAP計測位置です。右は同じ高さの
+半径方向疑似真値と5%ノイズ付き疑似PAP値です。この図のCOMSOL条件は逆問題の挙動説明用に選んだ
+non-held-out trainケースであり、モデルのheld-out汎化精度を示す図ではありません。
+[疑似PAP逆問題の学会用資料一式](pap_inverse_example/index.md) / [PNG](pap_inverse_example/ccp_pseudo_pap_problem_setup.png) / [PDF](pap_inverse_example/ccp_pseudo_pap_problem_setup.pdf) / [SVG](pap_inverse_example/ccp_pseudo_pap_problem_setup.svg) / [metadata](pap_inverse_example/ccp_pseudo_pap_problem_setup_metadata.json)
+
 | 順序 | 図 | この図で伝える内容 | ファイル |
 |---:|---|---|---|
 | 1 | 共通品質の達成率 | 3計測×5 optimizer seedで、trial budgetに対する成功率を比較 | [PNG](ccp_opt_multiseed_attainment_rate.png) |
