@@ -1,0 +1,48 @@
+{
+  "purpose": "ICP conference final Bohm-flux optimization animations",
+  "presentation_trial_order": "interleaved_by_coil_count",
+  "coil_counts": [2, 3, 4, 5],
+  "trials_per_coil_count": 75,
+  "frame_count": 300,
+  "fps": 12.0,
+  "playback_duration_seconds": 26.7166666667,
+  "final_frame_hold_ms": 1800,
+  "wafer_layers": 10,
+  "radial_bins": 32,
+  "density_threshold_m3": 1e17,
+  "fixed_bohm_profile_ylim_scaled_1e20": [0.0, 4.5],
+  "sdf": {
+    "run": "runs/icp_stage4_bohm_flux_sdf_500trials_spacing_slope_v4",
+    "animation": "reports/icp_conference_materials/sdf_bohm_optimization/bohm_optimization_trial_animation.gif",
+    "static_svg": "reports/icp_conference_materials/sdf_bohm_optimization/bohm_optimization_conference_layout.svg",
+    "best_presentation_trial": 127,
+    "source_trial_id": 281,
+    "best_loss": 0.08647741377353668,
+    "max_deviation": 0.136849045753479,
+    "mean_density_m3": 1.0266618527901286e17,
+    "coil_count": 4,
+    "animation_sha256": "FE0AB77ABAC13365AF7993806BE509C18F88667E3E9E5FAFA605FBAA2BAE6E67",
+    "static_svg_sha256": "68870BFDC1F8C2D6BB17275013C64A2A036790C24A3BDDC2A7607FAFD119472F"
+  },
+  "dimension": {
+    "run": "runs/icp_stage4_bohm_flux_dimension_300trials_v1",
+    "animation": "reports/icp_conference_materials/dimension_bohm_optimization/bohm_optimization_trial_animation.gif",
+    "static_svg": "reports/icp_conference_materials/dimension_bohm_optimization/bohm_optimization_conference_layout.svg",
+    "best_presentation_trial": 116,
+    "source_trial_id": 253,
+    "best_loss": 0.12355291843414307,
+    "max_deviation": 0.20744562149047852,
+    "mean_density_m3": 1.316804674799534e17,
+    "coil_count": 5,
+    "animation_sha256": "8C2C50162C54923975A40BE1880709A3C5C2978356E88DA4CD243A530E613963",
+    "static_svg_sha256": "E7A4BB45F33C77E4CD818CBE045B1A89AD0F5F5CAA54BEBB07A114AFF45AF615"
+  },
+  "problem_figures": {
+    "problem_setup_svg": "reports/icp_conference_materials/bohm_representation_comparison/icp_bohm_optimization_problem_setup.svg",
+    "problem_setup_svg_sha256": "45BC2B28AAEBDC9952A78F7BC742362009CA15FFF6C3B6E0DE399E2FCFD8769D",
+    "objective_definition_svg": "reports/icp_conference_materials/bohm_representation_comparison/icp_bohm_objective_definition.svg",
+    "objective_definition_svg_sha256": "25D126465E4BC2C3ECFAD0A59DFB7EB55448FC1B372C3F6996DB47D1FB3ACF2A",
+    "metadata": "reports/icp_conference_materials/bohm_representation_comparison/icp_bohm_optimization_problem_setup_metadata.json"
+  },
+  "validation_status": "surrogate_only_high_fidelity_icp_validation_pending"
+}

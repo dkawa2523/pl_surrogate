@@ -1,0 +1,24 @@
+{
+  "run": "runs\\icp_stage4_bohm_flux_dimension_300trials_v1",
+  "representation": "dimension",
+  "trial_order": "interleaved",
+  "trial_count": 300,
+  "animation_stop_trial": 300,
+  "frame_count": 300,
+  "fps": 12.0,
+  "playback_duration_seconds": 26.71666666666667,
+  "fixed_profile_ylim_scaled_1e20": [
+    0.0,
+    4.5
+  ],
+  "wafer_layers": 10,
+  "radial_bins": 32,
+  "gif": "runs\\icp_stage4_bohm_flux_dimension_300trials_v1\\bohm_optimization_trial_animation.gif",
+  "static_png": "runs\\icp_stage4_bohm_flux_dimension_300trials_v1\\bohm_optimization_conference_layout.png",
+  "frames_dir": "runs\\icp_stage4_bohm_flux_dimension_300trials_v1\\bohm_trial_animation_frames",
+  "left_panel": "current-trial wafer-near 1D Bohm profile with fixed y range",
+  "middle_panel": "current loss and best-so-far across the joint 2-5 coil search",
+  "right_panel": "fixed chamber/plasma and wafer context plus current-trial coils",
+  "final_frame": "best case found within trials 1-300",
+  "interpretation_limit": null
+}
