@@ -1,5 +1,8 @@
 # GEC-CCP 学会用画像・専用目次
 
+最終採用したRMSE散布図、電子密度空間分布、評価条件、学習lossの数式は
+[GEC-CCP学会発表用・採用結果README](README.md)を参照してください。
+
 FFNO・DeepONet・Global MLPの共通testケース空間分布と対数学習曲線は、[3モデルの学会用詳細図](model_detail_assets/index.md)にまとめています。
 
 [プロジェクト入口](../../README.md) → [レポート一覧](../index.md) → GEC-CCP学会用画像
@@ -47,11 +50,14 @@ GEC-CCPの発表用画像は、主に[`independent_assets/`](independent_assets/
 ## 学習データ数の比較
 
 学習条件数54・48・36・24に対する全モデルの誤差と、共通Mediumテストケースにおける
-FFNO／DenseMLPの電子密度空間誤差をまとめています。
+FFNO／POD-DeepONet／DenseMLPの54条件Truth・Prediction・Error、およびFFNO／DenseMLPの
+学習データ数別電子密度空間誤差をまとめています。
 
 - [学会用グラフ一式](training_size_ablation/index.md)
 - 全体指標: case-macro relative RMSE／case-macro relative gradient error
-- 空間分布: 真値、54条件モデルの符号付き誤差、24条件モデルの符号付き誤差
+- 物性別指標: [電子密度–電子温度RMSE](training_size_ablation/ccp_n54_relative_rmse_ne_vs_te.svg) / [電位–イオン密度RMSE](training_size_ablation/ccp_n54_relative_rmse_phi_vs_ni.svg)
+- 空間分布: [54条件3モデルの真値・予測値・誤差](training_size_ablation/ccp_n54_ffno_pod_deeponet_densemlp_ne_comparison.svg)
+- 学習数比較: 真値、54条件モデルの符号付き誤差、24条件モデルの符号付き誤差
 
 ## モデル比較
 

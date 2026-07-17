@@ -27,6 +27,8 @@
 
 ## 3. 学会発表用図版
 
+- [最終採用図・評価条件・loss数式README](README.md)
+- [採用図manifest](adopted_figures.csv)
 - [第三者向け選択ガイド](independent_assets/index.md)
 - [機械可読アセット一覧](independent_assets/asset_catalog.csv)
 - [簡略図・計算式](index.md)

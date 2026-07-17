@@ -1,6 +1,10 @@
 # Plasma Surrogate project portal
 
-FFNO・DeepONet・Global MLPの学会用学習曲線と空間分布は、[GEC-CCPモデル詳細図](reports/gec_conference_materials/model_detail_assets/index.md)から直接参照できます。
+学会発表に採用したGEC-CCPのRMSE散布図、電子密度空間分布、評価条件、loss数式は、
+[GEC-CCP学会発表用・採用結果README](reports/gec_conference_materials/README.md)から直接参照できます。
+補助的な学習曲線とモデル別詳細図は[GEC-CCPモデル詳細図](reports/gec_conference_materials/model_detail_assets/index.md)にあります。
+
+全11モデルのtrain 54→48／36／24件アブレーションは、[GEC-CCP全モデル学習条件数評価](runs/gec_ccp_training_size_ablation_v1/summary_all_models/index.md)にあります。元の3モデルだけの要約は[こちら](runs/gec_ccp_training_size_ablation_v1/summary/index.md)です。
 
 実装・ベンチマーク・発表資料へプロジェクト直下から移動するための入口です。
 製品コードの概要と利用方法は[メインREADME](README_mainline.md)、GEC-CCPの再学習手順は

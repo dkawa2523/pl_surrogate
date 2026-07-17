@@ -2,6 +2,9 @@ priority,category,asset_id,system,topic,recommended_use,available_files
 core,training_size,ccp_case_macro_relative_rmse_by_training_size,GEC-CCP,Case-macro field-value error vs training size,Overall training-size comparison,PNG|PDF|SVG|CSV|metadata
 core,training_size,ccp_case_macro_relative_gradient_error_by_training_size,GEC-CCP,Case-macro spatial-gradient error vs training size,Overall spatial-learning comparison,PNG|PDF|SVG|CSV|metadata
 core,training_size,ccp_ffno_densemlp_ne_error_by_training_size,GEC-CCP,Electron-density signed error at Ntrain=54 and 24,FFNO vs DenseMLP spatial comparison,PNG|PDF|SVG|metadata
+core,training_size,ccp_n54_ffno_pod_deeponet_densemlp_ne_comparison,GEC-CCP,Electron-density truth prediction and signed error at Ntrain=54,FFNO vs POD-DeepONet vs DenseMLP spatial comparison,PNG|PDF|SVG|metadata
+core,training_size,ccp_n54_relative_rmse_ne_vs_te,GEC-CCP,Electron-density vs electron-temperature case-macro relative RMSE at Ntrain=54,Model accuracy comparison by plasma quantity,PNG|PDF|SVG|CSV|metadata
+core,training_size,ccp_n54_relative_rmse_phi_vs_ni,GEC-CCP,Potential vs ion-density case-macro relative RMSE at Ntrain=54,Model accuracy comparison by plasma quantity,PNG|PDF|SVG|CSV|metadata
 core,geometry,ccp_geometry_conference,GEC-CCP,計算領域と境界,装置説明,PNG|PDF|SVG|metadata
 core,geometry,icp_geometry_conference,GEC-ICP,計算領域・基板・コイル,装置説明,PNG|PDF|SVG|metadata
 support,geometry,ccp_mesh_conference,GEC-CCP,COMSOLメッシュ,数値計算手法,PNG|PDF|SVG|metadata
