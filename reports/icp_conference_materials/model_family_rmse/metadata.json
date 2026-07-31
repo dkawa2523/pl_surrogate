@@ -1,0 +1,156 @@
+{
+  "purpose": "ICP conference NN-versus-NO field-wise RMSE comparison",
+  "layout_reference": "GEC-CCP adopted field-wise RMSE scatter plots",
+  "metric": "100 * arithmetic mean across common test cases of per-case plasma physical_rel_l2",
+  "evaluation": {
+    "protocol": "structure_holdout",
+    "test_case_count": 36
+  },
+  "family_style": {
+    "neural_network": {
+      "label": "Neural Network",
+      "color": "#2563A6",
+      "marker": "o"
+    },
+    "neural_operator": {
+      "label": "Neural Operator",
+      "color": "#D65332",
+      "marker": "D"
+    }
+  },
+  "representations": [
+    "dimension",
+    "union_sdf"
+  ],
+  "fields": [
+    "ne",
+    "ni",
+    "Te",
+    "phi"
+  ],
+  "models": [
+    {
+      "representation": "dimension",
+      "model_id": "unet",
+      "model_label": "U-Net",
+      "family": "neural_network",
+      "run_root": "runs/icp_stage4_axisymmetric_dimension_v4"
+    },
+    {
+      "representation": "dimension",
+      "model_id": "unetpp",
+      "model_label": "U-Net++",
+      "family": "neural_network",
+      "run_root": "runs/icp_unetpp_bohm_case_v1/full/dimension/unetpp/ch32_lr3e4"
+    },
+    {
+      "representation": "dimension",
+      "model_id": "unetpp_attn",
+      "model_label": "Attention U-Net++",
+      "family": "neural_network",
+      "run_root": "runs/icp_unetpp_bohm_case_v1/full/dimension/unetpp_attn/ch32_red2_lr3e4"
+    },
+    {
+      "representation": "dimension",
+      "model_id": "ffno",
+      "model_label": "FFNO",
+      "family": "neural_operator",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/dimension/ffno/seed_1237"
+    },
+    {
+      "representation": "dimension",
+      "model_id": "u_no",
+      "model_label": "UNO",
+      "family": "neural_operator",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/dimension/u_no/seed_1237"
+    },
+    {
+      "representation": "dimension",
+      "model_id": "cno",
+      "model_label": "CNO",
+      "family": "neural_operator",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/dimension/cno/seed_1237"
+    },
+    {
+      "representation": "union_sdf",
+      "model_id": "unet",
+      "model_label": "U-Net",
+      "family": "neural_network",
+      "run_root": "runs/icp_stage4_axisymmetric_neumann_v4"
+    },
+    {
+      "representation": "union_sdf",
+      "model_id": "unetpp",
+      "model_label": "U-Net++",
+      "family": "neural_network",
+      "run_root": "runs/icp_unetpp_bohm_case_v1/full/sdf/unetpp/ch32_lr3e4"
+    },
+    {
+      "representation": "union_sdf",
+      "model_id": "unetpp_attn",
+      "model_label": "Attention U-Net++",
+      "family": "neural_network",
+      "run_root": "runs/icp_unetpp_learned_stem_v1/full/sdf/unetpp_attn/ch32_red2_lr3e4"
+    },
+    {
+      "representation": "union_sdf",
+      "model_id": "ffno",
+      "model_label": "FFNO",
+      "family": "neural_operator",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/union_sdf/ffno/seed_1237"
+    },
+    {
+      "representation": "union_sdf",
+      "model_id": "u_no",
+      "model_label": "UNO",
+      "family": "neural_operator",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/union_sdf/u_no/seed_1237"
+    },
+    {
+      "representation": "union_sdf",
+      "model_id": "cno",
+      "model_label": "CNO",
+      "family": "neural_operator",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/union_sdf/cno/seed_1237"
+    }
+  ],
+  "excluded_models": {
+    "fno": "excluded from the adopted figure at the user's request"
+  },
+  "conference_adoption": {
+    "status": "adopted_for_icp_conference",
+    "primary_figure_id": "icp_dimension_vs_sdf_overall_prediction_error",
+    "primary_figure": "dimension_vs_sdf_relative_rmse_comparison.png",
+    "adoption_guide": "ADOPTION_GUIDE.md",
+    "catalog": "adopted_figures.csv"
+  },
+  "data": "model_family_rmse.csv",
+  "outputs": {
+    "dimension_ne_vs_Te": [
+      "dimension/dimension_relative_rmse_ne_vs_Te.png",
+      "dimension/dimension_relative_rmse_ne_vs_Te.pdf",
+      "dimension/dimension_relative_rmse_ne_vs_Te.svg"
+    ],
+    "dimension_phi_vs_ni": [
+      "dimension/dimension_relative_rmse_phi_vs_ni.png",
+      "dimension/dimension_relative_rmse_phi_vs_ni.pdf",
+      "dimension/dimension_relative_rmse_phi_vs_ni.svg"
+    ],
+    "sdf_ne_vs_Te": [
+      "sdf/sdf_relative_rmse_ne_vs_Te.png",
+      "sdf/sdf_relative_rmse_ne_vs_Te.pdf",
+      "sdf/sdf_relative_rmse_ne_vs_Te.svg"
+    ],
+    "sdf_phi_vs_ni": [
+      "sdf/sdf_relative_rmse_phi_vs_ni.png",
+      "sdf/sdf_relative_rmse_phi_vs_ni.pdf",
+      "sdf/sdf_relative_rmse_phi_vs_ni.svg"
+    ],
+    "dimension_vs_sdf": [
+      "dimension_vs_sdf_relative_rmse_comparison.png",
+      "dimension_vs_sdf_relative_rmse_comparison.pdf",
+      "dimension_vs_sdf_relative_rmse_comparison.svg"
+    ]
+  },
+  "generator": "experiments/conference/scripts/plot_icp_dimension_sdf_fieldwise_rmse.py"
+}
