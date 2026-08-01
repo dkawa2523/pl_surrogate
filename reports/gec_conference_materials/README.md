@@ -1,5 +1,11 @@
 # GEC-CCP 学会発表用・採用結果 README
 
+## Model candidates and references
+
+The English summary of candidate model names, roles, current assessments,
+surrogate-model application examples, and primary references is available in the
+[GEC-CCP model candidate table](../gec_ccp_model_candidates/README.md).
+
 このREADMEは、GEC-CCPサロゲートモデル比較で学会発表に採用する図、評価条件、学習lossを
 第三者が同じ意味で読めるように固定した入口です。画像の正本は
 [`training_size_ablation/`](training_size_ablation/index.md)に保存し、このページから用途順に参照します。

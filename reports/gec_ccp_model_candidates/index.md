@@ -1,5 +1,9 @@
 # GEC-CCP: implemented model inventory and next comparison candidates
 
+For a concise English table of **Model name**, **Role**, **Current
+assessment**, **Surrogate-model application example**, and **Reference**, see the
+[GEC-CCP model candidate README](README.md).
+
 ## Scope
 
 This inventory compares the canonical model registry with the completed
