@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plasma-surrogate"
+version = "0.1.0"
+description = "Pipeline, model, inference, and benchmark utilities for plasma surrogate experiments."
+readme = "README_mainline.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=2.0",
+    "PyYAML>=6.0",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+torch = [
+    "torch>=2.10",
+]
+optuna = [
+    "optuna>=4.0",
+    "cmaes>=0.11",
+]
+dev = [
+    "pytest>=9.0",
+]
+all = [
+    "torch>=2.10",
+    "optuna>=4.0",
+    "cmaes>=0.11",
+    "pytest>=9.0",
+]
+
+[project.scripts]
+plasma-surrogate = "plasma_surrogate.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src", "."]
+testpaths = ["tests"]
+addopts = "-m 'not config_catalog and not benchmark_slow and not torch_runtime'"
+markers = [
+    "config_catalog: checks generated or curated experiment config inventory; excluded from default test runs",
+    "benchmark_slow: full benchmark smoke/regression runs; excluded from default test runs",
+    "torch_runtime: tests that require an enabled and importable torch runtime",
+]

@@ -15,4 +15,3 @@ def test_run_bundle_split_random_loads(run_dir):
     bundle = RunBundleLoader.load(run_dir)
     split = bundle.split_random()
     assert split == payload
-

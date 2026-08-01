@@ -6,6 +6,49 @@ from typing import Any
 
 import numpy as np
 
+VALID_TARGET_REGIONS = frozenset({"plasma_only", "all_domain"})
+
+
+def normalize_region_by_var(
+    raw: Any,
+    *,
+    target_vars: list[str] | tuple[str, ...] | set[str] | None = None,
+    key_name: str = "region_by_var",
+    reject_unknown: bool = False,
+) -> dict[str, str]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{key_name} must be a mapping")
+    allowed = None if target_vars is None else {str(v) for v in target_vars}
+    out: dict[str, str] = {}
+    unknown: list[str] = []
+    for key, value in raw.items():
+        name = str(key)
+        if allowed is not None and name not in allowed:
+            unknown.append(name)
+            continue
+        region = str(value).strip().lower()
+        if region not in VALID_TARGET_REGIONS:
+            raise ValueError(f"{key_name} values must be one of: plasma_only, all_domain")
+        out[name] = region
+    if reject_unknown and unknown:
+        raise ValueError(f"{key_name} contains unknown vars: {sorted(unknown)}")
+    return out
+
+def target_region_for_var(
+    region_by_var: dict[str, str] | None,
+    var_name: str,
+    *,
+    default: str = "plasma_only",
+) -> str:
+    region = str((region_by_var or {}).get(str(var_name), default)).strip().lower()
+    if region == "" and str(default).strip() == "":
+        return ""
+    if region not in VALID_TARGET_REGIONS:
+        raise ValueError("region_by_var values must be one of: plasma_only, all_domain")
+    return region
+
 
 def to_bhw(arr: Any, *, key: str) -> np.ndarray:
     out = np.asarray(arr, dtype=np.float32)

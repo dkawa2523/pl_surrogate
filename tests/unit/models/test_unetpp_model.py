@@ -1,24 +1,19 @@
 from __future__ import annotations
 
-import os
+import pytest
 from pathlib import Path
 
 import numpy as np
-import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
-from plasma_surrogate.models.mlp.io import build_model_from_name, load_mlp_checkpoint, save_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import build_model_from_name, load_checkpoint, save_checkpoint
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.unet.unetpp import UNetPPBaseline
 
-
-def _enable_torch() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+pytestmark = pytest.mark.torch_runtime
 
 
 def test_build_unetpp_smoke() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = build_model_from_name(
         model_name="unetpp",
         input_dim=3,
@@ -37,9 +32,7 @@ def test_build_unetpp_smoke() -> None:
 
 
 def test_unetpp_static_spatial_features_shape_validation() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = UNetPPBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -53,9 +46,7 @@ def test_unetpp_static_spatial_features_shape_validation() -> None:
 
 
 def test_unetpp_forward_shape_with_dynamic_output_keys() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = UNetPPBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -81,9 +72,7 @@ def test_unetpp_forward_shape_with_dynamic_output_keys() -> None:
 
 
 def test_unetpp_checkpoint_roundtrip(tmp_path: Path) -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = UNetPPBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -98,8 +87,8 @@ def test_unetpp_checkpoint_roundtrip(tmp_path: Path) -> None:
     cond = np.random.default_rng(1).normal(size=(2, 3)).astype(np.float32)
     model.set_static_spatial_features(spatial)
     pred_before = model.forward(cond)
-    save_mlp_checkpoint(model, tmp_path / "ckpt")
-    loaded = load_mlp_checkpoint(tmp_path / "ckpt")
+    save_checkpoint(model, tmp_path / "ckpt")
+    loaded = load_checkpoint(tmp_path / "ckpt")
     loaded.set_static_spatial_features(spatial)
     pred_after = loaded.forward(cond)
     assert isinstance(loaded, UNetPPBaseline)
@@ -107,9 +96,7 @@ def test_unetpp_checkpoint_roundtrip(tmp_path: Path) -> None:
 
 
 def test_unetpp_forward_accepts_batched_spatial_features() -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = UNetPPBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -128,9 +115,7 @@ def test_unetpp_forward_accepts_batched_spatial_features() -> None:
 
 @pytest.mark.parametrize("upsample_mode", ["deconv", "resize_conv"])
 def test_unetpp_build_smoke_supports_upsample_variants(upsample_mode: str) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = build_model_from_name(
         model_name="unetpp",
         input_dim=3,

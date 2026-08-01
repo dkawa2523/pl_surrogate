@@ -2,20 +2,98 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.dataset_io import load_dataset
 from plasma_surrogate.core.feature_cache import prepare_feature_cache
+from plasma_surrogate.core.input_modes import (
+    attach_runtime_schema_hashes,
+    build_input_mode_effective_metadata,
+    normalize_input_mode_cfg,
+    validate_input_mode_cfg,
+)
 from plasma_surrogate.core.run_bundle import RunBundle, RunBundleLoader, ensure_preprocess_contract
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.data.geometry_provider import GeometryProviderLike, build_geometry_provider
 from plasma_surrogate.features.geometry_feature_store import GeometryFeatureStore, hash_json
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
+from plasma_surrogate.preprocessing.spatial_features import resolve_shared_distance_transform_cfg
+
+
+def _write_benchmark_run_metadata(
+    *,
+    output_root: Path,
+    cfg: dict[str, Any],
+    y_vars: list[str],
+    shape: tuple[int, int],
+) -> None:
+    output_root.mkdir(parents=True, exist_ok=True)
+    resolved = dict(cfg)
+    resolved.setdefault("task", {})
+    resolved["task"]["spec_path"] = "task_spec.yaml"
+    with (output_root / "resolved_config.yaml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(resolved, f, sort_keys=True)
+
+    task_spec = dict(cfg.get("task_spec", {}) or {})
+    outputs = list(task_spec.get("outputs", [{"name": name} for name in y_vars]))
+    transforms = dict(task_spec.get("transforms", {}))
+    units = dict(task_spec.get("units", {}))
+    for output in outputs:
+        name = str(dict(output).get("name", "")).strip()
+        if not name:
+            continue
+        transforms.setdefault(name, str(dict(output).get("transform", "zscore")))
+        units.setdefault(name, str(dict(output).get("units", "")))
+    task_spec.update(
+        {
+            "outputs": outputs,
+            "transforms": transforms,
+            "units": units,
+            "grid_spec": {
+                "axes_order": ["y", "x"],
+                "coord_components": ["x", "y"],
+                "shape": [int(shape[0]), int(shape[1])],
+                "coord_system": "cartesian",
+            },
+        }
+    )
+    with (output_root / "task_spec.yaml").open("w", encoding="utf-8") as f:
+        yaml.safe_dump(task_spec, f, sort_keys=True)
+
+
+def resolve_effective_benchmark_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
+    """Resolve benchmark-local effective config with runtime precedence and validation."""
+
+    root_cfg = copy.deepcopy(dict(cfg or {}))
+    benchmark_cfg_raw = dict(root_cfg.get("benchmark", root_cfg))
+    runtime_raw: dict[str, Any] | None = None
+    benchmark_runtime = benchmark_cfg_raw.get("runtime")
+    root_runtime = root_cfg.get("runtime")
+    if isinstance(benchmark_runtime, dict):
+        if isinstance(root_runtime, dict):
+            norm_bench_runtime = dict(normalize_input_mode_cfg({"runtime": benchmark_runtime}).get("runtime", {}))
+            norm_root_runtime = dict(normalize_input_mode_cfg({"runtime": root_runtime}).get("runtime", {}))
+            if norm_bench_runtime != norm_root_runtime:
+                raise ValueError(
+                    "benchmark.runtime conflicts with top-level runtime; "
+                    "benchmark runs require a single runtime contract"
+                )
+        runtime_raw = dict(benchmark_runtime)
+    else:
+        if isinstance(root_runtime, dict):
+            runtime_raw = dict(root_runtime)
+    if runtime_raw is not None:
+        benchmark_cfg_raw["runtime"] = copy.deepcopy(runtime_raw)
+    effective = normalize_input_mode_cfg(benchmark_cfg_raw)
+    validate_input_mode_cfg(effective)
+    return effective
 
 
 @dataclass
@@ -27,7 +105,7 @@ class BenchmarkDataContext:
     y: np.ndarray
     cond_scaled: np.ndarray
     y_scaled: np.ndarray
-    geom_provider: FixedGeometryProvider
+    geom_provider: GeometryProviderLike
     feature_store: GeometryFeatureStore
     feature_meta: dict[str, Any]
     profile_lock: dict[str, Any]
@@ -51,6 +129,8 @@ class BenchmarkDataContext:
     deeponet_boundary_meta: dict[str, Any]
     coord_feature_scaler: dict[str, Any] | None
     coord_feature_pack: dict[str, Any] | None
+    static_spatial_feature_pack: dict[str, Any] | None
+    case_structure_feature_pack: dict[str, Any] | None
     coord_distance_transform_stats: dict[str, Any] | None
     lock_hash: str
     resolved: dict[str, Any]
@@ -62,6 +142,8 @@ def build_benchmark_data_context(
     *,
     profile_lock: dict[str, Any],
 ) -> BenchmarkDataContext:
+    cfg = resolve_effective_benchmark_cfg(cfg)
+    input_mode_meta = build_input_mode_effective_metadata(cfg)
     requested_axis_mode = str(
         cfg.get(
             "axis_mode",
@@ -84,7 +166,8 @@ def build_benchmark_data_context(
     n_cases = len(dataset.cases)
     h, w = dataset.shape
     cond_order = dataset.cond_order
-    geom_provider = FixedGeometryProvider(dataset.geometry_root)
+    provider_mode = str(input_mode_meta.get("geometry_provider_mode_effective", "fixed"))
+    geom_provider = build_geometry_provider(dataset.geometry_root, provider_mode=provider_mode)
     feature_store, feature_meta = prepare_feature_cache(
         run_root=output_root,
         geometry_provider=geom_provider,
@@ -94,8 +177,10 @@ def build_benchmark_data_context(
         geom_ref={"geom_id": "default"},
     )
     axis_harmonics = int(cfg.get("preprocessing", {}).get("axis_schema", {}).get("harmonics", 1))
+    effective_split_cfg = dict(split_cfg or {})
+    effective_split_cfg.update({"seed": split_seed, "ratios": list(split_ratios), "interp_mode": interp_mode})
     pre_cfg: dict[str, Any] = {
-        "split": {"seed": split_seed, "ratios": list(split_ratios), "interp_mode": interp_mode},
+        "split": effective_split_cfg,
         "cond_order": cond_order,
         "axis_schema": {
             "mode": requested_axis_mode,
@@ -147,10 +232,37 @@ def build_benchmark_data_context(
     if deeponet_sampling_cfg:
         pre_cfg["sampling"] = {"deeponet": deeponet_sampling_cfg}
 
-    pre = PreprocessRunner(pre_cfg, output_root / "preprocessing")
-    pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
+    pre = PreprocessRunner(
+        pre_cfg,
+        output_root / "preprocessing",
+        runtime_input_mode_meta=input_mode_meta,
+        runtime_cfg=dict(cfg.get("runtime", {})),
+        coord_distance_transform_cfg=resolve_shared_distance_transform_cfg(
+            train_cfg=dict(cfg.get("train", {})),
+            model_names=[str(name) for name in profile_lock["models"]],
+            scaling_enabled=bool(
+                dict(dict(pre_cfg.get("coord_features", {})).get("scaling", {})).get("enabled", False)
+            ),
+        ),
+    )
+    pre.run(
+        cases=dataset.cases,
+        geometry_root=dataset.geometry_root,
+        target_metadata=getattr(dataset, "target_metadata", []),
+    )
+    _write_benchmark_run_metadata(
+        output_root=output_root,
+        cfg=cfg,
+        y_vars=[str(k) for k in dataset.cases[0]["y"].keys()],
+        shape=dataset.shape,
+    )
     ensure_preprocess_contract(output_root)
     bundle = RunBundleLoader.load(output_root)
+    input_mode_meta = attach_runtime_schema_hashes(
+        input_mode_meta,
+        schemas=dict(bundle.schemas or {}),
+        schema_hashes=dict(bundle.schemas.get("runtime_schema_hashes", {}) or {}),
+    )
 
     split = bundle.split_random()
     repro_hashes = ArtifactStore(output_root / "preprocessing" / "validation").load_json("repro_hashes.json")
@@ -176,7 +288,7 @@ def build_benchmark_data_context(
     if ("deeponet_plasma" in profile_lock["models"] or profile_lock["phi_mode"] == "deeponet_poisson") and not deeponet_index:
         raise ValueError(
             "Benchmark profile requires DeepONet sensor/query artifact, but "
-            "preprocessing/sampling/deeponet/sensor_query_index.json is missing."
+            "preprocessing/sampling/deeponet/<task>/sensor_query_index.json is missing."
         )
     if "deeponet_plasma" in profile_lock["models"] and (not deeponet_poisson_index or not deeponet_boundary_index):
         raise ValueError(
@@ -212,7 +324,9 @@ def build_benchmark_data_context(
             f"Preprocessing axis_schema.mode mismatch: expected={requested_axis_mode} actual={axis_schema.mode}"
         )
     cond = build_cond_matrix_with_axis(dataset.cases, cond_schema, axis_schema)
-    y_vars = list(bundle.schemas.get("output_layout", {}).get("vars", ["ne", "ni", "Te", "phi"]))
+    y_vars = list(bundle.schemas.get("output_layout", {}).get("vars", []))
+    if not y_vars:
+        raise FileNotFoundError("Missing preprocessing/schema/output_layout.json vars for benchmark runtime")
     y = np.stack(
         [np.stack([c["y"][name] for name in y_vars], axis=0).astype(np.float32) for c in dataset.cases],
         axis=0,
@@ -261,6 +375,7 @@ def build_benchmark_data_context(
             "boundary_operator": {"index": deeponet_boundary_index, "meta": deeponet_boundary_meta},
             "primary_qoi_key": profile_lock["primary_qoi_key"],
         },
+        **input_mode_meta,
     }
 
     return BenchmarkDataContext(
@@ -295,6 +410,8 @@ def build_benchmark_data_context(
         deeponet_boundary_meta=deeponet_boundary_meta,
         coord_feature_scaler=dict(bundle.transforms.get("coord_feature_scaler", {})),
         coord_feature_pack=bundle.schemas.get("coord_feature_pack"),
+        static_spatial_feature_pack=bundle.schemas.get("static_spatial_feature_pack"),
+        case_structure_feature_pack=bundle.schemas.get("case_structure_feature_pack"),
         coord_distance_transform_stats=dict(bundle.transforms.get("distance_transform_stats", {})),
         lock_hash=lock_hash,
         resolved=resolved,

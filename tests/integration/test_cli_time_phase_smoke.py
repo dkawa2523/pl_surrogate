@@ -6,12 +6,14 @@ from pathlib import Path
 import yaml
 
 from plasma_surrogate.cli.main import main
+from tests._config_presets import default_target_transforms_four_field_example, runtime_table_only
 
 
 def test_cli_time_phase_pipeline_smoke(tmp_path: Path):
     run_dir = tmp_path / "time_phase_run"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_only(),
         "dataset": {
             "type": "synthetic",
             "n_cases": 12,
@@ -24,10 +26,12 @@ def test_cli_time_phase_pipeline_smoke(tmp_path: Path):
         "preprocessing": {
             "split": {"seed": 0, "ratios": [0.7, 0.15, 0.15]},
             "axis_schema": {"mode": "phase_sincos", "harmonics": 1},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
         },
         "model": {"name": "global_mlp"},
         "train": {"epochs": 3, "lr": 0.01},
         "inference": {
+            "qoi": {"uniformity": {"target": "ne"}},
             "single": {
                 "enabled": True,
                 "cond": {"c0": 0.2, "c1": 0.5, "c2": 0.8},
@@ -54,4 +58,3 @@ def test_cli_time_phase_pipeline_smoke(tmp_path: Path):
     with (run_dir / "preprocessing" / "sampling" / "pairs" / "phase_wrap_pairs.json").open("r", encoding="utf-8") as f:
         wrap_pairs = json.load(f)
     assert len(wrap_pairs["pairs"]) == 1
-

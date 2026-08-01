@@ -1,0 +1,61 @@
+{
+  "dataset": "GEC-CCP n78",
+  "split": {
+    "train": 54,
+    "validation": 11,
+    "test": 13
+  },
+  "evaluation_split": "fixed interpolation test cases",
+  "metric": "100 * arithmetic mean across test cases of per-case relative RMSE",
+  "fields": [
+    "ne",
+    "ni",
+    "Te",
+    "phi"
+  ],
+  "models": [
+    "global_resmlp",
+    "global_densemlp",
+    "unet",
+    "unetpp",
+    "fno",
+    "ffno",
+    "cno",
+    "deeponet_pod"
+  ],
+  "excluded_models": [
+    "global_mlp",
+    "u_no",
+    "deeponet_plasma"
+  ],
+  "renamed_model": {
+    "deeponet_pod": "DeepONet"
+  },
+  "axes": {
+    "ne_vs_te": {
+      "x": "electron-density relative RMSE",
+      "y": "electron-temperature relative RMSE"
+    },
+    "phi_vs_ni": {
+      "x": "potential relative RMSE",
+      "y": "ion-density relative RMSE"
+    }
+  },
+  "scale": "linear",
+  "figure_height_to_width_ratio": 0.75,
+  "source": "runs/gec_ccp_training_size_ablation_v1/summary_all_models/spatial/n54/spatial_plot_summary.csv",
+  "data": "reports/gec_conference_materials/training_size_ablation/ccp_n54_relative_rmse_pair_scatter_data.csv",
+  "outputs": {
+    "ne_vs_te": [
+      "reports/gec_conference_materials/training_size_ablation/ccp_n54_relative_rmse_ne_vs_te.png",
+      "reports/gec_conference_materials/training_size_ablation/ccp_n54_relative_rmse_ne_vs_te.pdf",
+      "reports/gec_conference_materials/training_size_ablation/ccp_n54_relative_rmse_ne_vs_te.svg"
+    ],
+    "phi_vs_ni": [
+      "reports/gec_conference_materials/training_size_ablation/ccp_n54_relative_rmse_phi_vs_ni.png",
+      "reports/gec_conference_materials/training_size_ablation/ccp_n54_relative_rmse_phi_vs_ni.pdf",
+      "reports/gec_conference_materials/training_size_ablation/ccp_n54_relative_rmse_phi_vs_ni.svg"
+    ]
+  },
+  "generation_command": ".\\.venv-torch\\Scripts\\python.exe experiments/conference/scripts/plot_gec_ccp_n54_fieldwise_rmse.py"
+}

@@ -1,0 +1,78 @@
+﻿runtime:
+  input_mode: table_plus_structure
+  structure:
+    feature_profile: geom_v1_mainline
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: auto
+    provider_mode: fixed
+
+benchmark:
+  output_dir: runs/benchmark_dual_mode_table_plus_structure_cno_smoke
+  runtime:
+    input_mode: table_plus_structure
+    structure:
+      feature_profile: geom_v1_mainline
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: auto
+      provider_mode: fixed
+  dataset:
+    type: synthetic
+    n_cases: 8
+    height: 8
+    width: 8
+    cond_dim: 3
+    seed: 10
+  profile: m7_cno_experimental
+  phi_mode: direct
+  split:
+    seed: 3
+    ratios: [0.6, 0.2, 0.2]
+  preprocessing:
+    axis_schema:
+      mode: steady
+      harmonics: 1
+    coord_features:
+      enabled: true
+      channels_from_profile: geom_v1_mainline
+      distance_transform_stats:
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+    scalers:
+      target_transforms:
+        ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+        phi: {value_transform: identity, scaler: zscore, fit_scope: all, clip: {mode: none}}
+  train:
+    unet_like:
+      batch_size_cases: 4
+      shuffle_cases: true
+    cno:
+      epochs: 1
+      lr: 0.001
+      target_family: allvars
+      target_vars: [ne, ni, Te, phi]
+      input_features:
+        mode: geom_feature_pack
+        features: [x, y, mask_plasma, distance_signed, distance_any]
+        distance_transform:
+          mode: raw
+      selection:
+        mode: best_val_allvars_balance
+        weights:
+          ne: 0.25
+          ni: 0.25
+          Te: 0.25
+          phi: 0.25
+      model_cfg:
+        backend: torch
+        cno_cfg:
+          width: 16
+          n_layers: 2
+          dropout: 0.0
+          kernel_size: 3
+  physics:
+    enabled: false

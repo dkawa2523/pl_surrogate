@@ -1,0 +1,11 @@
+model_id,model_label,family,learning_seed,test_case_count,test_r2_ne_plasma,test_r2_ni_plasma,test_r2_Te_plasma,test_r2_phi_plasma,run_root
+global_mlp,Global MLP,Neural network,412,13,0.9450372885969242,0.9444782456192152,0.8951866489513016,0.9519513128461373,runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_mlp
+global_resmlp,ResMLP,Neural network,412,13,0.9983304691267039,0.9982959880014216,0.9956873668543125,0.9989017734616962,runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_resmlp
+global_densemlp,DenseMLP,Neural network,412,13,0.9963965838268503,0.9963356651402826,0.9943754295007133,0.9973207048771644,runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_densemlp
+unet,U-Net,Neural network,412,13,0.9986152493763295,0.998639427880442,0.997748358244123,0.9991917541047425,runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/unet
+unetpp,U-Net++,Neural network,412,13,0.9968526912782992,0.9966808049538264,0.9955102167739258,0.9982030256285217,runs/gec_ccp_nn_operator_comparison_v2_single_run_additions/seed_412/n78/unetpp
+fno,FNO,Neural operator,412,13,0.9994718314753958,0.999452253096801,0.9967630812646672,0.9994753471279996,runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/fno
+ffno,FFNO,Neural operator,412,13,0.9997257595455922,0.9997130093229885,0.9986298984308065,0.9998041628873341,runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/ffno
+u_no,U-NO,Neural operator,412,13,0.9998715178328456,0.999878568271308,0.999528076688284,0.9999334130139379,runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/u_no
+cno,CNO,Neural operator,412,13,0.9985703136071747,0.9985477088491678,0.9954396724646851,0.9990446931993436,runs/gec_ccp_nn_operator_comparison_v2_single_run_additions/seed_412/n78/cno
+deeponet_pod,DeepONet,Neural operator,412,13,0.9994169956656545,0.9995293213292678,0.9980052833038409,0.9996463611175749,runs/gec_ccp_pod_branch_tuned_v2/final/seed_412/n78/deeponet_pod

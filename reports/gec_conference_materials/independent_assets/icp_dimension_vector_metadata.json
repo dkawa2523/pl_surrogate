@@ -1,0 +1,21 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The ICP geometry is encoded by five global dimensions",
+  "sources": {
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz"
+  },
+  "case_id": "case_g002_op01",
+  "dimension_vector": [
+    "llcoil",
+    "rrc",
+    "nncoil",
+    "rrce",
+    "zzc"
+  ],
+  "output_stem": "icp_dimension_vector",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_dimension_vector.png",
+    "reports/gec_conference_materials/independent_assets/icp_dimension_vector.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_dimension_vector.svg"
+  ]
+}

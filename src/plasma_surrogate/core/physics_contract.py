@@ -10,61 +10,83 @@ import numpy as np
 from plasma_surrogate.data.geometry_context import GeometryContext
 
 
+REMOVED_PHYSICS_KEYS = ("lambda_poisson", "lambda_bc", "lambda_rho")
+REGISTERED_PHYSICS_TERMS = ("poisson", "boundary", "boundary_operator", "rho")
+
+
+def _reject_removed_physics_keys(cfg: dict[str, Any]) -> None:
+    removed = [key for key in REMOVED_PHYSICS_KEYS if key in cfg]
+    bo_cfg = dict(cfg.get("boundary_operator", {}) or {})
+    if "lambda" in bo_cfg:
+        removed.append("boundary_operator.lambda")
+    if removed:
+        raise ValueError(f"removed physics keys: {removed}; use physics.terms[].weight")
+
+
 def normalize_physics_terms(raw_cfg: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
-    """Normalize physics-term weights with backward-compatible key precedence."""
+    """Normalize physics-term weights from physics.terms only."""
 
     cfg = dict(raw_cfg or {})
+    _reject_removed_physics_keys(cfg)
     terms_raw = cfg.get("terms", {})
-    if isinstance(terms_raw, list):
-        terms_cfg = {
-            str(item.get("name")): {k: v for k, v in dict(item).items() if k != "name"}
-            for item in terms_raw
-            if isinstance(item, dict) and item.get("name") is not None
-        }
+    if terms_raw is None:
+        terms_cfg = {}
+    elif isinstance(terms_raw, list):
+        terms_cfg: dict[str, dict[str, Any]] = {}
+        for index, item in enumerate(terms_raw):
+            if not isinstance(item, dict):
+                raise ValueError(f"physics.terms[{index}] must be a mapping with name, enabled, and weight")
+            if "name" not in item:
+                raise ValueError(f"physics.terms[{index}].name is required")
+            missing = [key for key in ("enabled", "weight") if key not in item]
+            if missing:
+                raise ValueError(f"physics.terms[{index}] is missing required keys: {missing}")
+            name = str(item.get("name", "")).strip().lower()
+            if name not in REGISTERED_PHYSICS_TERMS:
+                raise ValueError(f"unsupported physics term {name!r}; registered terms={list(REGISTERED_PHYSICS_TERMS)}")
+            if "symbols" in item:
+                raise ValueError(
+                    f"physics.terms[{index}].symbols is not supported; use top-level physics.symbols "
+                    "or target_role_schema role/family metadata"
+                )
+            terms_cfg[name] = {k: v for k, v in dict(item).items() if k != "name"}
+    elif isinstance(terms_raw, dict):
+        terms_cfg = {}
+        for raw_name, raw_payload in dict(terms_raw or {}).items():
+            name = str(raw_name).strip().lower()
+            if name not in REGISTERED_PHYSICS_TERMS:
+                raise ValueError(f"unsupported physics term {name!r}; registered terms={list(REGISTERED_PHYSICS_TERMS)}")
+            payload = dict(raw_payload or {})
+            if "symbols" in payload:
+                raise ValueError(
+                    f"physics.terms.{name}.symbols is not supported; use top-level physics.symbols "
+                    "or target_role_schema role/family metadata"
+                )
+            terms_cfg[name] = payload
     else:
-        terms_cfg = dict(terms_raw or {})
-    bo_cfg = dict(cfg.get("boundary_operator", {}))
+        raise ValueError("physics.terms must be a mapping or a list of term objects")
 
-    def _normalize(name: str, *, legacy_key: str, legacy_weight: float) -> dict[str, Any]:
+    def _normalize(name: str) -> dict[str, Any]:
         term_cfg = dict(terms_cfg.get(name, {}))
         weight_raw = term_cfg.get("weight")
-        if weight_raw is None:
-            weight = float(legacy_weight)
-            source_key = legacy_key
-        else:
-            weight = float(weight_raw)
-            source_key = "terms"
+        weight = 0.0 if weight_raw is None else float(weight_raw)
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError(f"physics.terms.{name}.weight must be finite and >= 0")
         enabled_raw = term_cfg.get("enabled")
         enabled = bool((weight > 0.0) if enabled_raw is None else enabled_raw)
-        return {"enabled": enabled, "weight": weight, "source_key": source_key}
+        return {"enabled": enabled, "weight": weight, "source_key": "terms"}
 
     return {
-        "poisson": _normalize(
-            "poisson",
-            legacy_key="lambda_poisson",
-            legacy_weight=float(cfg.get("lambda_poisson", 0.0)),
-        ),
-        "boundary": _normalize(
-            "boundary",
-            legacy_key="lambda_bc",
-            legacy_weight=float(cfg.get("lambda_bc", 0.0)),
-        ),
-        "boundary_operator": _normalize(
-            "boundary_operator",
-            legacy_key="boundary_operator.lambda",
-            legacy_weight=float(bo_cfg.get("lambda", 0.0)),
-        ),
-        "rho": _normalize(
-            "rho",
-            legacy_key="lambda_rho",
-            legacy_weight=float(cfg.get("lambda_rho", 0.0)),
-        ),
+        "poisson": _normalize("poisson"),
+        "boundary": _normalize("boundary"),
+        "boundary_operator": _normalize("boundary_operator"),
+        "rho": _normalize("rho"),
     }
 
 
 def _resolved_terms_payload(terms: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    for name in ["poisson", "boundary", "boundary_operator", "rho"]:
+    for name in REGISTERED_PHYSICS_TERMS:
         row = dict(terms.get(name, {}))
         out.append(
             {
@@ -77,14 +99,29 @@ def _resolved_terms_payload(terms: dict[str, dict[str, Any]]) -> list[dict[str, 
     return out
 
 
+def _terms_from_resolved_payload(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name", "")).strip()
+        if not name:
+            continue
+        out[name] = {
+            "weight": float(row.get("weight", 0.0)),
+            "enabled": bool(row.get("enabled", float(row.get("weight", 0.0)) > 0.0)),
+        }
+    return out
+
+
 def build_physics_cfg(
     raw_cfg: dict[str, Any] | None,
     geom_ctx: GeometryContext,
     *,
     default_enabled: bool = False,
     default_primary_qoi_key: str = "Gamma_i",
-    default_lambda_poisson: float = 0.05,
-    default_lambda_bc: float = 0.02,
 ) -> dict[str, Any]:
     """Build normalized physics config contract from raw user config."""
 
@@ -116,7 +153,7 @@ def build_physics_cfg(
             raise ValueError("physics.boundary_operator.mode=external_operator is removed from mainline")
         boundary_operator_cfg = {
             "enabled": True,
-            "lambda": float(terms["boundary_operator"]["weight"]),
+            "weight": float(terms["boundary_operator"]["weight"]),
             "mask_band": mask_band.astype(np.float32),
             "mode": bo_mode,
             "primary_qoi_key": str(bo_cfg.get("primary_qoi_key", default_primary_qoi_key)),
@@ -124,30 +161,21 @@ def build_physics_cfg(
                 bo_cfg.get("sample_idx_source", "deeponet_task:boundary_operator.query_indices")
             ),
             "supervised_targets_npz": bo_cfg.get("supervised_targets_npz"),
-            "target_coeffs": bo_cfg.get("target_coeffs", {"log_ne": 0.10, "Te": 0.05, "bias": 0.0}),
+            "target_coeffs": bo_cfg.get("target_coeffs", {"density": 0.10, "temperature": 0.05, "bias": 0.0}),
             "prior_coeffs": bo_cfg.get("prior_coeffs"),
             "operator_handle": None,
-            "external_operator_handle": None,
             "target_clamp": bo_cfg.get("target_clamp"),
         }
 
-    lambda_poisson = terms["poisson"]["weight"]
-    if "terms" not in cfg and "lambda_poisson" not in cfg:
-        lambda_poisson = float(default_lambda_poisson)
-        terms["poisson"]["source_key"] = "default_lambda_poisson"
-    terms["poisson"]["weight"] = float(lambda_poisson)
-    lambda_bc = terms["boundary"]["weight"]
-    if "terms" not in cfg and "lambda_bc" not in cfg:
-        lambda_bc = float(default_lambda_bc)
-        terms["boundary"]["source_key"] = "default_lambda_bc"
-    terms["boundary"]["weight"] = float(lambda_bc)
+    poisson_weight = float(terms["poisson"]["weight"])
+    boundary_weight = float(terms["boundary"]["weight"])
+    terms["poisson"]["weight"] = float(poisson_weight)
+    terms["boundary"]["weight"] = float(boundary_weight)
     terms["boundary_operator"]["weight"] = float(terms["boundary_operator"]["weight"])
     terms["rho"]["weight"] = float(terms["rho"]["weight"])
 
     return {
         "enabled": True,
-        "lambda_poisson": float(lambda_poisson),
-        "lambda_bc": float(lambda_bc),
         "rhs": None,
         "bc_mask": np.asarray(bc_mask, dtype=np.float32),
         "bc_value": np.asarray(bc_value, dtype=np.float32),
@@ -163,7 +191,7 @@ def resolve_epoch_scaled_physics(
     epoch: int,
     curriculum_cfg: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve epoch-dependent lambda scaling from train.curriculum.physics_lambda_ramp."""
+    """Resolve epoch-dependent physics-term scaling."""
 
     cfg = copy.deepcopy(dict(physics_cfg or {}))
     if not bool(cfg.get("enabled", False)):
@@ -190,13 +218,17 @@ def resolve_epoch_scaled_physics(
     def _scaled(value: float | int | None) -> float:
         return float(scale * float(value if value is not None else 0.0))
 
-    cfg["lambda_poisson"] = _scaled(cfg.get("lambda_poisson", 0.0))
-    cfg["lambda_bc"] = _scaled(cfg.get("lambda_bc", 0.0))
+    terms_raw = cfg.get("terms")
+    if not terms_raw:
+        terms_raw = _terms_from_resolved_payload(cfg.get("resolved_terms"))
+    terms = normalize_physics_terms({"terms": terms_raw})
+    for name, term in terms.items():
+        term["weight"] = _scaled(term.get("weight", 0.0))
+        term["enabled"] = bool(term.get("enabled", False)) and float(term["weight"]) > 0.0
     bo = dict(cfg.get("boundary_operator", {}))
     if bo:
-        bo["lambda"] = _scaled(bo.get("lambda", 0.0))
+        bo["weight"] = float(terms["boundary_operator"]["weight"])
         cfg["boundary_operator"] = bo
-    terms = normalize_physics_terms(cfg)
     cfg["terms"] = terms
     cfg["resolved_terms"] = _resolved_terms_payload(terms)
     cfg["physics_ramp_scale"] = scale

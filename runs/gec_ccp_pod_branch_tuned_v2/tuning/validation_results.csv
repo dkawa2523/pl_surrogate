@@ -1,0 +1,4 @@
+candidate_id,validation_spatial_objective,selected_epoch,validation_metric,validation_objective_version,hidden,descriptor_normalization,preference,selected
+raw_act_h192x2,0.057746245110952284,222,selected_epoch_score,case_macro_spatial_rmse_v2,192x192,none,2,True
+zscore_act_h128x2,0.060822348136256164,238,selected_epoch_score,case_macro_spatial_rmse_v2,128x128,train_zscore,1,False
+zscore_act_h64x3,0.11016003177678212,258,selected_epoch_score,case_macro_spatial_rmse_v2,64x64x64,train_zscore,0,False

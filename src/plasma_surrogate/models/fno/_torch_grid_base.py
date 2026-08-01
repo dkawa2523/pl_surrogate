@@ -6,9 +6,17 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.models.heads.role_grouped import (
+    configure_output_head_metadata,
+    is_grouped_output_head_mode,
+)
+
 
 class _TorchGridFieldBaseline:
     """Shared wrapper for torch-based grid field models with spatial features."""
+
+    requires_spatial_features = True
+    requires_scaled_spatial_features = False
 
     def __init__(
         self,
@@ -26,6 +34,8 @@ class _TorchGridFieldBaseline:
         default_output_keys: list[str],
         impl_version: str,
         head_arch_version: str,
+        output_heads: dict[str, Any] | None = None,
+        target_role_schema: dict[str, Any] | None = None,
     ) -> None:
         self.input_dim = int(input_dim)
         self.grid_shape = tuple(grid_shape)
@@ -41,6 +51,14 @@ class _TorchGridFieldBaseline:
         self.backend = str(backend).strip().lower()
         if self.backend != "torch":
             raise ValueError(f"{type(self).__name__} supports only backend='torch'")
+        self._config_prefix = str(cfg_prefix)
+        configure_output_head_metadata(
+            self,
+            output_heads=dict(output_heads or {}),
+            output_keys=list(self.output_keys),
+            target_role_schema=dict(target_role_schema or {}),
+            cfg_prefix=self._config_prefix,
+        )
 
         channels = list(input_feature_channels or ["x", "y"])
         if len(channels) == 0:
@@ -52,7 +70,11 @@ class _TorchGridFieldBaseline:
         self.feature_dim = int(self.input_dim + self.spatial_feature_dim)
         self.head_mlp_cfg = dict(head_mlp or {})
         self.fno_impl_version = str(impl_version)
-        self.head_arch_version = str(head_arch_version)
+        self.head_arch_version = (
+            f"{head_arch_version}_{self.output_heads_mode}_v1"
+            if is_grouped_output_head_mode(self.output_heads_mode)
+            else str(head_arch_version)
+        )
 
         h, w = self.grid_shape
         yy = np.linspace(0.0, 1.0, h, dtype=np.float32)
@@ -66,9 +88,14 @@ class _TorchGridFieldBaseline:
         torch = require_torch()
         torch.manual_seed(int(seed))
         self.torch = torch
+        self.device = torch.device("cuda" if bool(torch.cuda.is_available()) else "cpu")
         self.net: Any = None
         self._torch_last_in = None
         self._torch_last_out = None
+
+    def _ensure_net_device(self) -> None:
+        if self.net is not None:
+            self.net.to(self.device)
 
     def set_static_spatial_features(self, spatial_features: np.ndarray) -> None:
         arr = np.asarray(spatial_features, dtype=np.float32)
@@ -140,7 +167,8 @@ class _TorchGridFieldBaseline:
     ) -> np.ndarray:
         torch = self.torch
         fmap = self._feature_map(cond, spatial_features=spatial_features)
-        xt = torch.from_numpy(np.moveaxis(fmap, -1, 1).astype(np.float32))
+        self._ensure_net_device()
+        xt = torch.from_numpy(np.moveaxis(fmap, -1, 1).astype(np.float32)).to(self.device)
         if training:
             self.net.train()
             yt = self.net(xt)
@@ -176,6 +204,8 @@ class _TorchGridFieldBaseline:
         return self.forward_features(cond, spatial_features=spatial_features)
 
     def _torch_step_reference(self):
+        if getattr(self.net, "head", None) is not None:
+            return self.net.in_proj.weight, self.net.head.step_reference()
         return self.net.in_proj.weight, self.net.post[-1].weight
 
     def backward_raw(
@@ -185,12 +215,14 @@ class _TorchGridFieldBaseline:
         lr: float,
         weight_decay: float = 0.0,
         apply_step: bool = True,
+        target_raw: np.ndarray | None = None,
+        loss_cfg: dict[str, Any] | None = None,
     ) -> dict[str, float]:
-        del weight_decay
+        del target_raw, loss_cfg, weight_decay
         if self._torch_last_out is None:
             raise RuntimeError(f"{type(self).__name__}.backward_raw called without torch forward cache")
         torch = self.torch
-        grad_t = torch.as_tensor(np.asarray(grad_raw, dtype=np.float32))
+        grad_t = torch.as_tensor(np.asarray(grad_raw, dtype=np.float32), device=self.device)
         params = [p for p in self.net.parameters() if p.requires_grad]
         if not params:
             return {"step_rel_hidden_mean": 0.0, "step_rel_output": 0.0}
@@ -229,7 +261,7 @@ class _TorchGridFieldBaseline:
     def load_state_dict_numpy(self, state: dict[str, np.ndarray]) -> None:
         torch = self.torch
         state_t = {
-            k.split("torch::", 1)[1]: torch.from_numpy(np.asarray(v, dtype=np.float32))
+            k.split("torch::", 1)[1]: torch.from_numpy(np.asarray(v, dtype=np.float32)).to(self.device)
             for k, v in state.items()
             if str(k).startswith("torch::")
         }
@@ -237,4 +269,5 @@ class _TorchGridFieldBaseline:
             raise ValueError(
                 f"legacy numpy {type(self).__name__} checkpoints are no longer supported; expected torch::* weights"
             )
+        self._ensure_net_device()
         self.net.load_state_dict(state_t, strict=True)

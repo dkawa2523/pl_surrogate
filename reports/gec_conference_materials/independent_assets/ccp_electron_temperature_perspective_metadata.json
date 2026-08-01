@@ -1,0 +1,32 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-CCP 2D electron temperature map is tilted as a flat plate for perspective presentation",
+  "sources": {
+    "field": "data/outputs_merged_td_csv_periodic_ext0520_v2/fields/case_td003_pp0_3_gamma_007__steady.npz",
+    "structure": "data/outputs_merged_td_csv_periodic_ext0520_v2/structure_features/base4.npz"
+  },
+  "system": "GEC-CCP",
+  "case_id": "case_td003_pp0_3_gamma_007__steady",
+  "view": "flat 2D map tilted in depth",
+  "shown_field": "Te",
+  "unit": "eV",
+  "height_encoding": "none; the plate is flat",
+  "color_encoding": "linear Te [eV]",
+  "colormap": "plasma",
+  "display_stride": 3,
+  "display_limits": [
+    2.8287999629974365,
+    35.1058784484863
+  ],
+  "display_only_plate_depth": 0.75,
+  "camera": {
+    "elevation_deg": 9.0,
+    "azimuth_deg": -58.0
+  },
+  "output_stem": "ccp_electron_temperature_perspective",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/ccp_electron_temperature_perspective.png",
+    "reports/gec_conference_materials/independent_assets/ccp_electron_temperature_perspective.pdf",
+    "reports/gec_conference_materials/independent_assets/ccp_electron_temperature_perspective.svg"
+  ]
+}

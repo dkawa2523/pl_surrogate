@@ -1,0 +1,81 @@
+{
+  "created_utc": "2026-07-15T05:33:27.599763+00:00",
+  "objective": "linear ne sensor-profile relative L2; fixed observation denominator; no log",
+  "device": "cpu",
+  "torch_cuda_available": false,
+  "torch_threads": 20,
+  "engine_load_s": 1.7490706999960821,
+  "total_wall_s": 61.183373399981065,
+  "run_root": "runs\\gec_ccp_spatial_v3\\seed_413\\n78\\fno",
+  "checkpoint": "runs\\gec_ccp_spatial_v3\\seed_413\\n78\\fno\\models\\fno\\eval_protocol\\interp\\checkpoints",
+  "case_id": "case_td030_pa200_pp0_5_gamma_004__steady",
+  "case_is_interp_test": true,
+  "truth_cond": {
+    "PP0": 5.0,
+    "Td": 0.3,
+    "gamma": 0.04,
+    "PA": 0.2
+  },
+  "fixed_cond": {
+    "Td": 0.3
+  },
+  "search_space": {
+    "PP0": [
+      1.0,
+      5.0
+    ],
+    "PA": [
+      0.05,
+      0.2
+    ],
+    "gamma": [
+      0.04,
+      0.1
+    ]
+  },
+  "initial_cond": {
+    "PP0": 3.0,
+    "PA": 0.125,
+    "gamma": 0.07
+  },
+  "initial_metrics": {
+    "sensor_loss": 0.4420755918508906,
+    "profile_truth_rel_l2": 0.4344063520442718,
+    "fullfield_truth_rel_l2": 0.42336713440300755
+  },
+  "truth_input_metrics": {
+    "sensor_loss": 0.050309085967164796,
+    "profile_truth_rel_l2": 0.013868441827018938,
+    "fullfield_truth_rel_l2": 0.016967188777437192
+  },
+  "realized_sensor_noise_rel": 0.045684609598840104,
+  "z_m": 0.0127,
+  "r_m": [
+    0.0,
+    0.005,
+    0.01,
+    0.015,
+    0.02,
+    0.025,
+    0.03,
+    0.035,
+    0.04,
+    0.045,
+    0.05,
+    0.055,
+    0.06,
+    0.065,
+    0.07,
+    0.075,
+    0.08,
+    0.085,
+    0.09
+  ],
+  "trials_per_method": 100,
+  "optimizer_seed": 20260718,
+  "noise_seed": 20260717,
+  "point_noise_rel": 0.05,
+  "calibration_noise_rel": 0.0,
+  "calibration_noise_draw": 0.0,
+  "best_method_by_sensor_loss": "tpe"
+}

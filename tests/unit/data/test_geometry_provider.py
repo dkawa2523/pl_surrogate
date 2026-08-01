@@ -37,7 +37,7 @@ def test_fixed_geometry_provider_builds_signed_distance_when_missing(tmp_path):
     mask[1:4, 1:4] = 1.0
     np.save(g / "mask_plasma.npy", mask)
     np.save(g / "eps.npy", np.ones((5, 5), dtype=np.float32))
-    provider = FixedGeometryProvider(root, coord_grid_source="normalized_fallback")
+    provider = FixedGeometryProvider(root, coord_grid_source="normalized")
     ctx = provider.get()
     assert ctx.distance_signed is not None
     signed = np.asarray(ctx.distance_signed, dtype=np.float32)

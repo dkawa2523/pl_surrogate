@@ -7,9 +7,9 @@ from typing import Any
 from plasma_surrogate.core.torch_backend import require_torch
 
 
-def _as_bchw(x, *, batch_size: int | None = None):
+def _as_bchw(x, *, batch_size: int | None = None, device: Any | None = None):
     torch = require_torch()
-    t = torch.as_tensor(x, dtype=torch.float32)
+    t = torch.as_tensor(x, dtype=torch.float32, device=device)
     if t.ndim == 2:
         t = t[None, None, ...]
     elif t.ndim == 3:
@@ -59,12 +59,10 @@ def masked_huber_loss_torch(pred, target, mask=None, *, delta: float = 1.0):
     loss_map = torch.nn.functional.huber_loss(p, t, delta=float(delta), reduction="none")
     if mask is None:
         return loss_map.mean()
-    m = _as_bchw(mask, batch_size=int(p.shape[0]))
+    m = _as_bchw(mask, batch_size=int(p.shape[0]), device=p.device)
     if p.ndim == 3:
         p = p[:, None, ...]
-    if p.ndim == 4 and int(p.shape[1]) == 1:
-        pass
-    else:
+    if p.ndim != 4 or int(p.shape[1]) != 1:
         raise ValueError(f"masked_huber_loss_torch expects [B,H,W] or [B,1,H,W], got {tuple(p.shape)}")
     if int(loss_map.ndim) == 3:
         loss_map = loss_map[:, None, ...]
@@ -89,9 +87,9 @@ def masked_region_huber_loss_torch(
 
     torch = require_torch()
     p = _as_bchw(pred)
-    t = _as_bchw(target, batch_size=int(p.shape[0]))
-    m = _as_bchw(mask_plasma, batch_size=int(p.shape[0]))
-    d_any = _as_bchw(distance_any, batch_size=int(p.shape[0]))
+    t = _as_bchw(target, batch_size=int(p.shape[0]), device=p.device)
+    m = _as_bchw(mask_plasma, batch_size=int(p.shape[0]), device=p.device)
+    d_any = _as_bchw(distance_any, batch_size=int(p.shape[0]), device=p.device)
     loss_map = torch.nn.functional.huber_loss(p, t, delta=float(delta), reduction="none")
     active = (m > 0.5).to(dtype=loss_map.dtype)
     boundary = ((d_any <= float(boundary_delta)).to(dtype=loss_map.dtype)) * active
@@ -138,12 +136,12 @@ def poisson_residual_fd_torch(phi, rhs=None, eps=None, mask=None, scale=None):
     )
     res = lap
     if rhs is not None:
-        res = res - _as_bchw(rhs, batch_size=int(p.shape[0]))
+        res = res - _as_bchw(rhs, batch_size=int(p.shape[0]), device=p.device)
     if eps is not None:
-        e = _as_bchw(eps, batch_size=int(p.shape[0]))
+        e = _as_bchw(eps, batch_size=int(p.shape[0]), device=p.device)
         res = res * e
     if mask is not None:
-        m = _as_bchw(mask, batch_size=int(p.shape[0]))
+        m = _as_bchw(mask, batch_size=int(p.shape[0]), device=p.device)
         res = res * m
     s = _as_scale_tensor(scale, res)
     if s is not None:
@@ -169,17 +167,17 @@ def boundary_operator_loss_torch(
     If provided, loss is evaluated only on the selected flattened points.
     """
     torch = require_torch()
-    ln = _as_bchw(pred_fields["log_ne"])
-    te = _as_bchw(pred_fields["Te"])
-    phi = _as_bchw(pred_fields["phi"])
+    density = _as_bchw(pred_fields.get("density"))
+    te = _as_bchw(pred_fields.get("temperature"))
+    phi = _as_bchw(pred_fields.get("potential"))
     if mask_band is None:
         m = torch.ones_like(phi)
     else:
-        m = _as_bchw(mask_band, batch_size=int(phi.shape[0]))
+        m = _as_bchw(mask_band, batch_size=int(phi.shape[0]), device=phi.device)
     if sample_idx is not None:
         m = _gather_points(m, sample_idx)
     pred = operator_model.predict_target(
-        log_ne=ln,
+        density=density,
         te=te,
         phi=phi,
         cond=cond_vec,
@@ -190,15 +188,17 @@ def boundary_operator_loss_torch(
     if mode == "supervised":
         if supervised_targets is None or primary_qoi_key not in supervised_targets:
             raise ValueError("supervised boundary operator loss requires supervised_targets[primary_qoi_key]")
-        tgt = _as_bchw(supervised_targets[primary_qoi_key], batch_size=int(phi.shape[0]))
+        tgt = _as_bchw(supervised_targets[primary_qoi_key], batch_size=int(phi.shape[0]), device=phi.device)
         if sample_idx is not None:
             tgt = _gather_points(tgt, sample_idx)
     else:
         # operator-prior: compare against a simple Bohm-like proxy
         if sample_idx is not None:
-            tgt = 0.10 * _gather_points(ln, sample_idx) + 0.05 * _gather_points(te, sample_idx)
+            tgt = 0.10 * _gather_points(density, sample_idx) + 0.05 * _gather_points(te, sample_idx)
         else:
-            tgt = 0.10 * ln + 0.05 * te
+            tgt = 0.10 * density + 0.05 * te
+    m = m.to(device=pred.device, dtype=pred.dtype)
+    tgt = tgt.to(device=pred.device, dtype=pred.dtype)
     diff = (pred - tgt) * m
     denom = torch.clamp(m.sum(), min=1.0)
     return (diff * diff).sum() / denom
@@ -213,12 +213,15 @@ def physics_terms_torch(
     supervised_targets: dict[str, Any] | None = None,
 ):
     torch = require_torch()
+    ref_device = None
+    if pred_fields:
+        ref_device = torch.as_tensor(next(iter(pred_fields.values())), dtype=torch.float32).device
     if not cfg or not bool(cfg.get("enabled", False)):
-        z = torch.zeros((), dtype=torch.float32)
+        z = torch.zeros((), dtype=torch.float32, device=ref_device)
         return z, {"poisson": 0.0, "boundary_operator": 0.0}
 
-    phi = _as_bchw(pred_fields["phi"])
-    lambda_poisson = float(cfg.get("lambda_poisson", 0.0))
+    phi = _as_bchw(pred_fields.get("potential"))
+    poisson_weight = float(cfg.get("poisson_weight", 0.0))
     rhs = cfg.get("rhs")
     if rhs is None and bool(cfg.get("use_pred_rho_eff", True)) and ("rho_eff" in pred_fields):
         # Poisson form: lap(phi) + rho_eff = 0  => lap(phi) - (-rho_eff) = 0
@@ -230,21 +233,21 @@ def physics_terms_torch(
     if eps is None and (geom_ctx is not None) and hasattr(geom_ctx, "eps"):
         eps = getattr(geom_ctx, "eps")
     scale_rho = cfg.get("scale_rho", cfg.get("scale"))
-    poisson = torch.zeros((), dtype=torch.float32)
-    if lambda_poisson > 0.0:
+    poisson = torch.zeros((), dtype=torch.float32, device=phi.device)
+    if poisson_weight > 0.0:
         res = poisson_residual_fd_torch(phi, rhs=rhs, eps=eps, mask=mask, scale=scale_rho)
         clamp_val = cfg.get("poisson_clamp")
         if clamp_val is not None:
             cv = float(clamp_val)
             res = torch.clamp(res, min=-cv, max=cv)
-        poisson = float(lambda_poisson) * (res * res).mean()
+        poisson = float(poisson_weight) * (res * res).mean()
 
-    bo_term = torch.zeros((), dtype=torch.float32)
+    bo_term = torch.zeros((), dtype=torch.float32, device=phi.device)
     bo_cfg = cfg.get("boundary_operator", {})
     if (
         boundary_operator_model is not None
         and bool(bo_cfg.get("enabled", False))
-        and float(bo_cfg.get("lambda", 0.0)) > 0.0
+        and float(bo_cfg.get("weight", 0.0)) > 0.0
     ):
         bo = boundary_operator_loss_torch(
             pred_fields=pred_fields,
@@ -257,7 +260,7 @@ def physics_terms_torch(
             supervised_targets=supervised_targets,
             sample_idx=bo_cfg.get("sample_idx"),
         )
-        bo_term = float(bo_cfg.get("lambda", 0.0)) * bo
+        bo_term = float(bo_cfg.get("weight", 0.0)) * bo
 
     total = poisson + bo_term
     return total, {"poisson": float(poisson.detach().cpu().item()), "boundary_operator": float(bo_term.detach().cpu().item())}

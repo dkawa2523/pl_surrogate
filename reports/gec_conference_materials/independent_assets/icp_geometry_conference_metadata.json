@@ -1,0 +1,18 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative ICP section distinguishes the plasma, dielectrics, substrate, and coils",
+  "sources": {
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz",
+    "coil_layout": "data/outputs_icp_stage4_enriched_360/structure/coil_layout/case_g002_op01__coil_layout.csv"
+  },
+  "system": "GEC-ICP",
+  "case_id": "case_g002_op01",
+  "active_coils": 6,
+  "legend_location": "outside plot below",
+  "output_stem": "icp_geometry_conference",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_geometry_conference.png",
+    "reports/gec_conference_materials/independent_assets/icp_geometry_conference.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_geometry_conference.svg"
+  ]
+}

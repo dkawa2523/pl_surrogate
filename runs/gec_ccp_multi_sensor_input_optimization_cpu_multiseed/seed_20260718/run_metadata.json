@@ -1,0 +1,51 @@
+{
+  "created_utc": "2026-07-15T05:33:29.088116+00:00",
+  "device": "cpu",
+  "case_ids": [
+    "case_td003_pa050_pp0_3_gamma_010__steady",
+    "case_td016_pp0_1_gamma_007__steady",
+    "case_td030_pa200_pp0_5_gamma_004__steady"
+  ],
+  "case_selection": "three held-out diagonal cases spanning Td, PP0, PA, gamma, and structures",
+  "trials_per_method_per_measurement": 100,
+  "methods": [
+    "cmaes",
+    "tpe",
+    "random"
+  ],
+  "optimizer_seed": 20260718,
+  "noise_seeds": [
+    20260715,
+    20260716,
+    20260717
+  ],
+  "point_noise_rel": 0.05,
+  "calibration_noise_rel": 0.0,
+  "noise_is_frozen_per_measurement": true,
+  "objective": "linear ne sensor-profile relative L2; no log transform",
+  "primary_convergence_target": "best loss / true-input FNO sensor loss <= 1.10",
+  "strict_convergence_target": "best loss / true-input FNO sensor loss <= 1.00",
+  "best_trial_interpretation": "last improvement only; not used for cross-method speed ranking",
+  "cost_assumptions": {
+    "train_val_cases": 65,
+    "train_val_data_s": 17828.507,
+    "full_benchmark_cases": 78,
+    "full_data_s": 22122.947999999993,
+    "fno_interp_training_s": 809.753657600013,
+    "td_mean_comsol_s": {
+      "0.03": 221.81607407407404,
+      "0.16": 280.298125,
+      "0.3": 348.3984814814815
+    },
+    "td_median_comsol_s": {
+      "0.03": 122.148,
+      "0.16": 118.51400000000001,
+      "0.3": 155.227
+    },
+    "three_candidate_validation_mean_est_s": 850.5126805555556,
+    "direct_cost_is_estimate": true,
+    "oracle_best_trial_is_retrospective_lower_bound": true
+  },
+  "three_measurement_execution_wall_s": 183.83886659998097,
+  "latest_orchestration_or_aggregation_wall_s": 190.3092556000047
+}

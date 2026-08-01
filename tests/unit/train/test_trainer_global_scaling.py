@@ -63,7 +63,6 @@ def test_global_grad_clip_reduces_gradient_norm():
         supervised_mask=mask,
         supervised_distance=dist,
         grad_scale_cfg={"mode": "fixed", "fixed_value": 500.0},
-        grad_clip_norm=0.0,
     )
     stats_clip = train_one_epoch_global_physics(
         model_clip,
@@ -74,7 +73,7 @@ def test_global_grad_clip_reduces_gradient_norm():
         supervised_mask=mask,
         supervised_distance=dist,
         grad_scale_cfg={"mode": "fixed", "fixed_value": 500.0},
-        grad_clip_norm=0.25,
+        grad_clip_cfg={"mode": "global", "norm": 0.25},
     )
     assert float(stats_clip["grad_l2_total"]) <= float(stats_no_clip["grad_l2_total"])
 
@@ -97,7 +96,7 @@ def test_global_grad_clip_per_sample_applies_and_reports_clip_ratio():
     assert float(stats["clip_ratio"]) <= 1.0
 
 
-def test_global_default_grad_scale_is_backward_compatible_off_mode():
+def test_global_default_grad_scale_is_off_mode():
     cond, y_field, mask, dist = _make_inputs(3)
     model = GlobalMLP(input_dim=3, grid_shape=(4, 4), out_channels=3, seed=6, hidden=[16, 16], dropout=0.0)
     stats = train_one_epoch_global_physics(

@@ -5,6 +5,10 @@ from pathlib import Path
 
 from plasma_surrogate.core.synthetic_data import build_synthetic_dataset
 from plasma_surrogate.preprocessing.runner import PreprocessRunner
+from tests._config_presets import (
+    default_target_transforms_four_field_example,
+    runtime_table_plus_structure,
+)
 
 
 def test_preprocess_writes_deeponet_task_caches(tmp_path: Path):
@@ -16,14 +20,7 @@ def test_preprocess_writes_deeponet_task_caches(tmp_path: Path):
     pre = PreprocessRunner(
         {
             "split": {"seed": 2, "ratios": [0.6, 0.2, 0.2]},
-            "scalers": {
-                "target_transforms": {
-                    "ne": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "ni": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "Te": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "phi": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "all", "clip": {"mode": "none"}},
-                }
-            },
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
             "sampling": {
                 "deeponet": {
                     "tasks": {
@@ -39,6 +36,7 @@ def test_preprocess_writes_deeponet_task_caches(tmp_path: Path):
             },
         },
         run_dir / "preprocessing",
+        runtime_cfg=runtime_table_plus_structure(),
     )
     pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
 
@@ -76,14 +74,7 @@ def test_preprocess_boundary_task_hash_changes_with_primary_qoi_key(tmp_path: Pa
         pre = PreprocessRunner(
             {
                 "split": {"seed": 2, "ratios": [0.6, 0.2, 0.2]},
-                "scalers": {
-                    "target_transforms": {
-                        "ne": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                        "ni": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                        "Te": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                        "phi": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "all", "clip": {"mode": "none"}},
-                    }
-                },
+                "scalers": {"target_transforms": default_target_transforms_four_field_example()},
                 "sampling": {
                     "deeponet": {
                         "tasks": {
@@ -99,6 +90,7 @@ def test_preprocess_boundary_task_hash_changes_with_primary_qoi_key(tmp_path: Pa
                 },
             },
             run_dir / "preprocessing",
+            runtime_cfg=runtime_table_plus_structure(),
         )
         pre.run(cases=dataset.cases, geometry_root=dataset.geometry_root)
         with (run_dir / "preprocessing" / "validation" / "repro_hashes.json").open("r", encoding="utf-8") as f:

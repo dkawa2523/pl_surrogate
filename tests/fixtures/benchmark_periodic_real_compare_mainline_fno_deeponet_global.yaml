@@ -1,5 +1,6 @@
 compare:
   output_dir: runs/periodic_real_tuned_v83/compare_mainline_fno_deeponet_global
+  require_same_input_mode: true
   objective_metric: auto_primary
   objective_mode: max
   global_reference_mode: frozen

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from plasma_surrogate.preprocessing.split import (
     build_casewise_splits,
+    build_condition_grouped_splits,
     build_extrapolation_split,
     build_group_kfold_splits,
     build_interpolation_overlap_split,
     build_interpolation_overlap_split_with_status,
     build_interpolation_split,
+    build_structure_holdout_split,
 )
 
 
@@ -92,7 +94,7 @@ def test_build_interpolation_split_keeps_train_value_coverage():
     assert len(split["test"]) > 0
 
 
-def test_build_interpolation_overlap_split_guarantees_tuple_overlap_when_possible():
+def test_build_interpolation_overlap_split_keeps_duplicate_tuples_in_one_partition():
     ids = [f"case_{i}" for i in range(12)]
     # Duplicate tuples: 6 unique tuples x 2 repeats.
     cond_values = {}
@@ -108,12 +110,22 @@ def test_build_interpolation_overlap_split_guarantees_tuple_overlap_when_possibl
     )
     tr_tuples = {(cond_values[c]["c0"], cond_values[c]["c1"]) for c in split["train"]}
     te_tuples = {(cond_values[c]["c0"], cond_values[c]["c1"]) for c in split["test"]}
-    assert len(tr_tuples & te_tuples) > 0
+    va_tuples = {(cond_values[c]["c0"], cond_values[c]["c1"]) for c in split["val"]}
+    assert tr_tuples.isdisjoint(va_tuples)
+    assert tr_tuples.isdisjoint(te_tuples)
+    assert va_tuples.isdisjoint(te_tuples)
+    membership = {
+        cid: split_name
+        for split_name in ("train", "val", "test")
+        for cid in split[split_name]
+    }
+    for i in range(6):
+        assert membership[f"case_{i}"] == membership[f"case_{i + 6}"]
     assert len(split["val"]) > 0
     assert len(split["test"]) > 0
 
 
-def test_build_interpolation_overlap_split_with_status_fallback_when_no_duplicates():
+def test_build_interpolation_overlap_split_with_status_allows_unique_tuples_with_marginal_coverage():
     ids = [f"case_{i}" for i in range(9)]
     cond_values = {
         cid: {"c0": float(i // 3), "c1": float(i % 3)}
@@ -126,8 +138,8 @@ def test_build_interpolation_overlap_split_with_status_fallback_when_no_duplicat
         seed=2,
         ratios=(0.6, 0.2, 0.2),
     )
-    assert bool(out["feasible"]) is False
-    assert str(out["reason"]) == "no_duplicate_condition_tuples"
+    assert bool(out["feasible"]) is True
+    assert str(out["reason"]) == ""
     split = out["split"]
     assert len(split["train"]) > 0
     assert len(split["val"]) > 0
@@ -141,3 +153,65 @@ def test_build_extrapolation_split_holds_out_high_end():
     test_vals = [cond_values[c]["p"] for c in split["test"]]
     train_vals = [cond_values[c]["p"] for c in split["train"]]
     assert min(test_vals) >= max(train_vals)
+
+
+def test_condition_grouped_split_never_crosses_complete_condition_ties():
+    ids = [f"case_{i}" for i in range(12)]
+    cond_values = {
+        cid: {"p": float(i % 4), "q": float((i % 4) // 2)}
+        for i, cid in enumerate(ids)
+    }
+    split = build_condition_grouped_splits(
+        ids,
+        cond_values=cond_values,
+        keys=["p", "q"],
+        seed=7,
+        ratios=(0.6, 0.2, 0.2),
+    )
+    membership = {
+        cid: split_name
+        for split_name in ("train", "val", "test")
+        for cid in split[split_name]
+    }
+    by_tuple: dict[tuple[float, float], set[str]] = {}
+    for cid in ids:
+        key = (cond_values[cid]["p"], cond_values[cid]["q"])
+        by_tuple.setdefault(key, set()).add(membership[cid])
+    assert all(len(partitions) == 1 for partitions in by_tuple.values())
+
+
+def test_extrapolation_keeps_equal_levels_together():
+    ids = [f"case_{i}" for i in range(12)]
+    cond_values = {cid: {"p": float(i % 4)} for i, cid in enumerate(ids)}
+    split = build_extrapolation_split(
+        ids,
+        cond_values=cond_values,
+        key="p",
+        holdout_ratio=0.25,
+        val_ratio_within_remain=0.33,
+    )
+    memberships = {
+        split_name: {cond_values[cid]["p"] for cid in split[split_name]}
+        for split_name in ("train", "val", "test")
+    }
+    assert memberships["train"].isdisjoint(memberships["val"])
+    assert memberships["train"].isdisjoint(memberships["test"])
+    assert memberships["val"].isdisjoint(memberships["test"])
+
+
+def test_structure_holdout_never_crosses_structure_groups():
+    ids = [f"{group}_{idx}" for group in "abcdef" for idx in range(2)]
+    groups = [cid.split("_")[0] for cid in ids]
+    split = build_structure_holdout_split(
+        ids,
+        structure_groups=groups,
+        seed=3,
+        ratios=(0.6, 0.2, 0.2),
+    )
+    membership = {
+        cid: split_name
+        for split_name in ("train", "val", "test")
+        for cid in split[split_name]
+    }
+    for group in set(groups):
+        assert len({membership[cid] for cid in ids if cid.startswith(group + "_")}) == 1

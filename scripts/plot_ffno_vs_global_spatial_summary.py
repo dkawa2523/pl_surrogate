@@ -17,7 +17,7 @@ from plasma_surrogate.core.dataset_io import load_dataset
 from plasma_surrogate.core.run_bundle import RunBundleLoader
 from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
 from plasma_surrogate.infer.engine import InferenceEngine
-from plasma_surrogate.models.mlp.io import load_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import load_checkpoint
 
 
 DISPLAY_VARS = ("ne", "ni", "Te", "phi")
@@ -45,7 +45,7 @@ def _make_engine(
     geometry_root: Path,
 ) -> InferenceEngine:
     ckpt_dir = run_root / "models" / model_name / "eval_protocol" / split / "checkpoints"
-    model = load_mlp_checkpoint(ckpt_dir)
+    model = load_checkpoint(ckpt_dir)
     bundle = RunBundleLoader.load(run_root, model=model)
     cond_schema = bundle.cond_schema_obj()
     axis_schema = bundle.axis_schema_obj()
@@ -54,7 +54,6 @@ def _make_engine(
     geom_provider = FixedGeometryProvider(geometry_root)
     output_dir = temp_root / model_name / split
     coord_feature_pack = bundle.schemas.get("coord_feature_pack")
-    coord_pack_meta = dict(bundle.schemas.get("coord_feature_pack_meta", {}))
     coord_scaler = dict(bundle.transforms.get("coord_scaler", {}))
     coord_feature_scaler = dict(bundle.transforms.get("coord_feature_scaler", {}))
     coord_distance_stats = dict(bundle.transforms.get("distance_transform_stats", {}))
@@ -86,10 +85,8 @@ def _make_engine(
 
 
 def _display_field(var_name: str, arr: np.ndarray) -> np.ndarray:
-    a = np.asarray(arr, dtype=np.float64)
-    if var_name in {"ne", "ni"}:
-        return np.log10(np.maximum(a, 1.0))
-    return a
+    del var_name
+    return np.asarray(arr, dtype=np.float64)
 
 
 def _build_summary_fields(
@@ -206,10 +203,7 @@ def _make_plot(
             ax.set_xticks([])
             ax.set_yticks([])
             if col_idx == 0:
-                ylabel = f"{var_name}"
-                if var_name in {"ne", "ni"}:
-                    ylabel += "\nlog10 scale"
-                axes[row_idx, col_idx].set_ylabel(ylabel, fontsize=11)
+                axes[row_idx, col_idx].set_ylabel(f"{var_name}", fontsize=11)
         if field_im is not None:
             fig.colorbar(field_im, ax=field_axes, fraction=0.018, pad=0.01)
         if err_im is not None:

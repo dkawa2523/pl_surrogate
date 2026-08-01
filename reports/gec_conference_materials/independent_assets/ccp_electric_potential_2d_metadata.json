@@ -1,0 +1,26 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-CCP case shows the spatial electric potential distribution",
+  "sources": {
+    "field": "data/outputs_merged_td_csv_periodic_ext0520_v2/fields/case_td003_pp0_3_gamma_007__steady.npz",
+    "structure": "data/outputs_merged_td_csv_periodic_ext0520_v2/structure_features/base4.npz"
+  },
+  "system": "GEC-CCP",
+  "case_id": "case_td003_pp0_3_gamma_007__steady",
+  "view": "2D axisymmetric map",
+  "shown_field": "phi",
+  "unit": "V",
+  "normalization": "linear color scale",
+  "color_encoding": "linear phi [V], centered at zero",
+  "colormap": "coolwarm",
+  "display_limits": [
+    -163.07000732421875,
+    29.863000869750977
+  ],
+  "output_stem": "ccp_electric_potential_2d",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/ccp_electric_potential_2d.png",
+    "reports/gec_conference_materials/independent_assets/ccp_electric_potential_2d.pdf",
+    "reports/gec_conference_materials/independent_assets/ccp_electric_potential_2d.svg"
+  ]
+}

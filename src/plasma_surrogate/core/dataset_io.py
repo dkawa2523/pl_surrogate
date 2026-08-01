@@ -30,6 +30,61 @@ def _as_hw(arr: np.ndarray, *, key: str) -> np.ndarray:
     return out.astype(np.float32)
 
 
+def _as_bool(value: Any, *, key: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    if isinstance(value, (int, np.integer)) and int(value) in {0, 1}:
+        return bool(value)
+    raise ValueError(f"{key} must be boolean-compatible")
+
+
+def _validate_same_input_output_mapping(
+    cases: list[dict[str, Any]],
+    *,
+    cond_columns: list[str],
+    rtol: float,
+    atol: float,
+) -> None:
+    by_input: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for case in cases:
+        structure_identity = str(
+            case.get("structure_npz", case.get("base_name", case.get("geom_id", "")))
+        )
+        key = (
+            *(float(case["cond"][name]) for name in cond_columns),
+            float(case["axis"]),
+            structure_identity,
+        )
+        previous = by_input.get(key)
+        if previous is None:
+            by_input[key] = case
+            continue
+        divergent_targets = [
+            name
+            for name, values in case["y"].items()
+            if not np.allclose(
+                np.asarray(values),
+                np.asarray(previous["y"][name]),
+                rtol=float(rtol),
+                atol=float(atol),
+                equal_nan=True,
+            )
+        ]
+        if divergent_targets:
+            raise ValueError(
+                "csv_npz validation found identical model inputs with different outputs: "
+                f"case_id={previous['case_id']!r} vs {case['case_id']!r}, "
+                f"targets={divergent_targets}. Check omitted condition columns (especially PA) "
+                "and case-specific structure references."
+            )
+
+
 def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> SyntheticDataset:
     """Load a minimal 2D dataset from index CSV + per-case fields npz."""
 
@@ -45,20 +100,40 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
     cond_columns = list(ds_cfg.get("cond_columns", []))
     if len(cond_columns) == 0:
         raise ValueError("dataset.type=csv_npz requires non-empty cond_columns")
+    validation_raw = ds_cfg.get("validation", {})
+    if validation_raw is None:
+        validation_raw = {}
+    if not isinstance(validation_raw, dict):
+        raise ValueError("dataset.validation must be an object when provided")
+    required_condition_columns = [str(v) for v in validation_raw.get("required_condition_columns", [])]
+    missing_required_conditions = sorted(set(required_condition_columns) - set(cond_columns))
+    if missing_required_conditions:
+        raise ValueError(
+            "dataset.validation.required_condition_columns missing from dataset.cond_columns: "
+            f"{missing_required_conditions}"
+        )
+    reject_same_input_different_output = _as_bool(
+        validation_raw.get("reject_same_input_different_output", False),
+        key="dataset.validation.reject_same_input_different_output",
+    )
+    validation_rtol = float(validation_raw.get("same_input_output_rtol", 0.0))
+    validation_atol = float(validation_raw.get("same_input_output_atol", 0.0))
+    if validation_rtol < 0.0 or validation_atol < 0.0:
+        raise ValueError("dataset.validation same-input output tolerances must be >= 0")
     legacy_keys = ["output_vars", "output_key_map", "output_value_transform"]
     for key in legacy_keys:
         if key in ds_cfg:
             raise ValueError(
                 f"dataset.{key} is removed from mainline. "
-                "Use dataset.targets=[{id, source_key, units, dtype, value_transform}]"
+                "Use dataset.targets=[{id, source_key, units, dtype, value_transform, role, positive, field_family}]"
             )
     targets_raw = ds_cfg.get("targets")
     if not isinstance(targets_raw, list) or len(targets_raw) == 0:
         raise ValueError(
             "dataset.type=csv_npz requires non-empty dataset.targets "
-            "with entries: {id, source_key?, units?, dtype?, value_transform?}"
+            "with entries: {id, source_key?, units?, dtype?, value_transform?, role?, positive?, field_family?}"
         )
-    targets: list[dict[str, str]] = []
+    targets: list[dict[str, Any]] = []
     seen_target_ids: set[str] = set()
     for i, entry in enumerate(targets_raw):
         if not isinstance(entry, dict):
@@ -73,19 +148,46 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
         if source_key == "":
             raise ValueError(f"dataset.targets[{i}].source_key must not be empty")
         value_transform = str(entry.get("value_transform", "identity")).strip().lower()
-        if value_transform not in {"identity", "pow10", "exp10"}:
+        if value_transform != "identity":
             raise ValueError(
-                f"dataset.targets[{i}].value_transform must be one of: identity, pow10, exp10; got={value_transform}"
+                f"dataset.targets[{i}].value_transform={value_transform!r} is removed from mainline. "
+                "Use linear physical fields with value_transform=identity."
             )
-        targets.append(
-            {
-                "id": target_id,
-                "source_key": source_key,
-                "value_transform": value_transform,
-            }
-        )
+        target_meta: dict[str, Any] = {
+            "id": target_id,
+            "source_key": source_key,
+            "value_transform": value_transform,
+        }
+        for key in ("units", "dtype", "role", "field_family", "default_region"):
+            if key in entry and entry.get(key) is not None:
+                value = str(entry.get(key)).strip()
+                if value:
+                    target_meta[key] = value
+        if "positive" in entry:
+            raw_positive = entry.get("positive")
+            if isinstance(raw_positive, bool):
+                target_meta["positive"] = raw_positive
+            elif isinstance(raw_positive, str) and raw_positive.strip().lower() in {"true", "1", "yes", "on"}:
+                target_meta["positive"] = True
+            elif isinstance(raw_positive, str) and raw_positive.strip().lower() in {"false", "0", "no", "off"}:
+                target_meta["positive"] = False
+            else:
+                raise ValueError(f"dataset.targets[{i}].positive must be boolean-compatible")
+        targets.append(target_meta)
     axis_column = str(ds_cfg.get("axis_column", "axis"))
     fields_col = str(ds_cfg.get("fields_npz_column", "fields_npz"))
+    structure_col_raw = ds_cfg.get("structure_npz_column")
+    structure_col = str(structure_col_raw) if structure_col_raw is not None else None
+    base_name_col_raw = ds_cfg.get("structure_base_name_column", ds_cfg.get("base_name_column"))
+    structure_output_key_col_raw = ds_cfg.get("structure_output_key_column")
+    structure_source_path_col_raw = ds_cfg.get("structure_source_path_column")
+    base_name_col = str(base_name_col_raw) if base_name_col_raw is not None else None
+    structure_output_key_col = (
+        str(structure_output_key_col_raw) if structure_output_key_col_raw is not None else None
+    )
+    structure_source_path_col = (
+        str(structure_source_path_col_raw) if structure_source_path_col_raw is not None else None
+    )
     case_id_col = str(ds_cfg.get("case_id_column", "case_id"))
     base_case_id_col_raw = ds_cfg.get("base_case_id_column")
     split_group_col_raw = ds_cfg.get("split_group_column")
@@ -112,6 +214,11 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
     with index_csv.open("r", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         required = {case_id_col, axis_column, fields_col, *cond_columns}
+        if structure_col is not None:
+            required.add(structure_col)
+        for optional_structure_col in (base_name_col, structure_output_key_col, structure_source_path_col):
+            if optional_structure_col is not None:
+                required.add(optional_structure_col)
         if base_case_id_col is not None:
             required.add(base_case_id_col)
         if split_group_col is not None:
@@ -135,28 +242,25 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
                 raise FileNotFoundError(f"fields npz not found for case={case_id}: {npz_path}")
 
             with np.load(npz_path) as data:
-                output_vars = [t["id"] for t in targets]
+                target_ids = [t["id"] for t in targets]
                 resolved_sources = {t["id"]: t["source_key"] for t in targets}
                 transforms = {t["id"]: t["value_transform"] for t in targets}
-                missing_keys = [resolved_sources[k] for k in output_vars if resolved_sources[k] not in data.files]
+                missing_keys = [resolved_sources[k] for k in target_ids if resolved_sources[k] not in data.files]
                 if missing_keys:
                     raise ValueError(f"fields npz missing keys for case={case_id}: {missing_keys}")
                 y: dict[str, np.ndarray] = {}
-                for name in output_vars:
+                for name in target_ids:
                     source_key = resolved_sources[name]
                     arr = _as_hw(data[source_key], key=source_key)
                     transform = str(transforms.get(name, "identity")).strip().lower()
-                    if transform == "identity":
-                        y[name] = arr
-                    elif transform in {"pow10", "exp10"}:
-                        y[name] = np.power(10.0, arr.astype(np.float64)).astype(np.float32)
-                    else:
+                    if transform != "identity":
                         raise ValueError(
-                            "dataset.targets[].value_transform supports only identity|pow10|exp10; "
-                            f"got {transform} for target id={name}"
+                            "dataset.targets[].value_transform supports only identity in mainline; "
+                            f"got {transform!r} for target id={name}"
                         )
+                    y[name] = arr
 
-            first_key = output_vars[0]
+            first_key = target_ids[0]
             shape = tuple(int(v) for v in y[first_key].shape)
             if expected_shape is None:
                 expected_shape = shape
@@ -171,6 +275,29 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
                 "axis": axis,
                 "y": y,
             }
+            if structure_col is not None:
+                raw_structure_path = str(row[structure_col]).strip()
+                if not raw_structure_path:
+                    raise ValueError(f"empty structure npz reference for case={case_id}")
+                structure_path = Path(raw_structure_path)
+                if not structure_path.is_absolute():
+                    structure_path = root / structure_path
+                if not structure_path.exists():
+                    raise FileNotFoundError(f"structure npz not found for case={case_id}: {structure_path}")
+                case_payload["structure_npz"] = str(structure_path)
+            if base_name_col is not None:
+                base_name = str(row[base_name_col]).strip()
+                if not base_name:
+                    raise ValueError(f"empty structure base_name for case={case_id}")
+                case_payload["base_name"] = base_name
+                # Existing case consumers already use geom_id.  Making it the
+                # stable alternative id lets parametric providers select one
+                # structure without inventing a second case-routing contract.
+                case_payload["geom_id"] = base_name
+            if structure_output_key_col is not None:
+                case_payload["structure_output_key"] = str(row[structure_output_key_col]).strip()
+            if structure_source_path_col is not None:
+                case_payload["structure_relative_path"] = str(row[structure_source_path_col]).strip()
             if base_case_id_col is not None:
                 case_payload["base_case_id"] = str(row[base_case_id_col])
             if split_group_col is not None:
@@ -179,12 +306,21 @@ def load_csv_npz_dataset(ds_cfg: dict[str, Any], run_dir: str | Path) -> Synthet
 
     if expected_shape is None:
         raise ValueError(f"csv_npz index has no rows: {index_csv}")
+    if reject_same_input_different_output:
+        _validate_same_input_output_mapping(
+            cases,
+            cond_columns=[str(k) for k in cond_columns],
+            rtol=validation_rtol,
+            atol=validation_atol,
+        )
 
     return SyntheticDataset(
         cases=cases,
         cond_order=[str(k) for k in cond_columns],
         geometry_root=geometry_root,
         shape=expected_shape,
+        structure_root=root,
+        target_metadata=targets,
     )
 
 

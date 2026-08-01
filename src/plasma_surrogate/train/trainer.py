@@ -1,22 +1,46 @@
-"""Cycle1/M3 trainers for baseline models."""
+"""Mainline trainers for baseline surrogate models."""
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 import numpy as np
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
 from plasma_surrogate.core.deeponet_contract import allvars_plasma_balance_score, masked_r2_score
-from plasma_surrogate.core.density_contract import resolve_density_key, resolve_density_pair
 from plasma_surrogate.core.physics_contract import resolve_epoch_scaled_physics
 from plasma_surrogate.core.spatial_regions import align_bhw_batch, build_region_masks
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
+from plasma_surrogate.train.artifact_writers import (
+    save_numpy_optimization_diagnostics,
+    save_physics_terms,
+    save_resolved_physics,
+    save_training_progress,
+)
 from plasma_surrogate.train.loss_composer import compose_numpy, compose_supervised_numpy
 from plasma_surrogate.train.losses import laplacian2d
+from plasma_surrogate.preprocessing.spatial_features import materialize_case_spatial_batch
+from plasma_surrogate.train.selection import (
+    GROUP_BALANCE_SELECTION_MODE,
+    SPATIAL_SELECTION_MODE,
+    SPATIAL_SELECTION_OBJECTIVE_VERSION,
+    case_macro_spatial_objective,
+    group_plasma_balance_score,
+    resolve_selection_group_weights,
+    resolve_selection_target_groups,
+    resolve_spatial_selection_config,
+)
+from plasma_surrogate.train.spatial_supervision import (
+    materialize_supervised_geometry,
+    objective_boundary_distance_channels,
+    slice_case_map,
+)
+from plasma_surrogate.train.target_contracts import resolve_mainline_selection_weights
 
 
 @dataclass
@@ -48,14 +72,52 @@ def _backward_model(model: Any, grad_output: np.ndarray, *, lr: float, weight_de
     return False
 
 
-def _resolve_log_ne_field(pred_fields: np.ndarray, y_vars: list[str]) -> np.ndarray:
-    density_ne_key = resolve_density_key(list(y_vars), canonical="ne", prefer_linear=True)
-    if density_ne_key is None:
-        raise ValueError("physics-aware training requires one of ne/log_ne in model output_keys")
-    ne_arr = np.asarray(pred_fields[:, y_vars.index(density_ne_key)], dtype=np.float32)
-    if density_ne_key == "log_ne":
-        return ne_arr
-    return np.log10(np.maximum(ne_arr, np.float32(1.0e-30))).astype(np.float32)
+def _resolve_numpy_trainer_physics_fields(
+    pred_fields: np.ndarray,
+    y_vars: list[str],
+    physics_cfg: dict[str, Any] | None,
+) -> tuple[dict[str, np.ndarray], int]:
+    cfg = dict(physics_cfg or {})
+    role_schema = cfg.get("target_role_schema")
+    if role_schema is None:
+        role_schema = cfg.get("target_roles")
+    resolved = resolve_physics_symbol_keys(
+        [str(v) for v in y_vars],
+        symbols=dict(cfg.get("symbols", {}) or {}),
+        target_role_schema=dict(role_schema or {}),
+        context="physics-aware training",
+    )
+    density_key = resolved["density"]
+    temperature_key = resolved["temperature"]
+    potential_key = resolved["potential"]
+    density = np.asarray(pred_fields[:, y_vars.index(density_key)], dtype=np.float32)
+    return (
+        {
+            density_key: density,
+            temperature_key: np.asarray(pred_fields[:, y_vars.index(temperature_key)], dtype=np.float32),
+            potential_key: np.asarray(pred_fields[:, y_vars.index(potential_key)], dtype=np.float32),
+        },
+        int(y_vars.index(potential_key)),
+    )
+
+
+def _resolve_numpy_trainer_potential_index(
+    y_vars: list[str],
+    *,
+    physics_cfg: dict[str, Any] | None = None,
+    loss_cfg: dict[str, Any] | None = None,
+) -> int:
+    cfg = dict(physics_cfg or {})
+    loss = dict(loss_cfg or {})
+    role_schema = cfg.get("target_role_schema") or loss.get("target_role_schema") or cfg.get("target_roles")
+    resolved = resolve_physics_symbol_keys(
+        [str(v) for v in y_vars],
+        symbols=dict(cfg.get("symbols", {}) or {}),
+        target_role_schema=dict(role_schema or {}),
+        required=("potential",),
+        context="rho auxiliary training",
+    )
+    return int(y_vars.index(resolved["potential"]))
 
 
 def _clone_model_state_numpy(model: Any) -> dict[str, np.ndarray]:
@@ -77,11 +139,17 @@ def _masked_r2(y_true: np.ndarray, y_pred: np.ndarray, mask: np.ndarray) -> floa
 
 def _normalize_unet_selection_mode(raw_mode: Any) -> str:
     mode = str(raw_mode).strip().lower()
-    legacy_aliases = {
-        "best_val_allvars_boundary_balance": "best_val_allvars_balance",
-        "best_val_field_boundary_balance": "best_val_allvars_balance",
-    }
-    return legacy_aliases.get(mode, mode)
+    if mode == "best_val_data_loss":
+        return "best_val_loss"
+    return mode
+
+
+def _model_output_keys(model: Any) -> list[str]:
+    keys = [str(v) for v in list(getattr(model, "output_keys", []) or [])]
+    if keys:
+        return keys
+    n_outputs = int(getattr(model, "out_channels", 0) or 0)
+    return [f"target_{idx}" for idx in range(max(n_outputs, 0))]
 
 
 def _unet_allvars_boundary_balance_score(
@@ -120,7 +188,6 @@ def _unet_allvars_boundary_balance_score(
         plasma_mask = np.asarray(region_masks["all_plasma"], dtype=bool)
         boundary_mask = np.asarray(region_masks["boundary_in"], dtype=bool)
     parts: dict[str, float] = {}
-    density_keys = resolve_density_pair(list(y_vars), prefer_linear=True)
     score_names = list(y_vars)
     deep_mask = np.zeros_like(plasma_mask, dtype=bool)
     if distance_any is not None:
@@ -141,16 +208,6 @@ def _unet_allvars_boundary_balance_score(
         plasma_mask=plasma_mask,
     )
     parts.update(base_parts)
-    for name in density_keys:
-        if name not in y_vars:
-            continue
-        idx = y_vars.index(name)
-        density_pred = np.asarray(pred[:, idx], dtype=np.float32)
-        plasma_vals = density_pred[plasma_mask]
-        if plasma_vals.size == 0:
-            parts[f"neg_ratio_{name}_plasma"] = float("nan")
-        else:
-            parts[f"neg_ratio_{name}_plasma"] = float(np.mean((plasma_vals < 0.0).astype(np.float32)))
     if not np.isfinite(base_score):
         return float("nan"), parts
     boundary_total = 0.0
@@ -290,8 +347,8 @@ def _resolve_global_clip(
     out_channels: int,
 ) -> tuple[str, float]:
     cfg = dict(grad_clip_cfg or {})
-    legacy_default_mode = "global" if float(grad_clip_norm) > 0.0 else "off"
-    raw_mode = cfg.get("mode", legacy_default_mode)
+    del grad_clip_norm
+    raw_mode = cfg.get("mode", "off")
     if isinstance(raw_mode, bool):
         mode = "global" if raw_mode else "off"
     else:
@@ -300,7 +357,7 @@ def _resolve_global_clip(
         mode = "global"
     if mode not in {"off", "global", "per_sample"}:
         raise ValueError("global_mlp.grad_clip.mode must be one of: off, global, per_sample")
-    base_norm = float(cfg.get("norm", grad_clip_norm))
+    base_norm = float(cfg.get("norm", 0.0))
     if mode == "off" or base_norm <= 0.0:
         return "off", 0.0
     adaptive = bool(cfg.get("adaptive_by_dim", False))
@@ -396,6 +453,7 @@ def train_one_epoch_global_physics(
     grad_clip_norm: float = 0.0,
     grad_clip_cfg: dict[str, Any] | None = None,
     epoch_idx: int | None = None,
+    supervision_spatial_features: Any | None = None,
 ) -> dict[str, float]:
     n_cases = int(cond_matrix.shape[0])
     if n_cases == 0:
@@ -406,29 +464,17 @@ def train_one_epoch_global_physics(
         (rng or np.random.default_rng(0)).shuffle(order)
 
     h, w = model.grid_shape
-    y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
-    grad_diag_keys = ["phi", "Te"]
-    density_ne_key = resolve_density_key(y_vars, canonical="ne", prefer_linear=True)
-    density_ni_key = resolve_density_key(y_vars, canonical="ni", prefer_linear=True)
-    if density_ne_key is not None:
-        grad_diag_keys.append(density_ne_key)
-    if density_ni_key is not None:
-        grad_diag_keys.append(density_ni_key)
+    y_vars = _model_output_keys(model)
     accum = {
         "total": 0.0,
         "data": 0.0,
+        "aux": 0.0,
         "physics": 0.0,
         "poisson": 0.0,
         "boundary": 0.0,
         "boundary_operator": 0.0,
         "rho": 0.0,
         "grad_l2_total": 0.0,
-        "grad_l2_phi": 0.0,
-        "grad_l2_Te": 0.0,
-        "grad_l2_ne": 0.0,
-        "grad_l2_ni": 0.0,
-        "grad_l2_log_ne": 0.0,
-        "grad_l2_log_ni": 0.0,
         "active_weight_ratio": 0.0,
         "step_rel_hidden_mean": 0.0,
         "step_rel_output": 0.0,
@@ -457,17 +503,24 @@ def train_one_epoch_global_physics(
         sl = order[start : start + bsz]
         x_batch = cond_matrix[sl]
         y_batch = y_field[sl]
+        supervision = materialize_supervised_geometry(
+            supervision_spatial_features,
+            sl,
+            mask=supervised_mask,
+            distance_any=supervised_distance,
+            boundary_distance_channels=objective_boundary_distance_channels(loss_cfg=loss_cfg),
+        )
         pred = _forward_model(model, x_batch, training=True)
         pred_fields = pred.reshape(pred.shape[0], model.out_channels, h, w)
         pred_dict = {name: pred_fields[:, i] for i, name in enumerate(y_vars)}
         tgt_dict = {name: np.asarray(y_batch[:, i], dtype=np.float32) for i, name in enumerate(y_vars)}
-        data_loss, grad_by_var, _ = compose_supervised_numpy(
+        data_loss, grad_by_var, loss_parts = compose_supervised_numpy(
             pred_dict,
             tgt_dict,
             y_order=y_vars,
             loss_cfg=loss_cfg,
-            mask=supervised_mask,
-            distance_any=supervised_distance,
+            mask=supervision["mask"],
+            distance_any=supervision["distance_any"],
             epoch_idx=epoch_idx,
         )
         grad_fields = np.stack([grad_by_var[name] for name in y_vars], axis=1).astype(np.float32)
@@ -477,15 +530,9 @@ def train_one_epoch_global_physics(
         terms = {"poisson": 0.0, "boundary": 0.0, "boundary_operator": 0.0, "rho": 0.0}
 
         if physics_cfg and bool(physics_cfg.get("enabled", False)):
-            if "phi" not in y_vars or "Te" not in y_vars:
-                raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
-            phi_idx = y_vars.index("phi")
+            physics_pred_fields, phi_idx = _resolve_numpy_trainer_physics_fields(pred_fields, y_vars, physics_cfg)
             phys_loss, grad_phi, terms = compose_numpy(
-                {
-                    "log_ne": _resolve_log_ne_field(pred_fields, y_vars),
-                    "Te": pred_fields[:, y_vars.index("Te")],
-                    "phi": pred_fields[:, phi_idx],
-                },
+                physics_pred_fields,
                 physics_cfg=physics_cfg,
                 resolved_terms=resolved_terms,
             )
@@ -525,6 +572,10 @@ def train_one_epoch_global_physics(
         total_seen += seen
         accum["total"] += float(total_loss) * seen
         accum["data"] += float(data_loss) * seen
+        for key, value in loss_parts.items():
+            if str(key).startswith("loss_supervised_"):
+                accum.setdefault(str(key), 0.0)
+                accum[str(key)] += float(value) * seen
         accum["physics"] += float(phys_loss) * seen
         accum["poisson"] += float(terms.get("poisson", 0.0)) * seen
         accum["boundary"] += float(terms.get("boundary", 0.0)) * seen
@@ -544,15 +595,6 @@ def train_one_epoch_global_physics(
 
         grad_flat = grad_y.reshape(seen, -1)
         accum["grad_l2_total"] += float(np.mean(np.linalg.norm(grad_flat, axis=1))) * seen
-        for key in grad_diag_keys:
-            if key in grad_by_var:
-                gflat = grad_by_var[key].reshape(seen, -1)
-                target_metric_key = f"grad_l2_{key}"
-                if key == density_ne_key:
-                    target_metric_key = "grad_l2_log_ne"
-                elif key == density_ni_key:
-                    target_metric_key = "grad_l2_log_ni"
-                accum[target_metric_key] += float(np.mean(np.linalg.norm(gflat, axis=1))) * seen
         accum["active_weight_ratio"] += float(np.mean(np.abs(grad_y) > 0.0)) * seen
 
     denom = float(max(total_seen, 1))
@@ -572,12 +614,16 @@ def train_one_epoch_unet(
     supervised_distance_signed: np.ndarray | None = None,
     supervised_bc_dir_mask: np.ndarray | None = None,
     supervised_wafer_mask: np.ndarray | None = None,
+    spatial_features: Any | None = None,
     optimizer_contract: dict[str, Any] | None = None,
     torch_optimizer: Any | None = None,
     batch_size_cases: int = 0,
     shuffle_cases: bool = True,
     rng: np.random.Generator | None = None,
     epoch_idx: int | None = None,
+    supervision_spatial_features: Any | None = None,
+    supervised_point_weight: np.ndarray | None = None,
+    target_affine: dict[str, dict[str, float]] | None = None,
 ) -> dict[str, float]:
     n_cases = int(cond_matrix.shape[0])
     if n_cases == 0:
@@ -587,20 +633,17 @@ def train_one_epoch_unet(
     if shuffle_cases and n_cases > 1:
         (rng or np.random.default_rng(0)).shuffle(order)
 
-    y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
+    y_vars = _model_output_keys(model)
     accum = {
         "total": 0.0,
         "data": 0.0,
+        "aux": 0.0,
         "physics": 0.0,
         "rho": 0.0,
         "poisson": 0.0,
         "boundary": 0.0,
         "boundary_operator": 0.0,
         "grad_l2_total": 0.0,
-        "grad_l2_phi": 0.0,
-        "grad_l2_Te": 0.0,
-        "grad_l2_ne": 0.0,
-        "grad_l2_ni": 0.0,
         "active_weight_ratio": 0.0,
         "step_rel_hidden_mean": 0.0,
         "step_rel_output": 0.0,
@@ -614,21 +657,34 @@ def train_one_epoch_unet(
         sl = order[start : start + bsz]
         cond_batch = cond_matrix[sl]
         y_batch = y_field[sl]
-        raw_pred = model.forward_raw(cond_batch, training=True)
+        spatial_batch = materialize_case_spatial_batch(spatial_features, sl)
+        supervision = materialize_supervised_geometry(
+            spatial_features if supervision_spatial_features is None else supervision_spatial_features,
+            sl,
+            mask=supervised_mask,
+            distance_any=supervised_distance,
+            distance_signed=supervised_distance_signed,
+            boundary_distance_channels=objective_boundary_distance_channels(loss_cfg=loss_cfg),
+        )
+        batch_bc_dir_mask = slice_case_map(supervised_bc_dir_mask, sl, key="supervised_bc_dir_mask")
+        batch_wafer_mask = slice_case_map(supervised_wafer_mask, sl, key="supervised_wafer_mask")
+        raw_pred = model.forward_raw(cond_batch, training=True, spatial_features=spatial_batch)
         pred = raw_pred[:, : model.out_channels]
         pred_dict = {name: pred[:, i] for i, name in enumerate(y_vars)}
         tgt_dict = {name: np.asarray(y_batch[:, i], dtype=np.float32) for i, name in enumerate(y_vars)}
-        data_loss, grad_by_var, _ = compose_supervised_numpy(
+        data_loss, grad_by_var, loss_parts = compose_supervised_numpy(
             pred_dict,
             tgt_dict,
             y_order=y_vars,
             loss_cfg=loss_cfg,
-            mask=supervised_mask,
-            distance_any=supervised_distance,
-            distance_signed=supervised_distance_signed,
-            bc_dir_mask=supervised_bc_dir_mask,
-            wafer_mask=supervised_wafer_mask,
+            mask=supervision["mask"],
+            distance_any=supervision["distance_any"],
+            distance_signed=supervision["distance_signed"],
+            bc_dir_mask=batch_bc_dir_mask,
+            wafer_mask=batch_wafer_mask,
             epoch_idx=epoch_idx,
+            point_weight=supervised_point_weight,
+            target_affine=target_affine,
         )
         grad_y = np.stack([grad_by_var[name] for name in y_vars], axis=1).astype(np.float32)
         raw_grad = np.zeros_like(raw_pred, dtype=np.float32)
@@ -639,15 +695,9 @@ def train_one_epoch_unet(
         rho_loss = 0.0
 
         if physics_cfg and bool(physics_cfg.get("enabled", False)):
-            if "phi" not in y_vars or "Te" not in y_vars:
-                raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
-            phi_idx = y_vars.index("phi")
+            physics_pred_fields, phi_idx = _resolve_numpy_trainer_physics_fields(pred, y_vars, physics_cfg)
             phys_loss, grad_phi, terms = compose_numpy(
-                {
-                    "log_ne": _resolve_log_ne_field(pred, y_vars),
-                    "Te": pred[:, y_vars.index("Te")],
-                    "phi": pred[:, phi_idx],
-                },
+                physics_pred_fields,
                 physics_cfg=physics_cfg,
                 resolved_terms=resolved_terms,
             )
@@ -655,22 +705,24 @@ def train_one_epoch_unet(
             total_loss = float(data_loss + phys_loss)
 
         if getattr(model, "with_rho_eff_head", False) and raw_pred.shape[1] > model.out_channels:
-            phi_idx = y_vars.index("phi")
+            phi_idx = _resolve_numpy_trainer_potential_index(y_vars, physics_cfg=physics_cfg, loss_cfg=loss_cfg)
             rho_pred = raw_pred[:, model.out_channels : model.out_channels + 1]
             rho_target = -laplacian2d(y_batch[:, phi_idx]).astype(np.float32)[:, None]
             rho_err = rho_pred - rho_target
-            rho_weight = float(physics_cfg.get("lambda_rho", 0.05)) if physics_cfg else 0.05
+            rho_weight = 0.0
+            for row in list(resolved_terms or []):
+                if str(row.get("name", "")).strip().lower() == "rho" and bool(row.get("enabled", False)):
+                    rho_weight = float(row.get("weight", 0.0))
+                    break
             rho_loss = float(np.mean(rho_err**2))
             total_loss += rho_weight * rho_loss
             raw_grad[:, model.out_channels : model.out_channels + 1] += (
                 rho_weight * (2.0 / float(rho_pred.size)) * rho_err
             )
 
-        if supervised_mask is not None:
-            m = np.asarray(supervised_mask, dtype=np.float32)
-            if m.ndim == 3 and int(m.shape[0]) == 1:
-                m = m[0]
-            active_pixels = float(np.sum(m > 0.5)) if m.ndim == 2 else float(raw_pred.shape[-2] * raw_pred.shape[-1])
+        if supervision["mask"] is not None:
+            m = np.asarray(supervision["mask"], dtype=np.float32)
+            active_pixels = float(np.mean(np.sum(m > 0.5, axis=(-2, -1)))) if m.ndim == 3 else float(np.sum(m > 0.5))
         else:
             active_pixels = float(raw_pred.shape[-2] * raw_pred.shape[-1])
         clip_mode, clip_norm = _resolve_clip_contract(
@@ -688,8 +740,14 @@ def train_one_epoch_unet(
         grad_norm_post_clip = float(np.mean(np.linalg.norm(raw_grad.reshape(raw_grad.shape[0], -1), axis=1)))
         clip_ratio = grad_norm_post_clip / max(grad_norm_pre, 1e-12)
 
-        back_diag = {"step_rel_hidden_mean": 0.0, "step_rel_output": 0.0}
+        back_diag: dict[str, float] = {"step_rel_hidden_mean": 0.0, "step_rel_output": 0.0}
+        backward_result: dict[str, Any] = {}
         if hasattr(model, "backward_raw"):
+            auxiliary_backward_kwargs = (
+                {"supervised_mask": supervision["mask"]}
+                if callable(getattr(model, "evaluate_auxiliary_losses", None))
+                else {}
+            )
             use_torch_optimizer = bool(getattr(model, "backend", "numpy") == "torch" and torch_optimizer is not None)
             if use_torch_optimizer:
                 torch = model.torch
@@ -698,18 +756,16 @@ def train_one_epoch_unet(
                     w_hidden_prev = w_hidden.detach().clone() if w_hidden is not None else None
                     w_out_prev = w_out.detach().clone() if w_out is not None else None
                 torch_optimizer.zero_grad(set_to_none=True)
-                try:
-                    _ = model.backward_raw(
-                        raw_grad.astype(np.float32),
-                        lr=lr,
-                        apply_step=False,
-                        target_raw=np.asarray(y_batch, dtype=np.float32),
-                        loss_cfg=loss_cfg,
-                    )
-                except TypeError as exc:
-                    if "unexpected keyword argument" not in str(exc):
-                        raise
-                    _ = model.backward_raw(raw_grad.astype(np.float32), lr=lr, apply_step=False)
+                ret = model.backward_raw(
+                    raw_grad.astype(np.float32),
+                    lr=lr,
+                    apply_step=False,
+                    target_raw=np.asarray(y_batch, dtype=np.float32),
+                    loss_cfg=loss_cfg,
+                    **auxiliary_backward_kwargs,
+                )
+                if isinstance(ret, dict):
+                    backward_result = dict(ret)
                 torch_optimizer.step()
                 with torch.no_grad():
                     w_hidden_cur, w_out_cur = model._torch_step_reference()
@@ -724,18 +780,15 @@ def train_one_epoch_unet(
                             torch.linalg.norm(do) / max(float(torch.linalg.norm(w_out_prev)), 1e-12)
                         )
             else:
-                try:
-                    ret = model.backward_raw(
-                        raw_grad.astype(np.float32),
-                        lr=lr,
-                        target_raw=np.asarray(y_batch, dtype=np.float32),
-                        loss_cfg=loss_cfg,
-                    )
-                except TypeError as exc:
-                    if "unexpected keyword argument" not in str(exc):
-                        raise
-                    ret = model.backward_raw(raw_grad.astype(np.float32), lr=lr)
+                ret = model.backward_raw(
+                    raw_grad.astype(np.float32),
+                    lr=lr,
+                    target_raw=np.asarray(y_batch, dtype=np.float32),
+                    loss_cfg=loss_cfg,
+                    **auxiliary_backward_kwargs,
+                )
                 if isinstance(ret, dict):
+                    backward_result = dict(ret)
                     back_diag["step_rel_hidden_mean"] = float(ret.get("step_rel_hidden_mean", 0.0))
                     back_diag["step_rel_output"] = float(ret.get("step_rel_output", 0.0))
         else:
@@ -748,28 +801,36 @@ def train_one_epoch_unet(
             model.b -= lr * grad_b.astype(np.float32)
             back_diag["step_rel_output"] = float(np.linalg.norm(lr * grad_w) / max(np.linalg.norm(w_prev), 1e-12))
 
+        for key in ("step_rel_hidden_mean", "step_rel_output"):
+            if key in backward_result:
+                back_diag[key] = float(backward_result[key])
+        aux_loss = float(backward_result.get("loss_aux_total", 0.0))
+        if not np.isfinite(aux_loss) or aux_loss < 0.0:
+            raise ValueError(f"model auxiliary loss must be finite and >= 0, got={aux_loss}")
+        total_loss += aux_loss
+
         seen = int(sl.size)
         total_seen += seen
         accum["total"] += float(total_loss) * seen
         accum["data"] += float(data_loss) * seen
+        accum["aux"] += float(aux_loss) * seen
+        for key, value in loss_parts.items():
+            if str(key).startswith("loss_supervised_"):
+                accum.setdefault(str(key), 0.0)
+                accum[str(key)] += float(value) * seen
+        for key, value in backward_result.items():
+            if str(key).startswith("loss_aux_") or str(key) == "coeff_loss":
+                value_f = float(value)
+                if not np.isfinite(value_f):
+                    raise ValueError(f"model auxiliary diagnostic must be finite: {key}={value_f}")
+                accum.setdefault(str(key), 0.0)
+                accum[str(key)] += value_f * seen
         accum["physics"] += float(phys_loss) * seen
         accum["rho"] += float(rho_loss) * seen
         accum["poisson"] += float(terms.get("poisson", 0.0)) * seen
         accum["boundary"] += float(terms.get("boundary", 0.0)) * seen
         accum["boundary_operator"] += float(terms.get("boundary_operator", 0.0)) * seen
         accum["grad_l2_total"] += float(np.mean(np.linalg.norm(raw_grad.reshape(seen, -1), axis=1))) * seen
-        if "phi" in y_vars:
-            accum["grad_l2_phi"] += float(np.mean(np.abs(raw_grad[:, y_vars.index("phi")]))) * seen
-        if "Te" in y_vars:
-            accum["grad_l2_Te"] += float(np.mean(np.abs(raw_grad[:, y_vars.index("Te")]))) * seen
-        density_ne_key = resolve_density_key(y_vars, canonical="ne", prefer_linear=True)
-        density_ni_key = resolve_density_key(y_vars, canonical="ni", prefer_linear=True)
-        if density_ne_key is not None and density_ne_key in y_vars:
-            ne_grad = float(np.mean(np.abs(raw_grad[:, y_vars.index(density_ne_key)]))) * seen
-            accum["grad_l2_ne"] += ne_grad
-        if density_ni_key is not None and density_ni_key in y_vars:
-            ni_grad = float(np.mean(np.abs(raw_grad[:, y_vars.index(density_ni_key)]))) * seen
-            accum["grad_l2_ni"] += ni_grad
         accum["active_weight_ratio"] += float(np.mean(np.abs(raw_grad) > 0.0)) * seen
         accum["step_rel_hidden_mean"] += float(back_diag.get("step_rel_hidden_mean", 0.0)) * seen
         accum["step_rel_output"] += float(back_diag.get("step_rel_output", 0.0)) * seen
@@ -785,112 +846,10 @@ def train_one_epoch_unet(
 
 
 class Trainer:
-    """Minimal trainer for cycle1/1.1/3 integration tests and benchmark."""
+    """Mainline trainer for NumPy surrogate training and benchmark workflows."""
 
     def __init__(self, output_dir: str | Path):
         self.store = ArtifactStore(output_dir)
-
-    def _save_physics_terms(self, history: list[dict[str, float]]) -> None:
-        if not history:
-            return
-        header = [
-            "epoch",
-            "train_phys_loss",
-            "train_poisson_loss",
-            "train_boundary_loss",
-            "train_boundary_operator_loss",
-            "train_rho_loss",
-        ]
-        rows = [
-            [
-                h.get("epoch", 0.0),
-                h.get("train_phys_loss", 0.0),
-                h.get("train_poisson_loss", 0.0),
-                h.get("train_boundary_loss", 0.0),
-                h.get("train_boundary_operator_loss", 0.0),
-                h.get("train_rho_loss", 0.0),
-            ]
-            for h in history
-        ]
-        self.store.save_csv("scalars/physics_terms.csv", header, rows)
-
-    def _save_optimization_diagnostics(self, rows: list[dict[str, float]]) -> None:
-        if not rows:
-            return
-        base_header = [
-            "epoch",
-            "grad_l2_total",
-            "active_weight_ratio",
-            "step_rel_hidden_mean",
-            "step_rel_output",
-            "step_rel_output_to_hidden",
-            "grad_scale_applied",
-            "grad_norm_pre_scale",
-            "grad_norm_post_scale",
-            "grad_norm_post_clip",
-            "clip_ratio",
-            "effective_clip_flag",
-            "stagnation_flag",
-            "head_refresh_applied",
-            "head_design_cond",
-            "chamber_band_effective_ratio",
-            "outside_boundary_sample_ratio",
-            "boundary_inside_sample_ratio",
-            "boundary_weight_effective_ratio",
-            "distance_transform_mode",
-            "loss_boundary_in",
-            "loss_deep_plasma",
-            "region_balance_applied",
-            "field_reg_loss_inside",
-            "field_reg_loss_boundary",
-            "field_reg_points_inside",
-            "field_reg_points_boundary",
-            "selection_valid_flag",
-            "selected_epoch_score",
-            "selected_epoch_flag",
-        ]
-        dynamic_grad = sorted(
-            {
-                str(k)
-                for row in rows
-                for k in row.keys()
-                if str(k).startswith("grad_l2_") and str(k) != "grad_l2_total"
-            }
-        )
-        dynamic_selection = sorted(
-            {
-                str(k)
-                for row in rows
-                for k in row.keys()
-                if str(k).startswith("selection_score_")
-            }
-        )
-        header = (
-            ["epoch", "grad_l2_total"]
-            + dynamic_grad
-            + [k for k in base_header if k not in {"epoch", "grad_l2_total"}]
-            + [k for k in dynamic_selection if k not in set(base_header)]
-        )
-        data = [[r.get(k, 0.0) for k in header] for r in rows]
-        self.store.save_csv("scalars/optimization_diagnostics.csv", header, data)
-
-    def _save_resolved_physics(self, physics_cfg: dict[str, Any] | None) -> None:
-        cfg = dict(physics_cfg or {})
-        self.store.save_json(
-            "resolved_physics.json",
-            {
-                "enabled": bool(cfg.get("enabled", False)),
-                "resolved_terms": list(cfg.get("resolved_terms", [])),
-                "lambda_poisson": float(cfg.get("lambda_poisson", 0.0)),
-                "lambda_bc": float(cfg.get("lambda_bc", 0.0)),
-                "boundary_operator": {
-                    "enabled": bool(cfg.get("boundary_operator", {}).get("enabled", False)),
-                    "lambda": float(cfg.get("boundary_operator", {}).get("lambda", 0.0)),
-                    "mode": str(cfg.get("boundary_operator", {}).get("mode", "proxy")),
-                    "primary_qoi_key": str(cfg.get("boundary_operator", {}).get("primary_qoi_key", "Gamma_i")),
-                },
-            },
-        )
 
     def run_global(
         self,
@@ -914,8 +873,15 @@ class Trainer:
         grad_clip_norm: float = 0.0,
         grad_clip_cfg: dict[str, Any] | None = None,
         output_head_refresh_cfg: dict[str, Any] | None = None,
+        selection_cfg: dict[str, Any] | None = None,
+        supervision_train: Any | None = None,
+        supervision_val: Any | None = None,
     ) -> TrainOutput:
-        self._save_resolved_physics(physics_cfg)
+        save_resolved_physics(
+            store=self.store,
+            physics_cfg=physics_cfg,
+            boundary_operator_default_mode="proxy",
+        )
         y_train_field = y_train.reshape(y_train.shape[0], model.out_channels, *model.grid_shape).astype(np.float32)
         y_val_field = y_val.reshape(y_val.shape[0], model.out_channels, *model.grid_shape).astype(np.float32)
         history: list[dict[str, float]] = []
@@ -925,6 +891,69 @@ class Trainer:
         refresh_enabled = bool(refresh_cfg.get("enabled", False))
         refresh_every = int(max(int(refresh_cfg.get("every_n_epochs", 5)), 1))
         refresh_ridge = float(max(float(refresh_cfg.get("ridge", 1e-4)), 0.0))
+        selection_cfg = dict(selection_cfg or {})
+        selection_mode = _normalize_unet_selection_mode(selection_cfg.get("mode", "last"))
+        selection_score_modes = {
+            "best_val_allvars_balance",
+            GROUP_BALANCE_SELECTION_MODE,
+            SPATIAL_SELECTION_MODE,
+        }
+        if selection_mode not in {"last", *selection_score_modes, "best_val_loss"}:
+            raise ValueError(
+                "train.global_mlp.selection.mode must be one of: last, best_val_allvars_balance, "
+                "best_val_group_balance, best_val_spatial_objective, best_val_loss"
+            )
+        if selection_mode == SPATIAL_SELECTION_MODE:
+            resolve_spatial_selection_config(selection_cfg)
+        selection_eval_every = int(max(int(selection_cfg.get("eval_every_n_epochs", 2)), 1))
+        selection_warmup = int(max(int(selection_cfg.get("warmup_epochs", 5)), 0))
+        y_vars = _model_output_keys(model)
+        selection_weights = resolve_mainline_selection_weights(
+            selection_cfg=selection_cfg,
+            target_vars=list(y_vars),
+            cfg_prefix="train.global_mlp",
+        )
+        selection_target_groups = {}
+        selection_group_weights: dict[str, float] = {}
+        if selection_mode in {GROUP_BALANCE_SELECTION_MODE, SPATIAL_SELECTION_MODE}:
+            target_role_schema = dict(
+                selection_cfg.get("target_role_schema")
+                or dict(loss_cfg or {}).get("target_role_schema")
+                or dict(physics_cfg or {}).get("target_role_schema")
+                or {}
+            )
+            model_target_groups = getattr(model, "target_groups", None)
+            if model_target_groups or target_role_schema.get("targets"):
+                selection_target_groups = resolve_selection_target_groups(
+                    output_vars=list(y_vars),
+                    target_role_schema=target_role_schema,
+                    model_target_groups=model_target_groups,
+                )
+                selection_group_weights = resolve_selection_group_weights(
+                    dict(selection_cfg.get("group_weights", {}) or {}),
+                    groups=selection_target_groups,
+                    cfg_prefix="train.global_mlp",
+                )
+        selection_target_part_keys = {
+            str(name): (
+                f"spatial_{name}" if selection_mode == SPATIAL_SELECTION_MODE else f"r2_{name}_plasma"
+            )
+            for name in y_vars
+        }
+        selection_group_part_keys = {
+            str(name): (
+                f"spatial_group_{name}"
+                if selection_mode == SPATIAL_SELECTION_MODE
+                else f"r2_group_{name}_plasma"
+            )
+            for name in selection_target_groups
+        }
+        best_state = None
+        best_score = float("inf") if selection_mode == SPATIAL_SELECTION_MODE else float("-inf")
+        best_loss = float("inf")
+        best_epoch = -1
+        best_score_parts: dict[str, Any] = {}
+        selection_valid = selection_mode == "last"
         for epoch in range(epochs):
             epoch_physics_cfg = resolve_epoch_scaled_physics(
                 physics_cfg,
@@ -950,6 +979,7 @@ class Trainer:
                 grad_clip_norm=grad_clip_norm,
                 grad_clip_cfg=grad_clip_cfg,
                 epoch_idx=epoch,
+                supervision_spatial_features=supervision_train,
             )
             head_refresh_applied = 0.0
             head_design_cond = 0.0
@@ -959,37 +989,113 @@ class Trainer:
                 head_refresh_applied = 1.0
             val_pred = _forward_model(model, cond_val, training=False)
             val_fields = val_pred.reshape(val_pred.shape[0], model.out_channels, *model.grid_shape)
-            y_vars = list(getattr(model, "output_keys", ["ne", "Te", "phi"]))
+            y_vars = _model_output_keys(model)
+            val_indices = np.arange(int(cond_val.shape[0]), dtype=np.int64)
+            val_supervision = materialize_supervised_geometry(
+                supervision_val,
+                val_indices,
+                mask=supervised_mask,
+                distance_any=supervised_distance,
+                boundary_distance_channels=objective_boundary_distance_channels(
+                    loss_cfg=loss_cfg,
+                    selection_cfg=selection_cfg,
+                ),
+            )
             val_data_loss, _, _ = compose_supervised_numpy(
                 {name: val_fields[:, i] for i, name in enumerate(y_vars)},
                 {name: y_val_field[:, i] for i, name in enumerate(y_vars)},
                 y_order=y_vars,
                 loss_cfg=loss_cfg,
-                mask=supervised_mask,
-                distance_any=supervised_distance,
+                mask=val_supervision["mask"],
+                distance_any=val_supervision["distance_any"],
                 epoch_idx=epoch,
             )
             val_phys_loss = 0.0
             if epoch_physics_cfg and bool(epoch_physics_cfg.get("enabled", False)):
-                if "phi" not in y_vars or "Te" not in y_vars:
-                    raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
+                physics_val_fields, _ = _resolve_numpy_trainer_physics_fields(val_fields, y_vars, epoch_physics_cfg)
                 val_phys_loss = float(
                     compose_numpy(
-                        {
-                            "log_ne": _resolve_log_ne_field(val_fields, y_vars),
-                            "Te": val_fields[:, y_vars.index("Te")],
-                            "phi": val_fields[:, y_vars.index("phi")],
-                        },
+                        physics_val_fields,
                         physics_cfg=epoch_physics_cfg,
                         resolved_terms=resolved_terms,
                     )[0]
                 )
             val_loss = val_data_loss + val_phys_loss
+            val_balance_score = float("nan")
+            selection_parts: dict[str, Any] = {}
+            should_eval_selection = (
+                selection_mode in selection_score_modes
+                and epoch >= selection_warmup
+                and ((epoch - selection_warmup) % selection_eval_every == 0)
+            )
+            if selection_mode == "best_val_loss" and np.isfinite(float(val_loss)) and float(val_loss) < best_loss:
+                best_loss = float(val_loss)
+                best_score = float(best_loss)
+                best_epoch = int(epoch)
+                best_state = _clone_model_state_numpy(model)
+                best_score_parts = {}
+                selection_valid = True
+            if should_eval_selection:
+                if val_supervision["mask"] is None:
+                    plasma_mask = np.ones(
+                        (int(val_fields.shape[0]), int(val_fields.shape[2]), int(val_fields.shape[3])),
+                        dtype=bool,
+                    )
+                else:
+                    plasma_mask = (
+                        align_bhw_batch(
+                            val_supervision["mask"],
+                            batch_size=int(val_fields.shape[0]),
+                            key="supervised_mask",
+                        )
+                        > 0.5
+                    )
+                if selection_mode == SPATIAL_SELECTION_MODE:
+                    val_balance_score, selection_parts = case_macro_spatial_objective(
+                        pred=np.asarray(val_fields, dtype=np.float32),
+                        target=np.asarray(y_val_field, dtype=np.float32),
+                        y_vars=list(y_vars),
+                        plasma_mask=plasma_mask,
+                        distance_any=val_supervision["distance_any"],
+                        cfg=selection_cfg,
+                        target_weights=selection_weights,
+                        groups=selection_target_groups or None,
+                        group_weights=selection_group_weights or None,
+                    )
+                elif selection_mode == GROUP_BALANCE_SELECTION_MODE:
+                    val_balance_score, selection_parts = group_plasma_balance_score(
+                        pred=np.asarray(val_fields, dtype=np.float32),
+                        target=np.asarray(y_val_field, dtype=np.float32),
+                        y_vars=list(y_vars),
+                        plasma_mask=plasma_mask,
+                        groups=selection_target_groups,
+                        group_weights=selection_group_weights,
+                    )
+                else:
+                    val_balance_score, selection_parts = allvars_plasma_balance_score(
+                        pred=np.asarray(val_fields, dtype=np.float32),
+                        target=np.asarray(y_val_field, dtype=np.float32),
+                        y_vars=list(y_vars),
+                        weights=selection_weights,
+                        plasma_mask=plasma_mask,
+                    )
+                improved = (
+                    float(val_balance_score) < float(best_score)
+                    if selection_mode == SPATIAL_SELECTION_MODE
+                    else float(val_balance_score) > float(best_score)
+                )
+                if np.isfinite(val_balance_score) and improved:
+                    best_score = float(val_balance_score)
+                    best_epoch = int(epoch)
+                    best_state = _clone_model_state_numpy(model)
+                    best_score_parts = dict(selection_parts)
+                    selection_valid = True
             history.append(
                 {
                     "epoch": float(epoch),
                     "train_loss": stats["total"],
                     "train_data_loss": stats["data"],
+                    "train_aux_loss": stats.get("aux", 0.0),
                     "train_phys_loss": stats["physics"],
                     "train_poisson_loss": stats["poisson"],
                     "train_boundary_loss": stats["boundary"],
@@ -998,16 +1104,39 @@ class Trainer:
                     "val_loss": float(val_loss),
                     "val_data_loss": float(val_data_loss),
                     "val_phys_loss": float(val_phys_loss),
+                    "val_balance_score": float(val_balance_score if np.isfinite(val_balance_score) else 0.0),
+                    "selection_valid_flag": 1.0 if selection_valid else 0.0,
+                    "selected_epoch_flag": 0.0,
+                    "selected_epoch_score": float(
+                        best_loss
+                        if selection_mode == "best_val_loss" and best_epoch >= 0
+                        else (best_score if best_epoch >= 0 else 0.0)
+                    ),
+                    **{
+                        f"selection_score_{name}": float(
+                            selection_parts.get(selection_target_part_keys[str(name)], 0.0)
+                        )
+                        for name in y_vars
+                    },
+                    **{
+                        f"selection_score_group_{name}": float(
+                            selection_parts.get(selection_group_part_keys[str(name)], 0.0)
+                        )
+                        for name in selection_target_groups
+                    },
+                    **{
+                        str(key): float(value)
+                        for key, value in stats.items()
+                        if str(key).startswith("loss_supervised_")
+                        or str(key).startswith("loss_aux_")
+                        or str(key) == "coeff_loss"
+                    },
                 }
             )
             diagnostics_rows.append(
                 {
                     "epoch": float(epoch),
                     "grad_l2_total": float(stats.get("grad_l2_total", 0.0)),
-                    "grad_l2_phi": float(stats.get("grad_l2_phi", 0.0)),
-                    "grad_l2_Te": float(stats.get("grad_l2_Te", 0.0)),
-                    "grad_l2_log_ne": float(stats.get("grad_l2_log_ne", 0.0)),
-                    "grad_l2_log_ni": float(stats.get("grad_l2_log_ni", 0.0)),
                     "active_weight_ratio": float(stats.get("active_weight_ratio", 0.0)),
                     "step_rel_hidden_mean": float(stats.get("step_rel_hidden_mean", 0.0)),
                     "step_rel_output": float(stats.get("step_rel_output", 0.0)),
@@ -1021,14 +1150,63 @@ class Trainer:
                     "stagnation_flag": 0.0,
                     "head_refresh_applied": float(head_refresh_applied),
                     "head_design_cond": float(head_design_cond),
+                    "selection_valid_flag": 1.0 if selection_valid else 0.0,
+                    "selected_epoch_flag": 0.0,
+                    "selected_epoch_score": float(
+                        best_loss
+                        if selection_mode == "best_val_loss" and best_epoch >= 0
+                        else (best_score if best_epoch >= 0 else 0.0)
+                    ),
                 }
+            )
+
+        selected_epoch_effective = int(best_epoch if best_epoch >= 0 else (len(history) - 1))
+        if (
+            selection_mode
+            in {"best_val_allvars_balance", GROUP_BALANCE_SELECTION_MODE, SPATIAL_SELECTION_MODE, "best_val_loss"}
+            and best_state is not None
+        ):
+            _restore_model_state_numpy(model, best_state)
+        if selection_mode in {
+            "best_val_allvars_balance",
+            GROUP_BALANCE_SELECTION_MODE,
+            SPATIAL_SELECTION_MODE,
+            "best_val_loss",
+        } and best_state is None:
+            selection_valid = False
+        for row in history:
+            row["selected_epoch_flag"] = 1.0 if int(row.get("epoch", -1)) == selected_epoch_effective else 0.0
+            row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
+            row["selection_mode_effective"] = selection_mode
+            row["selection_objective_version"] = (
+                SPATIAL_SELECTION_OBJECTIVE_VERSION
+                if selection_mode == SPATIAL_SELECTION_MODE
+                else ""
+            )
+            row["selected_epoch_score"] = float(
+                best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0)
+            )
+            if int(row.get("epoch", -1)) == selected_epoch_effective and best_epoch >= 0:
+                for name in y_vars:
+                    row[f"selection_score_{name}"] = float(
+                        best_score_parts.get(selection_target_part_keys[str(name)], 0.0)
+                    )
+                for name in selection_target_groups:
+                    row[f"selection_score_group_{name}"] = float(
+                        best_score_parts.get(selection_group_part_keys[str(name)], 0.0)
+                    )
+        for row in diagnostics_rows:
+            row["selected_epoch_flag"] = 1.0 if int(row.get("epoch", -1)) == selected_epoch_effective else 0.0
+            row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
+            row["selected_epoch_score"] = float(
+                best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0)
             )
 
         header = list(history[0].keys()) if history else ["epoch", "train_loss", "val_loss"]
         rows = [[h[k] for k in header] for h in history]
         self.store.save_csv("scalars/metrics.csv", header, rows)
-        self._save_physics_terms(history)
-        self._save_optimization_diagnostics(diagnostics_rows)
+        save_physics_terms(store=self.store, history=history)
+        save_numpy_optimization_diagnostics(store=self.store, rows=diagnostics_rows)
         return TrainOutput(history=history, model=model)
 
     def run_unet(
@@ -1048,6 +1226,8 @@ class Trainer:
         supervised_distance_signed: np.ndarray | None = None,
         supervised_bc_dir_mask: np.ndarray | None = None,
         supervised_wafer_mask: np.ndarray | None = None,
+        spatial_train: Any | None = None,
+        spatial_val: Any | None = None,
         optimizer_contract: dict[str, Any] | None = None,
         unet_optimizer_cfg: dict[str, Any] | None = None,
         batch_size_cases: int = 0,
@@ -1056,8 +1236,16 @@ class Trainer:
         selection_cfg: dict[str, Any] | None = None,
         selection_target_override: np.ndarray | None = None,
         selection_pred_additive: np.ndarray | None = None,
+        supervision_train: Any | None = None,
+        supervision_val: Any | None = None,
+        supervised_point_weight: np.ndarray | None = None,
+        target_affine: dict[str, dict[str, float]] | None = None,
     ) -> TrainOutput:
-        self._save_resolved_physics(physics_cfg)
+        save_resolved_physics(
+            store=self.store,
+            physics_cfg=physics_cfg,
+            boundary_operator_default_mode="proxy",
+        )
         history: list[dict[str, float]] = []
         diagnostics_rows: list[dict[str, float]] = []
         contract = dict(optimizer_contract or {})
@@ -1074,36 +1262,80 @@ class Trainer:
         patience_epochs = int(max(int(fail_fast_cfg.get("patience_epochs", 10)), 1))
         selection_cfg = dict(selection_cfg or {})
         selection_mode = _normalize_unet_selection_mode(selection_cfg.get("mode", "last"))
-        if selection_mode not in {"last", "best_val_allvars_balance"}:
+        selection_score_modes = {
+            "best_val_allvars_balance",
+            GROUP_BALANCE_SELECTION_MODE,
+            SPATIAL_SELECTION_MODE,
+        }
+        if selection_mode not in {"last", *selection_score_modes, "best_val_loss"}:
             raise ValueError(
-                "train.unet.selection.mode must be one of: last, best_val_allvars_balance"
+                "train.unet.selection.mode must be one of: "
+                "last, best_val_allvars_balance, best_val_group_balance, "
+                "best_val_spatial_objective, best_val_loss"
             )
+        if selection_mode == SPATIAL_SELECTION_MODE:
+            resolve_spatial_selection_config(selection_cfg)
         selection_eval_every = int(max(int(selection_cfg.get("eval_every_n_epochs", 2)), 1))
         selection_warmup = int(max(int(selection_cfg.get("warmup_epochs", 5)), 0))
         selection_band_px = float(selection_cfg.get("boundary_band_px", 2.0))
+        early_cfg = dict(selection_cfg.get("early_stopping", {}) or {})
+        early_stopping_enabled = bool(early_cfg.get("enabled", False))
+        early_patience_epochs = int(max(int(early_cfg.get("patience_epochs", 20)), 1))
+        early_min_delta = float(early_cfg.get("min_delta", 0.0))
+        if not np.isfinite(early_min_delta) or early_min_delta < 0.0:
+            raise ValueError("train.unet.selection.early_stopping.min_delta must be finite and >= 0")
         y_vars = [str(v) for v in list(getattr(model, "output_keys", []))]
         if len(y_vars) == 0:
-            y_vars = ["ne", "Te", "phi"]
-        raw_weights = dict(selection_cfg.get("weights", {}))
-        if len(raw_weights) == 0:
-            uniform = 1.0 / float(max(len(y_vars), 1))
-            selection_allvars_weights = {str(name): float(uniform) for name in y_vars}
-        else:
-            unknown = sorted(set(str(k) for k in raw_weights.keys()) - set(str(v) for v in y_vars))
-            if unknown:
-                raise ValueError(
-                    "train.unet.selection.weights contains unknown vars: "
-                    f"{unknown}; expected={list(y_vars)}"
-                )
-            selection_allvars_weights = {str(name): float(raw_weights.get(name, 0.0)) for name in y_vars}
-            total_w = 0.0
-            for name in y_vars:
-                w = float(selection_allvars_weights[name])
-                if not np.isfinite(w) or w < 0.0:
-                    raise ValueError(f"train.unet.selection.weights[{name}] must be finite and >= 0; got={w}")
-                total_w += w
-            if total_w <= 0.0:
-                raise ValueError("train.unet.selection.weights must sum to > 0")
+            y_vars = _model_output_keys(model)
+        selection_allvars_weights = resolve_mainline_selection_weights(
+            selection_cfg=selection_cfg,
+            target_vars=list(y_vars),
+            cfg_prefix="train.unet",
+        )
+        selection_target_groups = {}
+        selection_group_weights: dict[str, float] = {}
+        target_role_schema = dict(
+            selection_cfg.get("target_role_schema")
+            or dict(loss_cfg or {}).get("target_role_schema")
+            or dict(physics_cfg or {}).get("target_role_schema")
+            or {}
+        )
+        model_target_groups = getattr(model, "target_groups", None)
+        should_resolve_groups = selection_mode == GROUP_BALANCE_SELECTION_MODE or (
+            selection_mode == SPATIAL_SELECTION_MODE
+            and bool(model_target_groups or target_role_schema.get("targets"))
+        )
+        if should_resolve_groups:
+            selection_target_groups = resolve_selection_target_groups(
+                output_vars=list(y_vars),
+                target_role_schema=target_role_schema,
+                model_target_groups=model_target_groups,
+            )
+            selection_group_weights = resolve_selection_group_weights(
+                (
+                    dict(selection_cfg.get("group_weights", {}) or {})
+                    if selection_mode in {GROUP_BALANCE_SELECTION_MODE, SPATIAL_SELECTION_MODE}
+                    else None
+                ),
+                groups=selection_target_groups,
+                cfg_prefix="train.unet",
+            )
+        selection_score_keys = [f"selection_score_{name}" for name in y_vars]
+        selection_group_score_keys = [f"selection_score_group_{name}" for name in selection_target_groups]
+        selection_target_part_keys = {
+            str(name): (
+                f"spatial_{name}" if selection_mode == SPATIAL_SELECTION_MODE else f"r2_{name}_plasma"
+            )
+            for name in y_vars
+        }
+        selection_group_part_keys = {
+            str(name): (
+                f"spatial_group_{name}"
+                if selection_mode == SPATIAL_SELECTION_MODE
+                else f"r2_group_{name}_plasma"
+            )
+            for name in selection_target_groups
+        }
         torch_optimizer = None
         unet_opt_effective = {"type": "none", "lr": float(lr), "schedule": "none", "warmup_epochs": 0}
         if str(getattr(model, "backend", "numpy")).strip().lower() == "torch":
@@ -1118,12 +1350,15 @@ class Trainer:
             )
             unet_opt_effective = dict(unet_opt)
         best_state = None
-        best_score = float("-inf")
+        best_score = float("inf") if selection_mode == SPATIAL_SELECTION_MODE else float("-inf")
+        best_loss = float("inf")
         best_epoch = -1
         selection_valid = selection_mode == "last"
         best_score_parts: dict[str, float] = {}
+        last_selection_improvement_epoch = -1
         stale = 0
         rng = np.random.default_rng(int(seed))
+        train_start = time.perf_counter()
         for epoch in range(epochs):
             if torch_optimizer is not None:
                 lr = _set_unet_optimizer_epoch_lr(
@@ -1153,50 +1388,136 @@ class Trainer:
                 supervised_distance_signed=supervised_distance_signed,
                 supervised_bc_dir_mask=supervised_bc_dir_mask,
                 supervised_wafer_mask=supervised_wafer_mask,
+                spatial_features=spatial_train,
                 optimizer_contract=contract,
                 torch_optimizer=torch_optimizer,
                 batch_size_cases=batch_size_cases,
                 shuffle_cases=shuffle_cases,
                 rng=rng,
                 epoch_idx=epoch,
+                supervision_spatial_features=supervision_train,
+                supervised_point_weight=supervised_point_weight,
+                target_affine=target_affine,
             )
-            val_pred = model.forward(cond_val)
+            val_bsz = int(cond_val.shape[0]) if int(batch_size_cases) <= 0 else min(int(batch_size_cases), int(cond_val.shape[0]))
+            val_all_indices = np.arange(int(cond_val.shape[0]), dtype=np.int64)
+            val_supervision = materialize_supervised_geometry(
+                spatial_val if supervision_val is None else supervision_val,
+                val_all_indices,
+                mask=supervised_mask,
+                distance_any=supervised_distance,
+                distance_signed=supervised_distance_signed,
+                boundary_distance_channels=objective_boundary_distance_channels(
+                    loss_cfg=loss_cfg,
+                    selection_cfg=selection_cfg,
+                ),
+            )
+            val_bc_dir_mask = slice_case_map(
+                supervised_bc_dir_mask,
+                val_all_indices,
+                key="supervised_bc_dir_mask",
+            )
+            val_wafer_mask = slice_case_map(
+                supervised_wafer_mask,
+                val_all_indices,
+                key="supervised_wafer_mask",
+            )
+            val_chunks: list[np.ndarray] = []
+            val_aux_num = 0.0
+            val_aux_diagnostic_num: dict[str, float] = {}
+            for val_start in range(0, int(cond_val.shape[0]), max(1, val_bsz)):
+                val_stop = min(val_start + max(1, val_bsz), int(cond_val.shape[0]))
+                val_idx = np.arange(val_start, val_stop, dtype=np.int64)
+                val_spatial = materialize_case_spatial_batch(spatial_val, val_idx)
+                val_chunks.append(
+                    np.asarray(model.forward(cond_val[val_idx], spatial_features=val_spatial), dtype=np.float32)
+                )
+                if callable(getattr(model, "evaluate_auxiliary_losses", None)):
+                    val_aux_mask = slice_case_map(
+                        val_supervision["mask"],
+                        val_idx,
+                        key="validation_supervised_mask",
+                    )
+                    aux_diag = dict(
+                        model.evaluate_auxiliary_losses(
+                            cond_val[val_idx],
+                            np.asarray(y_val[val_idx], dtype=np.float32),
+                            spatial_features=val_spatial,
+                            loss_cfg=loss_cfg,
+                            supervised_mask=val_aux_mask,
+                        )
+                    )
+                    aux_total_b = float(aux_diag.get("loss_aux_total", 0.0))
+                    if not np.isfinite(aux_total_b) or aux_total_b < 0.0:
+                        raise ValueError(
+                            "validation model auxiliary loss must be finite and >= 0, "
+                            f"got={aux_total_b}"
+                        )
+                    chunk_cases = int(val_idx.size)
+                    val_aux_num += aux_total_b * chunk_cases
+                    for key, value in aux_diag.items():
+                        if str(key).startswith("loss_aux_") or str(key) == "coeff_loss":
+                            value_f = float(value)
+                            if not np.isfinite(value_f):
+                                raise ValueError(
+                                    f"validation model auxiliary diagnostic must be finite: {key}={value_f}"
+                                )
+                            val_aux_diagnostic_num[str(key)] = (
+                                val_aux_diagnostic_num.get(str(key), 0.0) + value_f * chunk_cases
+                            )
+            val_pred = np.concatenate(val_chunks, axis=0).astype(np.float32)
+            val_aux_loss = float(val_aux_num / float(max(int(cond_val.shape[0]), 1)))
+            val_aux_diagnostics = {
+                key: float(value / float(max(int(cond_val.shape[0]), 1)))
+                for key, value in val_aux_diagnostic_num.items()
+            }
             val_data_loss, _, _ = compose_supervised_numpy(
                 {name: val_pred[:, i] for i, name in enumerate(y_vars)},
                 {name: y_val[:, i] for i, name in enumerate(y_vars)},
                 y_order=y_vars,
                 loss_cfg=loss_cfg,
-                mask=supervised_mask,
-                distance_any=supervised_distance,
-                distance_signed=supervised_distance_signed,
-                bc_dir_mask=supervised_bc_dir_mask,
-                wafer_mask=supervised_wafer_mask,
+                mask=val_supervision["mask"],
+                distance_any=val_supervision["distance_any"],
+                distance_signed=val_supervision["distance_signed"],
+                bc_dir_mask=val_bc_dir_mask,
+                wafer_mask=val_wafer_mask,
                 epoch_idx=epoch,
+                point_weight=supervised_point_weight,
+                target_affine=target_affine,
             )
             val_phys_loss = 0.0
             if epoch_physics_cfg and bool(epoch_physics_cfg.get("enabled", False)):
-                if "phi" not in y_vars or "Te" not in y_vars:
-                    raise ValueError("physics-aware training requires ne/log_ne, Te, phi in model output_keys")
+                physics_val_fields, _ = _resolve_numpy_trainer_physics_fields(val_pred, y_vars, epoch_physics_cfg)
                 val_phys_loss = float(
                     compose_numpy(
-                        {
-                            "log_ne": _resolve_log_ne_field(val_pred, y_vars),
-                            "Te": val_pred[:, y_vars.index("Te")],
-                            "phi": val_pred[:, y_vars.index("phi")],
-                        },
+                        physics_val_fields,
                         physics_cfg=epoch_physics_cfg,
                         resolved_terms=resolved_terms,
                     )[0]
                 )
-            val_total = float(val_data_loss + val_phys_loss)
+            val_total = float(val_data_loss + val_phys_loss + val_aux_loss)
             val_balance_score = float("nan")
             selection_score_te = float("nan")
             selection_score_phi = float("nan")
             should_eval_selection = (
-                selection_mode == "best_val_allvars_balance"
+                selection_mode in selection_score_modes
                 and epoch >= selection_warmup
                 and ((epoch - selection_warmup) % selection_eval_every == 0)
             )
+            improved_this_epoch = False
+            if (
+                selection_mode == "best_val_loss"
+                and np.isfinite(float(val_total))
+                and float(val_total) < (best_loss - early_min_delta)
+            ):
+                best_loss = float(val_total)
+                best_score = float(best_loss)
+                best_epoch = int(epoch)
+                best_state = _clone_model_state_numpy(model)
+                selection_valid = True
+                best_score_parts = {}
+                last_selection_improvement_epoch = int(epoch)
+                improved_this_epoch = True
             if should_eval_selection:
                 target_for_selection = (
                     np.asarray(selection_target_override, dtype=np.float32)
@@ -1206,31 +1527,108 @@ class Trainer:
                 pred_for_selection = np.asarray(val_pred, dtype=np.float32)
                 if selection_pred_additive is not None:
                     pred_for_selection = pred_for_selection + np.asarray(selection_pred_additive, dtype=np.float32)
-                score, parts = _unet_allvars_boundary_balance_score(
-                    pred=pred_for_selection,
-                    target=target_for_selection,
-                    y_vars=y_vars,
-                    mask=supervised_mask,
-                    distance_any=supervised_distance,
-                    weights=selection_allvars_weights,
-                    boundary_band_px=selection_band_px,
-                    boundary_bonus_weight=0.0,
-                )
+                if selection_mode in {GROUP_BALANCE_SELECTION_MODE, SPATIAL_SELECTION_MODE}:
+                    batch_size = int(pred_for_selection.shape[0])
+                    if val_supervision["mask"] is None:
+                        plasma_mask = np.ones(
+                            (batch_size, int(pred_for_selection.shape[2]), int(pred_for_selection.shape[3])),
+                            dtype=bool,
+                        )
+                    else:
+                        plasma_mask = (
+                            align_bhw_batch(
+                                val_supervision["mask"],
+                                batch_size=batch_size,
+                                key="supervised_mask",
+                            )
+                            > 0.5
+                        )
+                    if selection_mode == SPATIAL_SELECTION_MODE:
+                        score, parts = case_macro_spatial_objective(
+                            pred=pred_for_selection,
+                            target=target_for_selection,
+                            y_vars=y_vars,
+                            plasma_mask=plasma_mask,
+                            distance_any=val_supervision["distance_any"],
+                            cfg=selection_cfg,
+                            target_weights=selection_allvars_weights,
+                            groups=selection_target_groups or None,
+                            group_weights=selection_group_weights or None,
+                        )
+                    else:
+                        score, parts = group_plasma_balance_score(
+                            pred=pred_for_selection,
+                            target=target_for_selection,
+                            y_vars=y_vars,
+                            plasma_mask=plasma_mask,
+                            groups=selection_target_groups,
+                            group_weights=selection_group_weights,
+                        )
+                else:
+                    score, parts = _unet_allvars_boundary_balance_score(
+                        pred=pred_for_selection,
+                        target=target_for_selection,
+                        y_vars=y_vars,
+                        mask=val_supervision["mask"],
+                        distance_any=val_supervision["distance_any"],
+                        weights=selection_allvars_weights,
+                        boundary_band_px=selection_band_px,
+                        boundary_bonus_weight=0.0,
+                    )
                 val_balance_score = float(score)
-                selection_score_te = float(parts.get("r2_Te_plasma", float("nan")))
-                selection_score_phi = float(parts.get("r2_phi_plasma", float("nan")))
-                if np.isfinite(val_balance_score) and val_balance_score > best_score:
+                selection_score_te = float(
+                    parts.get(selection_target_part_keys.get("Te", "r2_Te_plasma"), float("nan"))
+                )
+                selection_score_phi = float(
+                    parts.get(selection_target_part_keys.get("phi", "r2_phi_plasma"), float("nan"))
+                )
+                improved = (
+                    val_balance_score < (best_score - early_min_delta)
+                    if selection_mode == SPATIAL_SELECTION_MODE
+                    else val_balance_score > (best_score + early_min_delta)
+                )
+                if np.isfinite(val_balance_score) and improved:
                     best_score = float(val_balance_score)
                     best_epoch = int(epoch)
                     best_state = _clone_model_state_numpy(model)
                     selection_valid = True
                     best_score_parts = dict(parts)
+                    last_selection_improvement_epoch = int(epoch)
+                    improved_this_epoch = True
+            selection_epoch_scores = {
+                f"selection_score_{name}": float(best_score_parts.get(selection_target_part_keys[str(name)], 0.0))
+                for name in y_vars
+            }
+            if should_eval_selection:
+                selection_epoch_scores = {
+                    f"selection_score_{name}": float(parts.get(selection_target_part_keys[str(name)], 0.0))
+                    for name in y_vars
+                }
+            selection_group_epoch_scores = {
+                f"selection_score_group_{name}": float(
+                    best_score_parts.get(selection_group_part_keys[str(name)], 0.0)
+                )
+                for name in selection_target_groups
+            }
+            if should_eval_selection:
+                selection_group_epoch_scores = {
+                    f"selection_score_group_{name}": float(
+                        parts.get(selection_group_part_keys[str(name)], 0.0)
+                    )
+                    for name in selection_target_groups
+                }
+            selection_stale_epochs = (
+                0.0
+                if last_selection_improvement_epoch < 0
+                else float(max(int(epoch) - int(last_selection_improvement_epoch), 0))
+            )
 
             history.append(
                 {
                     "epoch": float(epoch),
                     "train_loss": stats["total"],
                     "train_data_loss": stats["data"],
+                    "train_aux_loss": stats.get("aux", 0.0),
                     "train_phys_loss": stats["physics"],
                     "train_rho_loss": stats["rho"],
                     "train_poisson_loss": stats["poisson"],
@@ -1239,12 +1637,28 @@ class Trainer:
                     "train_physics_scale": float(epoch_physics_cfg.get("physics_ramp_scale", 1.0)),
                     "val_loss": val_total,
                     "val_data_loss": float(val_data_loss),
+                    "val_aux_loss": float(val_aux_loss),
                     "val_phys_loss": float(val_phys_loss),
-                    "val_balance_score": float(val_balance_score),
+                    "val_balance_score": float(val_balance_score if np.isfinite(val_balance_score) else 0.0),
                     "selection_score_Te": float(selection_score_te if np.isfinite(selection_score_te) else 0.0),
                     "selection_score_phi": float(selection_score_phi if np.isfinite(selection_score_phi) else 0.0),
                     "selection_valid_flag": 1.0 if selection_valid else 0.0,
+                    "selection_stale_epochs": selection_stale_epochs,
+                    "early_stop_flag": 0.0,
                     "train_lr": float(lr),
+                    **{key: float(selection_epoch_scores.get(key, 0.0)) for key in selection_score_keys},
+                    **{key: float(selection_group_epoch_scores.get(key, 0.0)) for key in selection_group_score_keys},
+                    **{
+                        str(key): float(value)
+                        for key, value in stats.items()
+                        if str(key).startswith("loss_supervised_")
+                        or str(key).startswith("loss_aux_")
+                        or str(key) == "coeff_loss"
+                    },
+                    **{
+                        f"val_{key}": float(value)
+                        for key, value in val_aux_diagnostics.items()
+                    },
                 }
             )
             if diagnostics_enabled:
@@ -1252,10 +1666,6 @@ class Trainer:
                     {
                         "epoch": float(epoch),
                         "grad_l2_total": float(stats.get("grad_l2_total", 0.0)),
-                        "grad_l2_phi": float(stats.get("grad_l2_phi", 0.0)),
-                        "grad_l2_Te": float(stats.get("grad_l2_Te", 0.0)),
-                        "grad_l2_ne": float(stats.get("grad_l2_ne", 0.0)),
-                        "grad_l2_ni": float(stats.get("grad_l2_ni", 0.0)),
                         "active_weight_ratio": float(stats.get("active_weight_ratio", 0.0)),
                         "step_rel_hidden_mean": float(stats.get("step_rel_hidden_mean", 0.0)),
                         "step_rel_output": float(stats.get("step_rel_output", 0.0)),
@@ -1290,8 +1700,21 @@ class Trainer:
                         "selection_valid_flag": 1.0 if selection_valid else 0.0,
                         "selected_epoch_score": float(val_balance_score if np.isfinite(val_balance_score) else 0.0),
                         "selected_epoch_flag": 0.0,
+                        "selection_stale_epochs": selection_stale_epochs,
+                        "early_stop_flag": 0.0,
+                        **{key: float(selection_epoch_scores.get(key, 0.0)) for key in selection_score_keys},
+                        **{key: float(selection_group_epoch_scores.get(key, 0.0)) for key in selection_group_score_keys},
                     }
                 )
+            save_training_progress(
+                store=self.store,
+                history=history,
+                diagnostics_rows=diagnostics_rows,
+                total_epochs=int(epochs),
+                elapsed_seconds=float(time.perf_counter() - train_start),
+                best_epoch=int(best_epoch) if best_epoch >= 0 else None,
+                best_score=float(best_score),
+            )
             if fail_fast_enabled:
                 if float(stats.get("grad_l2_total", 0.0)) <= min_step_ratio:
                     stale += 1
@@ -1299,33 +1722,82 @@ class Trainer:
                     stale = 0
                 if stale >= patience_epochs:
                     break
+            if (
+                early_stopping_enabled
+                and selection_mode != "last"
+                and best_epoch >= 0
+                and not improved_this_epoch
+                and int(epoch) >= selection_warmup
+                and (int(epoch) - int(last_selection_improvement_epoch)) >= early_patience_epochs
+            ):
+                history[-1]["early_stop_flag"] = 1.0
+                if diagnostics_rows:
+                    diagnostics_rows[-1]["early_stop_flag"] = 1.0
+                break
 
         selected_epoch_effective = int(best_epoch if best_epoch >= 0 else (len(history) - 1))
-        if selection_mode == "best_val_allvars_balance" and best_state is not None:
+        checkpoint_selection_modes = {
+            "best_val_allvars_balance",
+            GROUP_BALANCE_SELECTION_MODE,
+            SPATIAL_SELECTION_MODE,
+            "best_val_loss",
+        }
+        if selection_mode in checkpoint_selection_modes and best_state is not None:
             _restore_model_state_numpy(model, best_state)
+        if selection_mode in checkpoint_selection_modes and best_state is None:
+            selection_valid = False
         for h in history:
             h["selected_epoch_flag"] = 1.0 if int(h["epoch"]) == selected_epoch_effective else 0.0
-            h["selected_epoch_score"] = float(best_score if best_epoch >= 0 else 0.0)
+            h["selected_epoch_score"] = float(best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0))
             h["selection_valid_flag"] = 1.0 if selection_valid else 0.0
             h["selection_mode_effective"] = selection_mode
+            h["selection_objective_version"] = (
+                SPATIAL_SELECTION_OBJECTIVE_VERSION
+                if selection_mode == SPATIAL_SELECTION_MODE
+                else ""
+            )
             h["unet_optimizer_effective"] = str(unet_opt_effective.get("type", "none"))
             if int(h["epoch"]) == selected_epoch_effective and best_epoch >= 0:
-                h["selection_score_Te"] = float(best_score_parts.get("r2_Te_plasma", 0.0))
-                h["selection_score_phi"] = float(best_score_parts.get("r2_phi_plasma", 0.0))
+                for name in y_vars:
+                    h[f"selection_score_{name}"] = float(
+                        best_score_parts.get(selection_target_part_keys[str(name)], 0.0)
+                    )
+                for name in selection_target_groups:
+                    h[f"selection_score_group_{name}"] = float(
+                        best_score_parts.get(selection_group_part_keys[str(name)], 0.0)
+                    )
+                h["selection_score_Te"] = float(
+                    best_score_parts.get(selection_target_part_keys.get("Te", "r2_Te_plasma"), 0.0)
+                )
+                h["selection_score_phi"] = float(
+                    best_score_parts.get(selection_target_part_keys.get("phi", "r2_phi_plasma"), 0.0)
+                )
         for row in diagnostics_rows:
             row["selected_epoch_flag"] = 1.0 if int(row["epoch"]) == selected_epoch_effective else 0.0
             row["selection_valid_flag"] = 1.0 if selection_valid else 0.0
-            row["selected_epoch_score"] = float(best_score if best_epoch >= 0 else 0.0)
+            row["selected_epoch_score"] = float(best_loss if selection_mode == "best_val_loss" and best_epoch >= 0 else (best_score if best_epoch >= 0 else 0.0))
             if int(row["epoch"]) == selected_epoch_effective and best_epoch >= 0:
-                row["selection_score_Te"] = float(best_score_parts.get("r2_Te_plasma", 0.0))
-                row["selection_score_phi"] = float(best_score_parts.get("r2_phi_plasma", 0.0))
+                for name in y_vars:
+                    row[f"selection_score_{name}"] = float(
+                        best_score_parts.get(selection_target_part_keys[str(name)], 0.0)
+                    )
+                for name in selection_target_groups:
+                    row[f"selection_score_group_{name}"] = float(
+                        best_score_parts.get(selection_group_part_keys[str(name)], 0.0)
+                    )
+                row["selection_score_Te"] = float(
+                    best_score_parts.get(selection_target_part_keys.get("Te", "r2_Te_plasma"), 0.0)
+                )
+                row["selection_score_phi"] = float(
+                    best_score_parts.get(selection_target_part_keys.get("phi", "r2_phi_plasma"), 0.0)
+                )
 
         header = list(history[0].keys()) if history else ["epoch", "train_loss", "val_loss"]
         rows = [[h[k] for k in header] for h in history]
         self.store.save_csv("scalars/metrics.csv", header, rows)
-        self._save_physics_terms(history)
+        save_physics_terms(store=self.store, history=history)
         if diagnostics_enabled:
-            self._save_optimization_diagnostics(diagnostics_rows)
+            save_numpy_optimization_diagnostics(store=self.store, rows=diagnostics_rows)
         return TrainOutput(history=history, model=model)
 
 

@@ -1,14 +1,14 @@
 from __future__ import annotations
 
-import os
-
-import numpy as np
 import pytest
+import numpy as np
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.fno.factorized_fno import FFNOBaseline
 from plasma_surrogate.models.fno.simple_fno import FNOBaseline
 from plasma_surrogate.train.trainer import Trainer
+
+pytestmark = pytest.mark.torch_runtime
 
 
 def _synthetic_grid_regression_data() -> tuple[np.ndarray, np.ndarray, np.ndarray, int, int, int]:
@@ -41,9 +41,7 @@ def _spectral_cfg() -> dict[str, object]:
 
 @pytest.mark.parametrize("local_skip_enabled", [False, True])
 def test_train_ffno_smoke(tmp_path, local_skip_enabled: bool):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     cond, y, tr, va, h, w = _synthetic_grid_regression_data()
     model = FFNOBaseline(
         input_dim=cond.shape[1],
@@ -72,9 +70,7 @@ def test_train_ffno_smoke(tmp_path, local_skip_enabled: bool):
 
 
 def test_train_ffno_and_fno_share_minimal_training_contract(tmp_path):
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     cond, y, tr, va, h, w = _synthetic_grid_regression_data()
     channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
     models = {

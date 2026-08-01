@@ -4,15 +4,23 @@ from __future__ import annotations
 
 from typing import Iterable
 
+from plasma_surrogate.core.model_specs import model_names_by_family, model_names_where
 
-UNET_FAMILY_MODELS: tuple[str, ...] = ("unet", "unetpp", "unetpp_attn")
-UNETPP_FAMILY_MODELS: tuple[str, ...] = ("unetpp", "unetpp_attn")
-SPECTRAL_FAMILY_MODELS: tuple[str, ...] = ("fno", "ffno")
-COORD_MLP_FAMILY_MODELS: tuple[str, ...] = ("coord_mlp_fourier", "coord_mlp_siren")
-POD_DEEPONET_FAMILY_MODELS: tuple[str, ...] = ("deeponet_pod",)
-COND_ONLY_TORCH_MODELS: tuple[str, ...] = POD_DEEPONET_FAMILY_MODELS
-GRID_TORCH_MODELS: tuple[str, ...] = UNET_FAMILY_MODELS + SPECTRAL_FAMILY_MODELS + COORD_MLP_FAMILY_MODELS
-MAINLINE_GEOM_PACK_MODELS: tuple[str, ...] = SPECTRAL_FAMILY_MODELS + UNETPP_FAMILY_MODELS
+UNET_FAMILY_MODELS: tuple[str, ...] = (
+    model_names_by_family("unet")
+    + model_names_by_family("unetpp")
+    + model_names_by_family("unet_operator")
+)
+UNETPP_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("unetpp")
+SPECTRAL_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("spectral")
+COORD_MLP_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("coord_mlp")
+UNO_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("uno")
+CNO_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("cno")
+POD_DEEPONET_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("pod_deeponet")
+GEOM_DEEPONET_SIREN_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("geom_deeponet_siren")
+COND_ONLY_TORCH_MODELS: tuple[str, ...] = model_names_where("cond_only_torch")
+GRID_TORCH_MODELS: tuple[str, ...] = model_names_where("grid_torch")
+MAINLINE_GEOM_PACK_MODELS: tuple[str, ...] = model_names_where("mainline_geom_pack")
 
 
 def resolve_single_family_model(*, model_names: Iterable[str], family: Iterable[str]) -> str | None:
@@ -25,11 +33,14 @@ def resolve_single_family_model(*, model_names: Iterable[str], family: Iterable[
 
 __all__ = [
     "COND_ONLY_TORCH_MODELS",
+    "CNO_FAMILY_MODELS",
+    "GEOM_DEEPONET_SIREN_FAMILY_MODELS",
     "GRID_TORCH_MODELS",
     "MAINLINE_GEOM_PACK_MODELS",
     "COORD_MLP_FAMILY_MODELS",
     "POD_DEEPONET_FAMILY_MODELS",
     "SPECTRAL_FAMILY_MODELS",
+    "UNO_FAMILY_MODELS",
     "UNETPP_FAMILY_MODELS",
     "UNET_FAMILY_MODELS",
     "resolve_single_family_model",

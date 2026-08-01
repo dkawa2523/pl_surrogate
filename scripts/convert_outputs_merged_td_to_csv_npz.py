@@ -85,7 +85,6 @@ def convert_outputs_merged_td(
     *,
     mode: str,
     cond_columns: list[str],
-    ne_floor: float,
     fill_value: float,
 ) -> dict[str, object]:
     src = Path(src_root)
@@ -123,13 +122,14 @@ def convert_outputs_merged_td(
     files_by_case: dict[str, dict[str, Path]] = {}
     for row in index_rows:
         rel = str(row["relative_path"])
-        if not rel.startswith(f"{group}/"):
+        rel_norm = rel.replace("\\", "/")
+        if not rel_norm.startswith(f"{group}/"):
             continue
         out_key = str(row["output_key"])
         for var, expected in keys.items():
             if out_key == expected:
                 cid = str(row["case_id"])
-                files_by_case.setdefault(cid, {})[var] = src / rel
+                files_by_case.setdefault(cid, {})[var] = src / Path(rel_norm)
 
     missing_cases = sorted([cid for cid in conditions.keys() if cid not in files_by_case])
     if missing_cases:
@@ -191,16 +191,14 @@ def convert_outputs_merged_td(
             mask_now = valid_mask.astype(np.float32)
             mask_plasma = mask_now if mask_plasma is None else (mask_plasma * mask_now)
 
-            ne_safe = np.maximum(ne_grid, float(ne_floor))
-            ni_safe = np.maximum(ni_grid, float(ne_floor))
-            log_ne = np.where(valid_mask, np.log10(ne_safe), float(fill_value)).astype(np.float32)
-            log_ni = np.where(valid_mask, np.log10(ni_safe), float(fill_value)).astype(np.float32)
+            ne_out = np.where(valid_mask, ne_grid, float(fill_value)).astype(np.float32)
+            ni_out = np.where(valid_mask, ni_grid, float(fill_value)).astype(np.float32)
             te_out = np.where(valid_mask, te_grid, float(fill_value)).astype(np.float32)
             phi_out = np.where(valid_mask, phi_grid, float(fill_value)).astype(np.float32)
 
             sample_id = f"{base_case_id}__steady" if mode == "periodic" else f"{base_case_id}__t{step_idx:03d}"
             rel_npz = Path("fields") / f"{sample_id}.npz"
-            np.savez_compressed(fields_dir / f"{sample_id}.npz", log_ne=log_ne, log_ni=log_ni, Te=te_out, phi=phi_out)
+            np.savez_compressed(fields_dir / f"{sample_id}.npz", ne=ne_out, ni=ni_out, Te=te_out, phi=phi_out)
 
             cond_row = conditions[base_case_id]
             row: dict[str, object] = {
@@ -252,7 +250,6 @@ def main() -> int:
         default="PP0,Td,gamma",
         help="Comma-separated condition column names in conditions.csv",
     )
-    parser.add_argument("--ne-floor", type=float, default=1.0e8, help="Floor applied before log10 for Ne")
     parser.add_argument("--fill-value", type=float, default=0.0, help="Fill value used outside plasma mask")
     args = parser.parse_args()
 
@@ -265,7 +262,6 @@ def main() -> int:
         dst_root=Path(args.dst_root),
         mode=args.mode,
         cond_columns=cond_columns,
-        ne_floor=float(args.ne_floor),
         fill_value=float(args.fill_value),
     )
     print(json.dumps(summary, indent=2, sort_keys=True))

@@ -1,69 +1,97 @@
-# Mainline Runbook
+# Plasma Surrogate
 
-mainline の最短運用入口です。  
-設計、仕様、YAML 詳細、拡張方法は [`docs/README.md`](docs/README.md) を参照してください。
+`plasma_surrogate` is a product foundation for plasma simulation surrogate
+models. It connects condition tables, structure data, grid/coordinate features,
+models, inference, benchmarking, and optimization through preprocessing
+artifacts.
 
-## Mainline Scope
+The mainline contract is target-driven. A workflow must not depend on fixed
+physics target names, benchmark-only assumptions, or hidden runtime
+compatibility paths.
 
-- Models: `global_mlp`, `unet`, `fno`, `deeponet_plasma`
-- Stage categories: `cleanse`, `feature`, `preprocess`, `train`, `infer`, `evaluate`, `pipeline` (internal task: `pipeline.run`)
-- Target contract: fixed namesは不要。`dataset.targets[].id` が唯一の target 定義
-
-## Contract Essentials
-
-- `dataset.targets[]` is required
-- preprocess contract is `preprocessing.scalers.target_transforms.<var>`
-- target columns in benchmark / compare are generated dynamically from active targets
-- inference physics uses:
-  - `inference.ood.physics.symbols`
-  - `inference.ood.boundary_operator.symbols`
-
-## Mainline Fixture Set (m7 Example)
-
-- `tests/fixtures/benchmark_periodic_real_m7_global_frozen_ref.yaml`
-- `tests/fixtures/benchmark_periodic_real_m7_unet_isolated_mainline.yaml`
-- `tests/fixtures/benchmark_periodic_real_m7_fno_isolated_mainline.yaml`
-- `tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml`
-- `tests/fixtures/benchmark_periodic_real_compare_mainline_fno_deeponet_global.yaml`
-
-## Quick Commands
-
-### Pipeline
+## Install
 
 ```bash
-PYTHONPATH=src .venv-torch/bin/python -m plasma_surrogate.cli.main pipeline --config configs/mainline.yaml
+python -m pip install -e ".[dev]"
 ```
 
-### Benchmark
+For torch, Optuna, and local benchmark work:
 
 ```bash
-PLASMA_SURROGATE_ENABLE_TORCH=1 PYTHONPATH=src .venv-torch/bin/python -m plasma_surrogate.cli.main benchmark run --config tests/fixtures/benchmark_periodic_real_m7_fno_isolated_mainline.yaml
-PLASMA_SURROGATE_ENABLE_TORCH=1 PYTHONPATH=src .venv-torch/bin/python -m plasma_surrogate.cli.main benchmark run --config tests/fixtures/benchmark_periodic_real_m7_deeponet_isolated_mainline.yaml
+python -m pip install -e ".[torch,optuna,dev]"
 ```
 
-### Compare
+## Quickstart
 
 ```bash
-PYTHONPATH=src .venv-torch/bin/python scripts/compare_selected_models.py --config tests/fixtures/benchmark_periodic_real_compare_mainline_fno_deeponet_global.yaml
+plasma-surrogate pipeline --config path/to/config.yaml
+plasma-surrogate preprocess --config path/to/config.yaml
+plasma-surrogate train --config path/to/config.yaml
+plasma-surrogate infer --config path/to/config.yaml
+plasma-surrogate benchmark run --config path/to/benchmark.yaml
 ```
 
-## Outputs to Check
+Equivalent module invocation is supported:
 
+```bash
+python -m plasma_surrogate benchmark run --config path/to/benchmark.yaml
+```
+
+## Product Contract
+
+- Target definitions start at `dataset.targets[]`.
+- Target order after preprocessing is `preprocessing/schema/output_layout.json`.
+- Target role metadata is `preprocessing/schema/target_role_schema.json`.
+- Raw target metadata starts in `dataset.targets[]`; reversible transforms,
+  scalers, and clipping are preprocessing artifacts.
+- Feature and channel order come from `coord_feature_pack_meta.json` and
+  `channel_map.json`.
+- Train, infer, and benchmark use the same preprocessing artifact bundle.
+- Runtime input mode is only `table_only` or `table_plus_structure`.
+- Runtime structure metadata is limited to `feature_profile`, `adapter_mode`,
+  and `provider_mode`.
+- Checkpoint, inference, and benchmark metadata validate `target_schema_hash`
+  and `feature_schema_hash` fail-fast.
+- Model capability is defined in `src/plasma_surrogate/core/model_specs.py`.
+- First-class product examples use `output_heads.mode: shared`.
+- Benchmark selection defaults to lower-better `surrogate_quality_score`.
+- Optimization uses `inference.optimize.objective`.
+
+## Outputs To Check
+
+- `runs/.../preprocessing/schema/output_layout.json`
+- `runs/.../preprocessing/schema/target_role_schema.json`
+- `runs/.../preprocessing/schema/channel_map.json`
+- `runs/.../preprocessing/features/coord_feature_pack_meta.json`
+- `runs/.../preprocessing/validation/runtime_schema_hashes.json`
 - `runs/.../leaderboard.csv`
-- `runs/.../resolved_benchmark.json`
-- `runs/.../selected_models_comparison.csv`
-- `runs/.../artifacts/<stage>/manifest.json`
+- `runs/.../inference/optimize/summary.json`
 
-## Notes
+## Development
 
-- `tests/fixtures` are templates. Production configs should live under `configs/`.
-- m7 uses `ne`, `ni`, `Te`, `phi`, but mainline itself is target-agnostic.
-- 詳細:
-- 全体設計: [`docs/01_architecture.md`](docs/01_architecture.md)
-- データ契約: [`docs/02_data_contract.md`](docs/02_data_contract.md)
-- 前処理と feature: [`docs/03_preprocess_and_features.md`](docs/03_preprocess_and_features.md)
-- 学習モデル: [`docs/04_training_models.md`](docs/04_training_models.md)
-- 推論と評価: [`docs/05_inference_and_evaluation.md`](docs/05_inference_and_evaluation.md)
-- YAML リファレンス: [`docs/06_yaml_reference.md`](docs/06_yaml_reference.md)
-- 拡張ガイド: [`docs/07_extension_guide.md`](docs/07_extension_guide.md)
-- 実行例: [`docs/08_workflows_examples.md`](docs/08_workflows_examples.md)
+Start model additions in `src/plasma_surrogate/core/model_specs.py`, then add
+the smallest implementation and adapter needed. Keep generated reports,
+experiment catalogs, and dataset-specific notes outside product docs.
+
+Default tests:
+
+```bash
+pytest
+```
+
+Torch-runtime tests:
+
+```bash
+PLASMA_SURROGATE_ENABLE_TORCH=1 pytest -m torch_runtime
+```
+
+## Documentation
+
+- Product policy: `docs/00_product_foundation_policy.md`
+- Architecture: `docs/01_architecture.md`
+- Data contract: `docs/02_data_contract.md`
+- Preprocess and features: `docs/03_preprocess_and_features.md`
+- Training and models: `docs/04_training_models.md`
+- Inference and evaluation: `docs/05_inference_and_evaluation.md`
+- YAML reference: `docs/06_yaml_reference.md`
+- Extension guide: `docs/07_extension_guide.md`

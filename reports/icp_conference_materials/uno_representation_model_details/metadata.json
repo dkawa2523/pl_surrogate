@@ -1,0 +1,136 @@
+{
+  "purpose": "GEC-ICP conference comparison matching the adopted GEC-CCP learning/spatial layout",
+  "generator_script": "experiments/conference/scripts/plot_gec_icp_representation_model_details.py",
+  "conference_adoption": {
+    "status": "adopted_for_icp_conference",
+    "catalog": "reports/icp_conference_materials/uno_representation_model_details/adopted_figures.csv",
+    "primary_figure_ids": [
+      "icp_uno_dimension_sdf_learning_curves",
+      "icp_uno_dimension_vs_sdf_ne_comparison"
+    ],
+    "presentation_order": [
+      1,
+      2
+    ]
+  },
+  "model_id": "u_no",
+  "protocol": "structure_holdout",
+  "controlled_comparison": "same dataset, split, seed, UNO, loss, batch size, and epoch budget",
+  "dataset_case_count": 359,
+  "split_counts": {
+    "train": 287,
+    "val": 36,
+    "test": 36
+  },
+  "case_id": "case_g011_op03",
+  "case_selection": {
+    "method": "median of mean plasma physical relative L2 across both representations",
+    "common_case_count": 36,
+    "rank_zero_based": 18,
+    "mean_physical_rel_l2": 0.04576588392696308,
+    "per_representation_physical_rel_l2": {
+      "dimension": 0.05736325901694594,
+      "sdf": 0.03416850883698023
+    }
+  },
+  "case_conditions": {
+    "llcoil": 1.2037,
+    "rrc": 7.1533,
+    "nncoil": 5.0,
+    "rrce": 20.6227,
+    "zzc": 0.3507,
+    "pp": 2432.559,
+    "pp0": 0.06245
+  },
+  "density_field": {
+    "id": "ne",
+    "units": "m^-3"
+  },
+  "field_color_scale": {
+    "shared_between_truth_prediction_and_representations": true,
+    "percentiles": [
+      2.0,
+      98.0
+    ],
+    "limits": [
+      1.5803898027573248e+16,
+      3.4874334109006147e+18
+    ],
+    "colormap": "jet"
+  },
+  "signed_error": {
+    "definition": "100 * (prediction - truth) / max(abs(truth[plasma]))",
+    "limits_percent": [
+      -30.0,
+      30.0
+    ],
+    "colormap": "coolwarm"
+  },
+  "representations": [
+    {
+      "key": "dimension",
+      "display_name": "Dimension vector",
+      "structure_input": "llcoil, rrc, nncoil, rrce, zzc (plus pp, pp0)",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/dimension/u_no/seed_1237",
+      "history_csv": "runs/icp_axisymmetric_operator_case_v1/final/dimension/u_no/seed_1237/models/u_no/eval_protocol/structure_holdout/train/scalars/metrics.csv",
+      "checkpoint": "runs/icp_axisymmetric_operator_case_v1/final/dimension/u_no/seed_1237/models/u_no/eval_protocol/structure_holdout/checkpoints",
+      "selected_epoch": 97,
+      "spatial_feature_source": "preprocess_pack",
+      "metrics": {
+        "relative_rmse": 0.0573737653233854,
+        "r2": 0.9920009569608844,
+        "signed_error_percent_mean": 1.8646223015381957,
+        "signed_error_percent_abs_mean": 1.9670353727891876,
+        "signed_error_percent_abs_p99": 6.9243061626424405,
+        "signed_error_percent_abs_max": 7.800081518862186
+      }
+    },
+    {
+      "key": "sdf",
+      "display_name": "Union SDF",
+      "structure_input": "case-varying part_sdf_union (plus pp, pp0)",
+      "run_root": "runs/icp_axisymmetric_operator_case_v1/final/union_sdf/u_no/seed_1237",
+      "history_csv": "runs/icp_axisymmetric_operator_case_v1/final/union_sdf/u_no/seed_1237/models/u_no/eval_protocol/structure_holdout/train/scalars/metrics.csv",
+      "checkpoint": "runs/icp_axisymmetric_operator_case_v1/final/union_sdf/u_no/seed_1237/models/u_no/eval_protocol/structure_holdout/checkpoints",
+      "selected_epoch": 102,
+      "spatial_feature_source": "compact_case_spatial_pack",
+      "metrics": {
+        "relative_rmse": 0.034142128176939505,
+        "r2": 0.9971673526852194,
+        "signed_error_percent_mean": 0.1631811443477351,
+        "signed_error_percent_abs_mean": 1.2236175461834582,
+        "signed_error_percent_abs_p99": 4.468587893501417,
+        "signed_error_percent_abs_max": 5.518288285942443
+      }
+    }
+  ],
+  "outputs": [
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_learning_curve.png",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_learning_curve.pdf",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_learning_curve.svg",
+    "reports/icp_conference_materials/uno_representation_model_details/sdf_learning_curve.png",
+    "reports/icp_conference_materials/uno_representation_model_details/sdf_learning_curve.pdf",
+    "reports/icp_conference_materials/uno_representation_model_details/sdf_learning_curve.svg",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_sdf_learning_curves.png",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_sdf_learning_curves.pdf",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_sdf_learning_curves.svg",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_ne_truth_prediction_error.png",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_ne_truth_prediction_error.pdf",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_ne_truth_prediction_error.svg",
+    "reports/icp_conference_materials/uno_representation_model_details/sdf_ne_truth_prediction_error.png",
+    "reports/icp_conference_materials/uno_representation_model_details/sdf_ne_truth_prediction_error.pdf",
+    "reports/icp_conference_materials/uno_representation_model_details/sdf_ne_truth_prediction_error.svg",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_vs_sdf_ne_comparison.png",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_vs_sdf_ne_comparison.pdf",
+    "reports/icp_conference_materials/uno_representation_model_details/dimension_vs_sdf_ne_comparison.svg"
+  ],
+  "derived_data": [
+    "reports/icp_conference_materials/uno_representation_model_details/learning_curves.csv",
+    "reports/icp_conference_materials/uno_representation_model_details/spatial_metrics.csv",
+    "reports/icp_conference_materials/uno_representation_model_details/adopted_figures.csv"
+  ],
+  "reference_scripts": [
+    "experiments/conference/scripts/plot_gec_ccp_selected_model_details.py",
+    "scripts/plot_gec_ccp_all_best_publication_fields.py"
+  ]
+}

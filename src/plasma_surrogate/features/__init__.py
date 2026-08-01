@@ -1,6 +1,63 @@
 """Feature cache helpers."""
 
 from plasma_surrogate.features.geometry_feature_store import GeometryFeatureStore, hash_array, hash_json
+from plasma_surrogate.features.structure_feature_registry import (
+    ALLOWED_SPATIAL_CHANNELS,
+    DESCRIPTOR_PROFILES,
+    FEATURE_PROFILE_CHANNELS,
+    GEOM_V1_MAINLINE_CHANNELS,
+    LATENT_PROFILES,
+    list_descriptor_profiles,
+    list_feature_profiles,
+    list_latent_profiles,
+    normalize_descriptor_profile_name,
+    normalize_feature_profile_name,
+    normalize_latent_profile_name,
+    resolve_spatial_channels_for_feature_profile,
+    validate_coord_feature_channels,
+    validate_descriptor_profile_name,
+    validate_feature_profile_name,
+    validate_latent_profile_name,
+)
+from plasma_surrogate.features.structure_descriptors import (
+    STRUCT_DESC_LITE_V1,
+    STRUCT_DESC_V1,
+    STRUCT_DESC_V2,
+    STRUCTURE_DESCRIPTOR_PROFILES,
+    StructureDescriptorPack,
+    build_struct_desc_lite_v1,
+    build_struct_desc_v1,
+    build_struct_desc_v2,
+    build_structure_descriptor,
+)
 
-__all__ = ["GeometryFeatureStore", "hash_array", "hash_json"]
-
+__all__ = [
+    "ALLOWED_SPATIAL_CHANNELS",
+    "DESCRIPTOR_PROFILES",
+    "FEATURE_PROFILE_CHANNELS",
+    "GEOM_V1_MAINLINE_CHANNELS",
+    "GeometryFeatureStore",
+    "LATENT_PROFILES",
+    "STRUCT_DESC_LITE_V1",
+    "STRUCT_DESC_V1",
+    "STRUCT_DESC_V2",
+    "STRUCTURE_DESCRIPTOR_PROFILES",
+    "StructureDescriptorPack",
+    "build_struct_desc_lite_v1",
+    "build_struct_desc_v1",
+    "build_struct_desc_v2",
+    "build_structure_descriptor",
+    "hash_array",
+    "hash_json",
+    "list_descriptor_profiles",
+    "list_feature_profiles",
+    "list_latent_profiles",
+    "normalize_descriptor_profile_name",
+    "normalize_feature_profile_name",
+    "normalize_latent_profile_name",
+    "resolve_spatial_channels_for_feature_profile",
+    "validate_coord_feature_channels",
+    "validate_descriptor_profile_name",
+    "validate_feature_profile_name",
+    "validate_latent_profile_name",
+]

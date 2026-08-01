@@ -1,0 +1,21 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The union SDF gives one order-invariant spatial representation of all coils",
+  "sources": {
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz"
+  },
+  "case_id": "case_g002_op01",
+  "kind": "union",
+  "display_unit": "cm",
+  "display_limits_cm": [
+    -0.25,
+    3.0
+  ],
+  "strict_sign_contradiction_cells": 0,
+  "output_stem": "icp_union_sdf",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_union_sdf.png",
+    "reports/gec_conference_materials/independent_assets/icp_union_sdf.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_union_sdf.svg"
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "target_run": "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1",
+  "reference_run": "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1",
+  "variables": [
+    "PP0",
+    "PA",
+    "gamma"
+  ],
+  "explained_variance_ratio": [
+    0.7370194799858593,
+    0.17619617696670245
+  ],
+  "trial_count": 500,
+  "population_size": 9,
+  "trajectory": "individual trials plus CMA-ES population-center path",
+  "response_map": "fixed PCA basis and Gaussian-kernel surface from reference run"
+}

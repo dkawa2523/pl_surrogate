@@ -9,14 +9,8 @@ benchmark:
     protocol_variant: deeponet_isolated_mainline
     target_family_for_score: allvars
     target_vars_for_score: [ne, ni, Te, phi]
-    primary_metric: test_r2_plasma_mean_dual
-    primary_mode: max
-    aggregate_score:
-      enabled: true
-      rmse_weight: 0.5
-      r2_weight: 0.4
-      boundary_penalty_weight: 0.1
-      use_plasma_metrics: true
+    primary_metric: surrogate_quality_score
+    objective_mode: min
     region_bands:
       mode: fixed_px
       boundary_in_px: 2.0
@@ -35,8 +29,8 @@ benchmark:
     root: data/outputs_merged_td_csv_periodic
     index_csv: index.csv
     targets:
-      - {id: ne, source_key: log_ne, value_transform: pow10, units: "m^-3", dtype: float32}
-      - {id: ni, source_key: log_ni, value_transform: pow10, units: "m^-3", dtype: float32}
+      - {id: ne, source_key: ne, value_transform: identity, units: "m^-3", dtype: float32}
+      - {id: ni, source_key: ni, value_transform: identity, units: "m^-3", dtype: float32}
       - {id: Te, source_key: Te, value_transform: identity, units: "eV", dtype: float32}
       - {id: phi, source_key: phi, value_transform: identity, units: "V", dtype: float32}
     cond_columns: [PP0, Td, gamma]
@@ -61,7 +55,7 @@ benchmark:
     distance_contract:
       require_negative_outside: error
     coord_grid_contract:
-      require_requested_source: warn
+      require_requested_source: error
     coord_grid_source: coord_grid
     coord_features:
       enabled: true
@@ -86,7 +80,6 @@ benchmark:
       target_vars: [ne, ni, Te, phi]
       input_features:
         mode: geom_feature_pack
-        require_pack: error
         features: [x, y, mask_plasma, distance_signed, distance_any]
         distance_transform:
           mode: bounded_auto
@@ -129,13 +122,11 @@ benchmark:
           enabled: false
     loss:
       supervised:
-        type: huber
-        delta: 1.0
+        type: mse
         normalization: sample_mean
         sample_mean_group_mode: batch
         sample_mean_weight_denominator: count
         mask: plasma_only
-        nan_region_policy: sdf_continuous
       multitask:
         weighting: fixed
         fixed_weights_by_var:

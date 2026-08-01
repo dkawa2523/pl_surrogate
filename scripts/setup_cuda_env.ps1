@@ -21,8 +21,8 @@ if (-not (Test-Path $python)) {
 
 & $python -m pip install --upgrade pip setuptools wheel
 & $python -m pip install -r $RequirementsFile
+& $python -m pip install -e ".[dev]"
 
-$env:PYTHONPATH = "src"
 $env:PLASMA_SURROGATE_ENABLE_TORCH = "1"
 
 @'
@@ -39,6 +39,5 @@ if torch.cuda.is_available():
 Write-Host ""
 Write-Host "CUDA environment is ready."
 Write-Host "Use:"
-Write-Host "  `$env:PYTHONPATH='src'"
 Write-Host "  `$env:PLASMA_SURROGATE_ENABLE_TORCH='1'"
-Write-Host "  .\$EnvDir\Scripts\python -m plasma_surrogate.cli.main train --config <config>"
+Write-Host "  .\$EnvDir\Scripts\plasma-surrogate.exe train --config <config>"

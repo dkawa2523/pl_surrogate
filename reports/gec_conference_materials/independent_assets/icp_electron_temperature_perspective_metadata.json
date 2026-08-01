@@ -1,0 +1,32 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-ICP 2D electron temperature map is tilted as a flat plate for perspective presentation",
+  "sources": {
+    "field": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/fields/case_g002_op01.npz",
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz"
+  },
+  "system": "GEC-ICP",
+  "case_id": "case_g002_op01",
+  "view": "flat 2D map tilted in depth",
+  "shown_field": "Te",
+  "unit": "eV",
+  "height_encoding": "none; the plate is flat",
+  "color_encoding": "linear Te [eV]",
+  "colormap": "plasma",
+  "display_stride": 6,
+  "display_limits": [
+    0.8216840028762817,
+    1.7989964485168457
+  ],
+  "display_only_plate_depth": 1.6,
+  "camera": {
+    "elevation_deg": 9.0,
+    "azimuth_deg": -58.0
+  },
+  "output_stem": "icp_electron_temperature_perspective",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_electron_temperature_perspective.png",
+    "reports/gec_conference_materials/independent_assets/icp_electron_temperature_perspective.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_electron_temperature_perspective.svg"
+  ]
+}

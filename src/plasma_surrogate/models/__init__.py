@@ -10,10 +10,17 @@ __all__ = [
     "UNetBaseline",
     "FNOBaseline",
     "FFNOBaseline",
+    "UNOBaseline",
+    "CNOBaseline",
+    "CNOOperatorUNet",
+    "GeomDeepONetSIREN",
     "DeepONetPlasmaOperatorTorch",
     "PODDeepONetTorch",
     "DeepONetPoissonHeadTorch",
     "BoundaryOperatorTorch",
+    "build_model_from_name",
+    "load_checkpoint",
+    "save_checkpoint",
 ]
 
 _EXPORT_MAP = {
@@ -22,10 +29,17 @@ _EXPORT_MAP = {
     "UNetBaseline": "plasma_surrogate.models.unet.simple_unet",
     "FNOBaseline": "plasma_surrogate.models.fno.simple_fno",
     "FFNOBaseline": "plasma_surrogate.models.fno.factorized_fno",
+    "UNOBaseline": "plasma_surrogate.models.uno.simple_uno",
+    "CNOBaseline": "plasma_surrogate.models.cno.simple_cno",
+    "CNOOperatorUNet": "plasma_surrogate.models.cno.operator_unet",
+    "GeomDeepONetSIREN": "plasma_surrogate.models.deeponet.geom_deeponet_siren",
     "DeepONetPlasmaOperatorTorch": "plasma_surrogate.models.deeponet.plasma_operator_torch",
     "PODDeepONetTorch": "plasma_surrogate.models.deeponet.pod_deeponet_torch",
     "DeepONetPoissonHeadTorch": "plasma_surrogate.models.deeponet.poisson_head_torch",
     "BoundaryOperatorTorch": "plasma_surrogate.models.deeponet.boundary_operator_torch",
+    "build_model_from_name": "plasma_surrogate.models.checkpoint",
+    "load_checkpoint": "plasma_surrogate.models.checkpoint",
+    "save_checkpoint": "plasma_surrogate.models.checkpoint",
 }
 
 

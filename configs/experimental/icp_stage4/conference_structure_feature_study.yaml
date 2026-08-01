@@ -1,0 +1,144 @@
+study:
+  id: icp_stage4_conference_structure_feature_study
+  title: ICP_stage4 structure-feature surrogate study
+  purpose: >
+    Compare ICP surrogate learning as a structure-feature field prediction
+    problem, not as direct regression on coil dimension parameters.
+  dataset_audit: reports/icp_stage4_conference_problem_setting/dataset_audit_part_lite_ready.json
+
+dataset:
+  source_root: data/outputs_icp_stage4_enriched_360
+  multifield_structure_root: data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1
+  current_core4_root: data/outputs_icp_stage4_enriched_360_csv_npz_core4_part_sdf_lite_v1
+  struct_spatial_root: data/outputs_icp_stage4_enriched_360_csv_npz_core4_struct_spatial_v1
+  cases: 360
+  structure_groups: 60
+  cases_per_structure: 6
+  grid_shape: [440, 600]
+  available_scalar_conditions: [pp, pp0]
+  planned_process_conditions:
+    - coil_power
+    - bias_power
+    - pressure
+    - gas_flow_rate
+    - gas_composition
+    - rf_frequency
+    - substrate_temperature
+    - wall_temperature
+  geometry_source_columns: [llcoil, rrc, nncoil, rrce, zzc]
+  multifield_targets: [ne, ni, phi, Te, Br, Bz, Jelr, Jelz]
+  note: >
+    Geometry source columns are used for audit and geometry generation only.
+    They are not scalar model inputs.
+
+current_audit_result:
+  part_mask_stack_cases: 0
+  part_lite_v1_ready: false
+  implication: >
+    The existing part_sdf_lite_v1 dataset is runnable for fixed-slot SDF
+    features, but not for part_lite_v1 order-invariant summary training until
+    the structure pack is regenerated with part_mask_stack.
+
+generated_configs:
+  executable_primary:
+    profile: icp_part_sdf_lite_v1
+    config_root: configs/experimental/icp_stage4/generated_conference_part_sdf_lite_v1_e80_baseline
+    run_root: runs/icp_stage4_conference_part_sdf_lite_v1_e80_baseline
+    models: [ffno]
+    role: Current runnable structure-feature baseline.
+  executable_spatial_baseline:
+    profile: icp_struct_spatial_v1
+    config_root: configs/experimental/icp_stage4/generated_conference_struct_spatial_v1_e80_baseline
+    run_root: runs/icp_stage4_conference_struct_spatial_v1_e80_baseline
+    models: [ffno]
+    role: Current runnable spatial geometry baseline.
+  planned_primary_after_regeneration:
+    profile: part_lite_v1
+    config_root: configs/experimental/icp_stage4/generated_conference_part_lite_v1_e80
+    run_root: runs/icp_stage4_conference_part_lite_v1_e80
+    models: [ffno, unet, cno_operator_unet]
+    role: >
+      Intended main comparison once part_mask_stack is present in every
+      structure_npz.
+
+training_defaults:
+  target_fields: [ne, ni, Te, phi]
+  preprocessing:
+    condition_scaler: robust
+    ne: {value_transform: log10_floor, floor: 1.0e-30, scaler: zscore}
+    ni: {value_transform: log10_floor, floor: 1.0e-30, scaler: zscore}
+    Te: {value_transform: log1p, floor: 0.0, scaler: robust}
+    phi: {value_transform: signed_log1p, scaler: robust}
+  loss:
+    supervised_base: huber
+    huber_delta: 1.0
+    target_weights: {ne: 1.0, ni: 1.0, Te: 1.2, phi: 0.5}
+    boundary_weight: {enabled: true, alpha: 2.0, tau: 2.0}
+
+evaluation:
+  field_metrics:
+    - plasma-only RMSE/MAE/relative error
+    - ne/ni log-space and physical-space error
+    - Te/phi physical-space error
+    - boundary-band-near error
+  slice_metrics:
+    - by nncoil
+    - by pp and pp0
+    - by held-out structure group
+  qoi_metrics:
+    - ne uniformity at plasma_mid_height
+    - z=150, r=0..400 line profile overlay
+    - line min/mean/max density
+    - density-collapse and negative-rate checks
+
+inference_optimization:
+  status: external_processing
+  reason: >
+    Dataset-specific objectives and constraints must remain outside generic
+    model code. Candidate geometry parameters are converted to structure
+    features before surrogate evaluation.
+  primary_objective: uniformity_over_normalized_max_density
+  objective_definition: uniformity(line ne) / (max_density(line ne) / base_max_density(line ne))
+  objective_region: {row_index: 150, col_start: 0, col_end: 400}
+  hard_checks:
+    - active coils do not overlap in R
+    - finite ne/ni/Te
+    - line mean density is nonzero
+    - no density-collapse candidate is accepted as best
+  backend: two_stage
+  smoke_trials: {n_trials: 32, n_initial: 16, top_k: 4, local_trials_per_seed: 4}
+  full_trials: {n_trials: 512, n_initial: 320, top_k: 24, local_trials_per_seed: 8}
+
+execution_order:
+  - audit_dataset
+  - run_executable_primary_smoke
+  - run_executable_spatial_baseline_smoke
+  - run_executable_primary_full
+  - run_executable_spatial_baseline_full
+  - regenerate_part_mask_stack_dataset_when_disk_budget_allows
+  - run_planned_part_lite_v1_smoke_and_full
+  - optimize_top_surrogate_externally
+  - rescore_top_candidates_with_cross_surrogates_or_COMSOL
+
+commands:
+  audit_dataset: >
+    py -3 scripts\audit_icp_stage4_core4_dataset.py
+    --dataset-root data\outputs_icp_stage4_enriched_360_csv_npz_core4_part_sdf_lite_v1
+    --source-root data\outputs_icp_stage4_enriched_360
+    --out reports\icp_stage4_conference_problem_setting\dataset_audit_part_lite_ready.json
+  run_primary_smoke: >
+    .venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_stage4_core4_benchmarks.py
+    --sizes smoke --models ffno
+    --config-root configs\experimental\icp_stage4\generated_conference_part_sdf_lite_v1_e80_baseline
+    --run-root runs\icp_stage4_conference_part_sdf_lite_v1_e80_baseline
+    --status-csv runs\icp_stage4_conference_part_sdf_lite_v1_e80_baseline\run_status.csv
+  run_spatial_baseline_smoke: >
+    .venv-torch\Scripts\python.exe experiments\icp_stage4\scripts\run_icp_stage4_core4_benchmarks.py
+    --sizes smoke --models ffno
+    --config-root configs\experimental\icp_stage4\generated_conference_struct_spatial_v1_e80_baseline
+    --run-root runs\icp_stage4_conference_struct_spatial_v1_e80_baseline
+    --status-csv runs\icp_stage4_conference_struct_spatial_v1_e80_baseline\run_status.csv
+  regenerate_part_lite_dataset: >
+    py -3 scripts\convert_outputs_icp_stage4_enriched_to_csv_npz_core4.py
+    --part-sdf-lite-v1
+    --dst-root data\outputs_icp_stage4_enriched_360_csv_npz_core4_part_lite_v1_conference

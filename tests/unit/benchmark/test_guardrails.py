@@ -2,111 +2,25 @@ from __future__ import annotations
 
 import pytest
 
-from plasma_surrogate.benchmark.runner import BenchmarkRunner
+from plasma_surrogate.benchmark.runner import BenchmarkRunner, _primary_metric_value
 
 
-def _runner_with_guardrails(*, mode: str = "warn") -> BenchmarkRunner:
-    return BenchmarkRunner(
-        {
-            "benchmark": {
-                "guardrails": {
-                    "enabled": True,
-                    "mode": mode,
-                    "checks": {"global_disabled_boost": True, "effective_steps_floor": True},
-                },
-                "effective_steps_floor": {
-                    "global_mlp": 60,
-                    "fno": 60,
-                },
-            }
-        }
-    )
-
-
-def test_guardrail_detects_global_disabled_boost() -> None:
-    runner = _runner_with_guardrails(mode="warn")
-    warnings = runner._evaluate_guardrails(
-        phase="pre",
-        train_cfg={
-            "global_mlp": {
-                "grad_scale": {"mode": "off"},
-                "layer_lr_multiplier": {"output": 1.0},
-                "output_head_refresh": {"enabled": False},
-            }
-        },
-        model_names=["global_mlp"],
-        effective_steps_per_model=None,
-    )
-    assert any("global_disabled_boost" in msg for msg in warnings)
-
-
-def test_guardrail_detects_effective_steps_floor_violations() -> None:
-    runner = _runner_with_guardrails(mode="warn")
-    warnings = runner._evaluate_guardrails(
-        phase="post",
-        train_cfg={},
-        model_names=["global_mlp", "fno"],
-        effective_steps_per_model={
-            "global_mlp": {"interp": 40, "extrap": 60},
-            "fno": 55,
-        },
-    )
-    assert any("global_mlp.interp=40 (<60)" in msg for msg in warnings)
-    assert any("fno=55 (<60)" in msg for msg in warnings)
-
-
-def test_guardrail_error_mode_raises() -> None:
-    runner = _runner_with_guardrails(mode="error")
-    with pytest.raises(ValueError, match="benchmark.guardrails violations"):
-        runner._evaluate_guardrails(
-            phase="pre",
-            train_cfg={
-                "global_mlp": {
-                    "grad_scale": {"mode": "off"},
-                    "layer_lr_multiplier": {"output": 1.0},
-                    "output_head_refresh": {"enabled": False},
-                }
-            },
-            model_names=["global_mlp"],
-            effective_steps_per_model=None,
+def test_primary_metric_value_rejects_missing_metric() -> None:
+    with pytest.raises(ValueError, match="primary_metric='missing'.*not present"):
+        _primary_metric_value(
+            {"model_id": "fno", "surrogate_quality_score": 1.0},
+            primary_metric="missing",
+            model_name="fno",
         )
 
 
-def test_aggregate_unet_contract_effective_uses_explicit_model_key() -> None:
-    runner = BenchmarkRunner({"benchmark": {}})
-    out = runner._aggregate_unet_contract_effective(
-        train_cfg={
-            "unetpp": {
-                "target_family": "allvars",
-                "input_features": {"mode": "geom_feature_pack", "features": ["x", "y"]},
-                "selection": {"mode": "best_val_allvars_balance"},
-                "model_cfg": {"conv_cfg": {"upsample_mode": "deconv"}, "output_heads": {"mode": "shared"}},
-            },
-            "unetpp_attn": {
-                "target_family": "allvars",
-                "input_features": {
-                    "mode": "geom_feature_pack",
-                    "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-                },
-                "selection": {"mode": "best_val_allvars_balance"},
-                "model_cfg": {
-                    "conv_cfg": {"upsample_mode": "bilinear", "attention_cfg": {"enabled": True}},
-                    "output_heads": {"mode": "shared"},
-                },
-            },
-        },
-        y_vars=["ne", "ni", "Te", "phi"],
-        model_key="unetpp_attn",
-        unet_contract_samples=[],
-    )
-    assert out["unet_feature_contract_effective"]["upsample_mode"] == "bilinear"
-    assert out["unet_feature_contract_effective"]["input_feature_channels"] == [
-        "x",
-        "y",
-        "mask_plasma",
-        "distance_signed",
-        "distance_any",
-    ]
+def test_primary_metric_value_rejects_non_numeric_metric() -> None:
+    with pytest.raises(ValueError, match="primary_metric='surrogate_quality_score'.*must be numeric"):
+        _primary_metric_value(
+            {"model_id": "fno", "surrogate_quality_score": ""},
+            primary_metric="surrogate_quality_score",
+            model_name="fno",
+        )
 
 
 def test_validate_eval_scope_train_sections_common_allows_mixed_train_cfg() -> None:

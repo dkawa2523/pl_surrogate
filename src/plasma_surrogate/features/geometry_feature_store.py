@@ -10,7 +10,7 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.data.geometry_context import GeometryContext
-from plasma_surrogate.data.geometry_provider import FixedGeometryProvider
+from plasma_surrogate.data.geometry_provider import GeometryProviderLike
 
 
 def hash_bytes(payload: bytes) -> str:
@@ -114,7 +114,7 @@ class GeometryFeatureStore:
         geom_ref: dict[str, Any],
         axis_value: float,
         axis_mode: str,
-        geometry_provider: FixedGeometryProvider,
+        geometry_provider: GeometryProviderLike,
         force: bool = False,
     ) -> dict[str, Any]:
         cache_dir = self._dir(geom_ref)
@@ -155,7 +155,7 @@ class GeometryFeatureStore:
         geom_ref: dict[str, Any],
         axis_value: float,
         axis_mode: str,
-        geometry_provider: FixedGeometryProvider,
+        geometry_provider: GeometryProviderLike,
     ) -> GeometryContext:
         meta = self.prepare(geom_ref, axis_value=axis_value, axis_mode=axis_mode, geometry_provider=geometry_provider)
         ctx = geometry_provider.get(geom_ref)
@@ -169,4 +169,3 @@ class GeometryFeatureStore:
             regions[name] = arr.astype(np.float32)
         ctx.regions = regions
         return ctx
-

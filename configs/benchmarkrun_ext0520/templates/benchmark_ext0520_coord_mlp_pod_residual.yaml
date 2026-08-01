@@ -1,0 +1,220 @@
+benchmark:
+  output_dir: runs/gec_ccp_trustworthy_v1/n54/coord_mlp_pod_residual
+  profile: m7_coord_mlp_pod_residual
+  seed: 411
+  phi_mode: direct
+  eval:
+    mask_metrics: plasma_only
+    interp_mode: overlap
+    protocol_variant: coord_mlp_pod_residual_gec_ccp_trustworthy_v1_n54
+    target_family_for_score: allvars
+    target_vars_for_score:
+    - ne
+    - ni
+    - Te
+    - phi
+    primary_metric: surrogate_quality_score
+    objective_mode: min
+    region_bands:
+      mode: fixed_px
+      boundary_in_px: 2.0
+      deep_plasma_px: 10.0
+  eval_protocol:
+    mode: dual_axis
+    scope: common
+    primary_split: interp
+    interp_weight: 0.5
+    extrap_weight: 0.5
+    frozen_ref_tag: periodic_global_frozen_v2
+    interp_mode: overlap
+  dataset:
+    type: csv_npz
+    root: data/outputs_merged_td_csv_periodic_ext0520
+    index_csv: index_54.csv
+    targets:
+    - id: ne
+      source_key: ne
+      value_transform: identity
+      units: m^-3
+      dtype: float32
+      role: density_electron
+      positive: true
+      field_family: density
+      default_region: plasma_only
+    - id: ni
+      source_key: ni
+      value_transform: identity
+      units: m^-3
+      dtype: float32
+      role: density_ion
+      positive: true
+      field_family: density
+      default_region: plasma_only
+    - id: Te
+      source_key: Te
+      value_transform: identity
+      units: eV
+      dtype: float32
+      role: temperature_electron
+      positive: true
+      field_family: temperature
+      default_region: plasma_only
+    - id: phi
+      source_key: phi
+      value_transform: identity
+      units: V
+      dtype: float32
+      role: potential
+      positive: false
+      field_family: electrostatic
+      default_region: plasma_only
+    cond_columns:
+    - PP0
+    - Td
+    - gamma
+    axis_column: axis
+    fields_npz_column: fields_npz
+    case_id_column: case_id
+    base_case_id_column: base_case_id
+    split_group_column: split_group
+    geometry_root: geometry
+  split:
+    seed: 7
+    ratios:
+    - 0.7
+    - 0.15
+    - 0.15
+  preprocessing:
+    scalers:
+      enforce_target_transforms: true
+      y_fit_policy: plasma_only
+      target_transforms:
+        ne:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        ni:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        Te:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+        phi:
+          value_transform: identity
+          scaler: zscore
+          fit_scope: plasma_only
+          clip:
+            mode: none
+    distance_contract:
+      require_negative_outside: error
+    coord_grid_contract:
+      require_requested_source: off
+    coord_grid_source: coord_grid
+    coord_features:
+      enabled: true
+      output: features/coord_feature_pack.npz
+      scaling:
+        enabled: true
+        mode: zscore
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
+      distance_transform_stats:
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        chamber_band_px: 2.0
+        signed_quantile: 0.45
+        proximity_quantile: 0.25
+      channels_from_profile: geom_v1_mainline
+  train:
+    unet_like:
+      batch_size_cases: 6
+      shuffle_cases: true
+    coord_mlp_pod_residual:
+      epochs: 100
+      lr: 0.0006
+      optimizer:
+        type: adamw
+        schedule: cosine
+        warmup_epochs: 10
+      selection:
+        mode: best_val_allvars_balance
+      target_family: allvars
+      target_vars:
+      - ne
+      - ni
+      - Te
+      - phi
+      input_features:
+        mode: geom_feature_pack
+        require_pack: error
+        features:
+        - x
+        - y
+        - mask_plasma
+        - distance_signed
+        - distance_any
+        distance_transform:
+          mode: bounded_auto
+      model_cfg:
+        basis:
+          rank: 32
+          fit_scope: train_only
+          per_var: true
+          center: true
+        cond_hidden:
+        - 128
+        - 128
+        latent_dim: 128
+        residual_hidden:
+        - 256
+        - 256
+        - 256
+        residual_activation: gelu
+        point_encoder:
+          xy_fourier_frequencies: 8
+          xy_frequency_scale: 10.0
+          include_xy_raw: true
+          include_aux_raw: true
+        decoder_input_norm:
+          enabled: true
+        coeff_loss_weight: 0.1
+        residual_scale_init: 0.05
+  physics:
+    enabled: false
+  inference:
+    axis:
+      mode: steady
+      value: 0.0
+    ood:
+      physics:
+        enabled: true
+        symbols:
+          density: ne
+          temperature: Te
+          potential: phi
+  runtime:
+    input_mode: table_plus_structure
+    structure:
+      feature_profile: geom_v1_mainline
+      descriptor_profile: none
+      latent_profile: none
+      adapter_mode: auto
+      provider_mode: fixed
+runtime:
+  input_mode: table_plus_structure
+  structure:
+    feature_profile: geom_v1_mainline
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: auto
+    provider_mode: fixed

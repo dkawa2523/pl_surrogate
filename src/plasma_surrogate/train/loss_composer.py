@@ -1,81 +1,249 @@
-"""Thin data/physics loss composition layer shared by numpy and torch trainers."""
+"""Product data/physics loss composition shared by numpy and torch trainers."""
 
 from __future__ import annotations
 
+import re
 from typing import Any
-import warnings
 
 import numpy as np
 
-from plasma_surrogate.core.density_contract import resolve_density_key
-from plasma_surrogate.core.spatial_regions import build_boundary_type_masks, build_region_masks
-from plasma_surrogate.core.torch_backend import require_torch
-from plasma_surrogate.train.losses import (
-    build_signed_distance,
-    is_effective_signed_distance,
-    physics_loss_and_grad,
-    sdf_continuous_weight_map,
+from plasma_surrogate.core.target_groups import (
+    TargetGroup,
+    resolve_target_weight_multipliers,
 )
+from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
+from plasma_surrogate.core.torch_backend import require_torch
+from plasma_surrogate.train.loss_contract import removed_supervised_keys
+from plasma_surrogate.train.loss_protocols import (
+    GROUP_WEIGHTING_MODES,
+    GROUP_WEIGHTING_NONE,
+)
+from plasma_surrogate.train.losses import physics_loss_and_grad
 from plasma_surrogate.train.physics_terms import resolve_numpy_terms, resolve_torch_terms
-from plasma_surrogate.train.torch_losses import physics_terms_torch, sdf_continuous_weight_map_torch
+from plasma_surrogate.train.torch_losses import physics_terms_torch
 
 
 _COMPONENT_KEYS = ("data", "physics", "poisson", "boundary", "boundary_operator", "rho")
 
 
 def _empty_components() -> dict[str, float]:
-    return {k: 0.0 for k in _COMPONENT_KEYS}
+    return {key: 0.0 for key in _COMPONENT_KEYS}
+
+
+def _dict_or_empty(raw: Any) -> dict[str, Any]:
+    return dict(raw or {})
+
+
+def _positive_finite_float(raw: Any, *, key_name: str) -> float:
+    value = float(raw)
+    if not np.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{key_name} must be finite and > 0")
+    return value
 
 
 def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
-    cfg = dict(loss_cfg or {})
-    sup = dict(cfg.get("supervised", {}))
-    mt = dict(cfg.get("multitask", {}))
-    region_weighting_cfg = dict(sup.get("region_weighting", {}))
-    region_balance_cfg = dict(sup.get("region_balance", {}))
-    if region_weighting_cfg and region_balance_cfg:
+    cfg = _dict_or_empty(loss_cfg)
+    sup = _dict_or_empty(cfg.get("supervised"))
+    mt = _dict_or_empty(cfg.get("multitask"))
+    found_removed = removed_supervised_keys(sup)
+    if found_removed:
         raise ValueError(
-            "supervised.region_balance and supervised.region_weighting cannot be specified together; "
-            "use supervised.region_balance (region_weighting is deprecated alias)"
-        )
-    if region_weighting_cfg:
-        warnings.warn(
-            "supervised.region_weighting is deprecated; use supervised.region_balance",
-            DeprecationWarning,
-            stacklevel=2,
+            "product supervised loss supports only the standard data-loss path; "
+            f"removed supervised keys={found_removed}"
         )
     if "coord_objective" in sup:
         raise ValueError("supervised.coord_objective is removed")
     if "sample_mean_group_scale" in sup:
         raise ValueError("supervised.sample_mean_group_scale is removed")
+
+    nan_region_policy = str(sup.get("nan_region_policy", "mask_only")).strip().lower()
+    if nan_region_policy != "mask_only":
+        raise ValueError("supervised.nan_region_policy supports only mask_only in the product loss path")
+
+    fixed_weights_by_var = _dict_or_empty(mt.get("fixed_weights_by_var"))
+    target_weights = _dict_or_empty(sup.get("target_weights"))
+    if target_weights and not fixed_weights_by_var:
+        fixed_weights_by_var = target_weights
+
+    if "base" in sup:
+        raise ValueError("supervised.base is removed; use supervised.type")
+    if "delta" in sup:
+        raise ValueError("supervised.delta is removed; use supervised.huber_delta")
+
+    supervised_type = str(sup.get("type", "mse")).strip().lower()
+    if supervised_type not in {"mse", "huber"}:
+        raise ValueError("supervised.type must be one of: mse, huber")
+    delta = _positive_finite_float(
+        sup.get("huber_delta", 1.0),
+        key_name="supervised.huber_delta",
+    )
+    spatial_raw = _dict_or_empty(sup.get("spatial"))
+    gradient_weight = float(spatial_raw.get("gradient_weight", 0.0))
+    multiscale_weight = float(spatial_raw.get("multiscale_weight", 0.0))
+    boundary_weight = float(spatial_raw.get("boundary_weight", 0.0))
+    if not np.isfinite(gradient_weight) or gradient_weight < 0.0:
+        raise ValueError("supervised.spatial.gradient_weight must be finite and >= 0")
+    if not np.isfinite(multiscale_weight) or multiscale_weight < 0.0:
+        raise ValueError("supervised.spatial.multiscale_weight must be finite and >= 0")
+    if not np.isfinite(boundary_weight) or boundary_weight < 0.0:
+        raise ValueError("supervised.spatial.boundary_weight must be finite and >= 0")
+    boundary_band_px = float(spatial_raw.get("boundary_band_px", 2.0))
+    if not np.isfinite(boundary_band_px) or boundary_band_px <= 0.0:
+        raise ValueError("supervised.spatial.boundary_band_px must be finite and > 0")
+    raw_scales = spatial_raw.get("multiscale_scales", [2, 4])
+    if not isinstance(raw_scales, (list, tuple)) or not raw_scales:
+        raise ValueError("supervised.spatial.multiscale_scales must be a non-empty list")
+    multiscale_scales = tuple(int(value) for value in raw_scales)
+    if (
+        any(isinstance(raw, bool) or float(raw) != float(value) for raw, value in zip(raw_scales, multiscale_scales))
+        or any(value < 2 for value in multiscale_scales)
+        or len(set(multiscale_scales)) != len(multiscale_scales)
+    ):
+        raise ValueError("supervised.spatial.multiscale_scales must contain unique integers >= 2")
+    raw_spacing = spatial_raw.get("gradient_spacing", [1.0, 1.0])
+    if not isinstance(raw_spacing, (list, tuple)) or len(raw_spacing) != 2:
+        raise ValueError("supervised.spatial.gradient_spacing must be [dy, dx]")
+    gradient_spacing = tuple(float(value) for value in raw_spacing)
+    if any(not np.isfinite(value) or value <= 0.0 for value in gradient_spacing):
+        raise ValueError("supervised.spatial.gradient_spacing values must be finite and > 0")
+    gradient_normalization = str(spatial_raw.get("gradient_normalization", "none")).strip().lower()
+    if gradient_normalization not in {"none", "target_rms"}:
+        raise ValueError("supervised.spatial.gradient_normalization must be one of: none, target_rms")
+    gradient_epsilon = _positive_finite_float(
+        spatial_raw.get("gradient_epsilon", 0.05),
+        key_name="supervised.spatial.gradient_epsilon",
+    )
+    physical_raw = _dict_or_empty(sup.get("physical_weighting"))
+    axisymmetric_volume = bool(physical_raw.get("axisymmetric_volume", False))
+    density_source = str(physical_raw.get("density_source", "ne")).strip()
+    density_weighted_targets = tuple(
+        str(name).strip() for name in physical_raw.get("density_weighted_targets", [])
+    )
+    if any(not name for name in density_weighted_targets):
+        raise ValueError("supervised.physical_weighting.density_weighted_targets must contain names")
+    if density_weighted_targets and not density_source:
+        raise ValueError("supervised.physical_weighting.density_source must be non-empty")
+
     return {
-        "type": str(sup.get("type", "mse")).strip().lower(),
-        "delta": float(sup.get("delta", 1.0)),
-        "delta_by_var": dict(sup.get("delta_by_var", {})),
+        "type": supervised_type,
+        "delta": delta,
         "normalization": str(sup.get("normalization", "pixel_mean")).strip().lower(),
         "sample_mean_group_mode": str(sup.get("sample_mean_group_mode", "batch")).strip().lower(),
         "sample_mean_weight_denominator": str(sup.get("sample_mean_weight_denominator", "weighted")).strip().lower(),
         "weighting": str(mt.get("weighting", "fixed")).strip().lower(),
-        "fixed_weights_by_var": dict(mt.get("fixed_weights_by_var", {})),
-        "sigma_init": dict(mt.get("sigma_init", {})),
+        "fixed_weights_by_var": fixed_weights_by_var,
+        "sigma_init": _dict_or_empty(mt.get("sigma_init")),
         "sigma_clamp": tuple(mt.get("sigma_clamp", [-3.0, 3.0])),
-        "region_weighting": region_weighting_cfg,
-        "robust_weighting": dict(sup.get("robust_weighting", {})),
-        "nan_region_policy": str(sup.get("nan_region_policy", "mask_only")).strip().lower(),
-        "sdf_weighting": dict(sup.get("sdf_weighting", {})),
-        "chamber_weight_by_var": dict(sup.get("chamber_weight_by_var", {})),
-        "global_target_region": str(sup.get("global_target_region", "")).strip().lower(),
-        "label_clip_from_scaler": bool(sup.get("label_clip_from_scaler", False)),
-        "robust_clip_stats": dict(sup.get("robust_clip_stats", {})),
-        "sdf_distance_contract": str(sup.get("sdf_distance_contract", "off")).strip().lower(),
-        "chamber_aux": dict(sup.get("chamber_aux", {})),
-        "region_balance": region_balance_cfg,
-        "boundary_type_weighting": dict(sup.get("boundary_type_weighting", {})),
-        "boundary_profile_weighting": dict(sup.get("boundary_profile_weighting", {})),
-        "density_positivity_penalty": dict(sup.get("density_positivity_penalty", {})),
-        "density_relative_weighting": dict(sup.get("density_relative_weighting", {})),
-        "spatial_consistency": dict(sup.get("spatial_consistency", {})),
+        "spatial": {
+            "boundary_band_px": boundary_band_px,
+            "boundary_weight": boundary_weight,
+            "gradient_spacing": gradient_spacing,
+            "gradient_normalization": gradient_normalization,
+            "gradient_epsilon": gradient_epsilon,
+            "gradient_weight": gradient_weight,
+            "multiscale_weight": multiscale_weight,
+            "multiscale_scales": multiscale_scales,
+        },
+        "physical_weighting": {
+            "axisymmetric_volume": axisymmetric_volume,
+            "density_source": density_source,
+            "density_weighted_targets": density_weighted_targets,
+        },
     }
+
+
+def _physical_point_weights_numpy(
+    *,
+    name: str,
+    target_fields: dict[str, Any],
+    shape: tuple[int, int, int],
+    cfg: dict[str, Any],
+    point_weight: np.ndarray | None,
+    target_affine: dict[str, dict[str, float]] | None,
+) -> np.ndarray:
+    """Build only the two physically defined point weights used by the product loss."""
+
+    physical = dict(cfg.get("physical_weighting", {}))
+    weights = np.ones(shape, dtype=np.float32)
+    if bool(physical.get("axisymmetric_volume", False)):
+        if point_weight is None:
+            raise ValueError("axisymmetric_volume weighting requires a radial point_weight map")
+        radial = _as_bhw(point_weight, key="axisymmetric radial point_weight")
+        if radial.shape[0] == 1 and shape[0] > 1:
+            radial = np.repeat(radial, shape[0], axis=0)
+        if radial.shape != shape or np.any(~np.isfinite(radial)) or np.any(radial < 0.0):
+            raise ValueError(f"invalid axisymmetric radial point_weight shape/values: {radial.shape}")
+        weights *= radial
+
+    if name in set(physical.get("density_weighted_targets", ())):
+        source = str(physical.get("density_source", "ne"))
+        if source not in target_fields:
+            raise ValueError(f"density weighting source {source!r} is not present in targets")
+        affine = dict((target_affine or {}).get(source, {}))
+        if "mean" not in affine or "scale" not in affine:
+            raise ValueError(f"density weighting requires linear inverse affine parameters for {source!r}")
+        density_z = _as_bhw(target_fields[source], key=f"target_{source}")
+        if density_z.shape != shape:
+            raise ValueError(f"density weighting source shape mismatch: expected={shape}, got={density_z.shape}")
+        density = density_z.astype(np.float64) * float(affine["scale"]) + float(affine["mean"])
+        density = np.maximum(density, 0.0)
+        if np.any(~np.isfinite(density)):
+            raise ValueError(f"density weighting source {source!r} contains non-finite physical values")
+        weights *= density.astype(np.float32)
+    return weights
+
+
+def _resolve_group_weighting_mode(loss_cfg: dict[str, Any] | None) -> str:
+    cfg = _dict_or_empty(loss_cfg)
+    group_weighting = _dict_or_empty(cfg.get("group_weighting"))
+    mode = str(group_weighting.get("mode", GROUP_WEIGHTING_NONE)).strip().lower()
+    if mode not in GROUP_WEIGHTING_MODES:
+        raise ValueError(
+            "train.loss.group_weighting.mode must be one of: "
+            f"{', '.join(GROUP_WEIGHTING_MODES)}"
+        )
+    return mode
+
+
+def _safe_group_loss_suffix(name: str) -> str:
+    suffix = re.sub(r"[^0-9A-Za-z_]+", "_", str(name).strip()).strip("_")
+    return suffix or "group"
+
+
+def _resolve_loss_target_multipliers(
+    *,
+    y_order: list[str],
+    loss_cfg: dict[str, Any] | None,
+) -> tuple[str, dict[str, float], dict[str, TargetGroup]]:
+    mode = _resolve_group_weighting_mode(loss_cfg)
+    cfg = _dict_or_empty(loss_cfg)
+    group_weighting = _dict_or_empty(cfg.get("group_weighting"))
+    multipliers, groups = resolve_target_weight_multipliers(
+        output_vars=[str(name) for name in y_order],
+        target_role_schema=_dict_or_empty(cfg.get("target_role_schema")),
+        mode=mode,
+        group_weights=_dict_or_empty(group_weighting.get("weights")),
+        context="train.loss.group_weighting",
+    )
+    return mode, multipliers, groups
+
+
+def _append_group_loss_breakdown(
+    per_var_loss: dict[str, float],
+    *,
+    groups: dict[str, TargetGroup],
+) -> None:
+    for group in groups.values():
+        values = [float(per_var_loss[target]) for target in group.targets if target in per_var_loss]
+        if not values:
+            continue
+        per_var_loss[f"loss_supervised_group_{_safe_group_loss_suffix(group.name)}"] = float(sum(values))
+
+
+def _validate_var_payload(payload: dict[str, Any], *, key_name: str, y_order: list[str]) -> None:
+    unknown = sorted(set(str(key) for key in payload.keys()) - set(y_order))
+    if unknown:
+        raise ValueError(f"{key_name} contains unknown vars: {unknown}")
 
 
 def _resolve_sigma_for_var(name: str, base_loss: float, cfg: dict[str, Any]) -> float:
@@ -87,62 +255,13 @@ def _resolve_sigma_for_var(name: str, base_loss: float, cfg: dict[str, Any]) -> 
     return float(np.clip(float(raw), float(lo), float(hi)))
 
 
-def _resolve_density_affine_payload(raw: Any, *, key_name: str, y_order: list[str]) -> dict[str, tuple[float, float]]:
-    payload = dict(raw or {})
-    unknown = sorted(set(str(k) for k in payload.keys()) - set(y_order))
-    if unknown:
-        raise ValueError(f"{key_name} contains unknown vars: {unknown}")
-    out: dict[str, tuple[float, float]] = {}
-    for var_name, stats in payload.items():
-        stats_dict = dict(stats or {})
-        mean = float(stats_dict.get("mean", 0.0))
-        std = float(stats_dict.get("std", 1.0))
-        if not np.isfinite(mean):
-            raise ValueError(f"{key_name}[{var_name}].mean must be finite")
-        if not np.isfinite(std) or std <= 0.0:
-            raise ValueError(f"{key_name}[{var_name}].std must be > 0")
-        out[str(var_name)] = (mean, std)
-    return out
-
-
-def _resolve_scale_payload(raw: Any, *, key_name: str, y_order: list[str]) -> dict[str, float]:
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, float] = {}
-    unknown = sorted(set(str(k) for k in raw.keys()) - set(y_order))
-    if unknown:
-        raise ValueError(f"{key_name} contains unknown vars: {unknown}")
-    for key, value in raw.items():
-        sval = float(value)
-        if not np.isfinite(sval) or sval <= 0.0:
-            raise ValueError(f"{key_name}[{key}] must be finite and > 0")
-        out[str(key)] = sval
-    return out
-
-
 def _huber_loss_and_grad(err: np.ndarray, *, delta: float) -> tuple[np.ndarray, np.ndarray]:
-    d = float(max(delta, 1e-8))
+    d = _positive_finite_float(delta, key_name="supervised.huber_delta")
     abs_err = np.abs(err)
     quad = abs_err <= d
     loss = np.where(quad, 0.5 * err * err, d * (abs_err - 0.5 * d))
     grad = np.where(quad, err, d * np.sign(err))
     return loss.astype(np.float32), grad.astype(np.float32)
-
-
-def _apply_chamber_override_numpy(
-    sw: np.ndarray,
-    *,
-    mask: np.ndarray,
-    var_name: str,
-    chamber_weight_by_var: dict[str, Any],
-) -> np.ndarray:
-    if not chamber_weight_by_var:
-        return sw
-    if var_name not in chamber_weight_by_var:
-        return sw
-    chamber_w = float(chamber_weight_by_var[var_name])
-    chamber = (mask <= 0.5).astype(np.float32)
-    return sw * (1.0 - chamber) + chamber * chamber_w
 
 
 def _weighted_reduce_numpy(
@@ -155,178 +274,264 @@ def _weighted_reduce_numpy(
     group_ids: np.ndarray | None = None,
     group_mode: str = "batch",
 ) -> tuple[float, np.ndarray]:
-    norm = normalization
-    if norm not in {"pixel_mean", "sample_mean", "none"}:
-        raise ValueError(f"Unsupported supervised.normalization: {norm}")
+    if normalization not in {"pixel_mean", "sample_mean", "none"}:
+        raise ValueError(f"Unsupported supervised.normalization: {normalization}")
     if weight_denominator not in {"weighted", "count"}:
         raise ValueError("supervised.sample_mean_weight_denominator must be one of: weighted, count")
-    if norm == "none":
-        base_loss = float(np.sum(loss_map * sw))
-        return base_loss, (grad_map * sw).astype(np.float32)
-    if norm == "sample_mean":
-        b = int(loss_map.shape[0])
-        numer = np.sum(loss_map * sw, axis=(1, 2))
+    active = sw > 0.0
+    safe_loss_map = np.where(active, loss_map, 0.0).astype(np.float32)
+    safe_grad_map = np.where(active, grad_map, 0.0).astype(np.float32)
+    weighted_loss = (safe_loss_map * sw).astype(np.float32)
+    weighted_grad = (safe_grad_map * sw).astype(np.float32)
+    if normalization == "none":
+        return float(np.sum(weighted_loss)), weighted_grad
+    if normalization == "sample_mean":
+        batch = int(loss_map.shape[0])
+        numer = np.sum(weighted_loss, axis=(1, 2))
         if weight_denominator == "count":
             denom = np.maximum(np.sum((sw > 0.0).astype(np.float32), axis=(1, 2)), 1.0)
         else:
-            denom = np.maximum(np.sum(sw, axis=(1, 2)), 1.0)
+            denom = np.maximum(np.sum(sw, axis=(1, 2)), 1.0e-12)
         per_sample = numer / denom
-        grad = (grad_map * sw) / denom[:, None, None]
+        grad = weighted_grad / denom[:, None, None]
         if group_ids is None:
-            base_loss = float(np.mean(per_sample))
-            grad = grad / float(max(b, 1))
-            return base_loss, grad.astype(np.float32)
+            return float(np.mean(per_sample)), (grad / float(max(batch, 1))).astype(np.float32)
         if group_mode != "batch":
             raise ValueError("supervised.sample_mean_group_mode must be one of: batch")
         gids = np.asarray(group_ids).reshape(-1)
-        if gids.shape[0] != b:
-            raise ValueError(f"group_ids length mismatch: expected {b}, got {gids.shape[0]}")
+        if gids.shape[0] != batch:
+            raise ValueError(f"group_ids length mismatch: expected {batch}, got {gids.shape[0]}")
         _, inv = np.unique(gids, return_inverse=True)
         n_groups = int(np.max(inv) + 1) if inv.size > 0 else 0
         if n_groups <= 0:
-            base_loss = float(np.mean(per_sample))
-            grad = grad / float(max(b, 1))
-            return base_loss, grad.astype(np.float32)
+            return float(np.mean(per_sample)), (grad / float(max(batch, 1))).astype(np.float32)
         group_means = np.zeros((n_groups,), dtype=np.float32)
         group_sizes = np.zeros((n_groups,), dtype=np.float32)
         for gi in range(n_groups):
-            m = inv == gi
-            if not np.any(m):
+            active = inv == gi
+            if not np.any(active):
                 continue
-            group_means[gi] = float(np.mean(per_sample[m]))
-            group_sizes[gi] = float(np.sum(m))
-        base_loss = float(np.mean(group_means))
-        group_factor = np.zeros((b,), dtype=np.float32)
+            group_means[gi] = float(np.mean(per_sample[active]))
+            group_sizes[gi] = float(np.sum(active))
+        group_factor = np.zeros((batch,), dtype=np.float32)
         for gi in range(n_groups):
-            m = inv == gi
-            if not np.any(m):
-                continue
-            group_factor[m] = 1.0 / float(max(n_groups * group_sizes[gi], 1.0))
-        grad = grad * group_factor[:, None, None]
-        return base_loss, grad.astype(np.float32)
-    denom = float(max(np.sum(sw), 1.0))
-    base_loss = float(np.sum(loss_map * sw) / denom)
-    grad = (grad_map * sw) / denom
-    return base_loss, grad.astype(np.float32)
+            active = inv == gi
+            if np.any(active):
+                group_factor[active] = 1.0 / float(max(n_groups * group_sizes[gi], 1.0))
+        return float(np.mean(group_means)), (grad * group_factor[:, None, None]).astype(np.float32)
+    denom = float(max(float(np.sum(sw)), 1.0e-12))
+    return float(np.sum(weighted_loss) / denom), (weighted_grad / denom).astype(np.float32)
 
 
-def _weighted_mean_count_numpy(
-    loss_map: np.ndarray,
-    grad_map: np.ndarray,
-    sw: np.ndarray,
-    region_mask: np.ndarray,
-) -> tuple[float, np.ndarray]:
-    reg = np.asarray(region_mask, dtype=np.float32)
-    numer = np.sum(loss_map * sw * reg)
-    denom = float(max(np.sum(reg > 0.0), 1.0))
-    loss = float(numer / denom)
-    grad = (grad_map * sw * reg) / denom
-    return loss, grad.astype(np.float32)
+def _loss_map_and_grad_numpy(err: np.ndarray, cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    if cfg["type"] == "huber":
+        return _huber_loss_and_grad(err, delta=float(cfg["delta"]))
+    return (0.5 * err * err).astype(np.float32), err.astype(np.float32)
 
 
-def _resolve_region_balance_schedule_weights(
-    *,
-    region_balance_cfg: dict[str, Any],
-    w_boundary: float,
-    w_mid: float,
-    w_deep: float,
-    epoch_idx: int | None,
-) -> tuple[float, float, float]:
-    schedule_cfg = dict(region_balance_cfg.get("schedule", {}))
-    if not bool(schedule_cfg.get("enabled", False)):
-        return float(w_boundary), float(w_mid), float(w_deep)
-    warmup = max(int(schedule_cfg.get("warmup_epochs", 0)), 0)
-    ramp = max(int(schedule_cfg.get("ramp_epochs", 0)), 0)
-    e = max(int(epoch_idx or 0), 0)
-    if e <= warmup:
-        t = 0.0
-    elif ramp <= 0:
-        t = 1.0
-    else:
-        t = float(np.clip((e - warmup) / float(ramp), 0.0, 1.0))
-    b_start = float(schedule_cfg.get("boundary_start", w_boundary))
-    b_end = float(schedule_cfg.get("boundary_end", w_boundary))
-    m_start = float(schedule_cfg.get("mid_start", w_mid))
-    m_end = float(schedule_cfg.get("mid_end", w_mid))
-    d_start = float(schedule_cfg.get("deep_start", w_deep))
-    d_end = float(schedule_cfg.get("deep_end", w_deep))
-    return (
-        float((1.0 - t) * b_start + t * b_end),
-        float((1.0 - t) * m_start + t * m_end),
-        float((1.0 - t) * d_start + t * d_end),
-    )
-
-
-def _spatial_consistency_grad_huber_numpy(
-    *,
+def _sanitize_supervised_numpy(
     pred: np.ndarray,
     target: np.ndarray,
-    region_mask: np.ndarray,
-    delta: float,
-) -> tuple[float, np.ndarray]:
-    pred_arr = np.asarray(pred, dtype=np.float32)
-    tgt_arr = np.asarray(target, dtype=np.float32)
-    reg = np.asarray(region_mask, dtype=np.float32)
-    grad_total = np.zeros_like(pred_arr, dtype=np.float32)
-    loss_total = 0.0
-
-    # Horizontal edges.
-    err_x = (pred_arr[:, :, 1:] - pred_arr[:, :, :-1]) - (tgt_arr[:, :, 1:] - tgt_arr[:, :, :-1])
-    mask_x = (reg[:, :, 1:] > 0.5).astype(np.float32) * (reg[:, :, :-1] > 0.5).astype(np.float32)
-    if np.any(mask_x > 0.0):
-        l_x, g_x = _huber_loss_and_grad(err_x, delta=delta)
-        denom_x = float(max(np.sum(mask_x > 0.0), 1.0))
-        g_x = (g_x * mask_x) / denom_x
-        loss_total += float(np.sum(l_x * mask_x) / denom_x)
-        grad_total[:, :, 1:] += g_x
-        grad_total[:, :, :-1] -= g_x
-
-    # Vertical edges.
-    err_y = (pred_arr[:, 1:, :] - pred_arr[:, :-1, :]) - (tgt_arr[:, 1:, :] - tgt_arr[:, :-1, :])
-    mask_y = (reg[:, 1:, :] > 0.5).astype(np.float32) * (reg[:, :-1, :] > 0.5).astype(np.float32)
-    if np.any(mask_y > 0.0):
-        l_y, g_y = _huber_loss_and_grad(err_y, delta=delta)
-        denom_y = float(max(np.sum(mask_y > 0.0), 1.0))
-        g_y = (g_y * mask_y) / denom_y
-        loss_total += float(np.sum(l_y * mask_y) / denom_y)
-        grad_total[:, 1:, :] += g_y
-        grad_total[:, :-1, :] -= g_y
-
-    return float(loss_total), grad_total.astype(np.float32)
-
-
-def _avg_pool2d_bhw(arr: np.ndarray, scale: int) -> tuple[np.ndarray, tuple[int, int]]:
-    if scale <= 1:
-        return np.asarray(arr, dtype=np.float32), (int(arr.shape[-2]), int(arr.shape[-1]))
-    h = int(arr.shape[-2])
-    w = int(arr.shape[-1])
-    h_eff = (h // scale) * scale
-    w_eff = (w // scale) * scale
-    if h_eff <= 0 or w_eff <= 0:
-        return np.asarray(arr, dtype=np.float32), (h, w)
-    cropped = np.asarray(arr[..., :h_eff, :w_eff], dtype=np.float32)
-    pooled = cropped.reshape(cropped.shape[0], h_eff // scale, scale, w_eff // scale, scale).mean(axis=(2, 4))
-    return pooled.astype(np.float32), (h_eff, w_eff)
-
-
-def _avg_unpool2d_bhw(
-    grad_small: np.ndarray,
+    sw: np.ndarray,
     *,
-    full_shape: tuple[int, int, int],
-    crop_shape: tuple[int, int],
-    scale: int,
+    name: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    weights = np.asarray(sw, dtype=np.float32)
+    if not np.all(np.isfinite(weights)):
+        raise ValueError(f"mask contains non-finite values for {name}")
+    if np.any(weights < 0.0):
+        raise ValueError(f"mask contains negative values for {name}")
+    active = weights > 0.0
+    invalid_active = active & (~np.isfinite(pred) | ~np.isfinite(target))
+    if np.any(invalid_active):
+        count = int(np.sum(invalid_active))
+        raise ValueError(f"non-finite prediction/target on active mask for {name}: count={count}")
+    pred_safe = np.where(active, pred, 0.0).astype(np.float32)
+    target_safe = np.where(active, target, 0.0).astype(np.float32)
+    return pred_safe, target_safe, weights
+
+
+def _require_nonempty_case_weights_numpy(
+    weights: np.ndarray,
+    *,
+    name: str,
+    component: str,
+) -> None:
+    active_per_case = np.sum(np.asarray(weights) > 0.0, axis=(1, 2))
+    empty = np.flatnonzero(active_per_case <= 0)
+    if empty.size:
+        raise ValueError(
+            f"supervised {component} has no active samples for {name}: "
+            f"case_indices={empty.astype(int).tolist()}"
+        )
+
+
+def _boundary_weights_numpy(
+    distance_any: np.ndarray | None,
+    sw: np.ndarray,
+    *,
+    band_px: float,
+    name: str,
 ) -> np.ndarray:
-    b, h, w = int(full_shape[0]), int(full_shape[1]), int(full_shape[2])
-    if scale <= 1:
-        return np.asarray(grad_small, dtype=np.float32).reshape(b, h, w)
-    h_eff, w_eff = int(crop_shape[0]), int(crop_shape[1])
-    out = np.zeros((b, h, w), dtype=np.float32)
-    if h_eff <= 0 or w_eff <= 0:
-        return out
-    grad = np.asarray(grad_small, dtype=np.float32)[:, : h_eff // scale, : w_eff // scale]
-    tiled = np.repeat(np.repeat(grad, scale, axis=1), scale, axis=2) / float(scale * scale)
-    out[:, :h_eff, :w_eff] = tiled.astype(np.float32)
-    return out
+    if distance_any is None:
+        raise ValueError("supervised.spatial.boundary_weight > 0 requires distance_any")
+    distance = _as_bhw(distance_any, key="distance_any")
+    if distance.shape[0] == 1 and sw.shape[0] > 1:
+        distance = np.repeat(distance, sw.shape[0], axis=0)
+    if distance.shape != sw.shape:
+        raise ValueError(f"distance_any shape mismatch for {name}: expected {sw.shape}, got {distance.shape}")
+    active = sw > 0.0
+    invalid_active = active & ~np.isfinite(distance)
+    if np.any(invalid_active):
+        count = int(np.sum(invalid_active))
+        raise ValueError(f"distance_any is non-finite on active mask for {name}: count={count}")
+    boundary = active & (np.abs(np.where(active, distance, 0.0)) <= float(band_px))
+    boundary_weights = np.where(boundary, sw, 0.0).astype(np.float32)
+    _require_nonempty_case_weights_numpy(
+        boundary_weights,
+        name=name,
+        component="boundary band",
+    )
+    return boundary_weights
+
+
+def _gradient_loss_numpy(
+    pred: np.ndarray,
+    target: np.ndarray,
+    sw: np.ndarray,
+    *,
+    cfg: dict[str, Any],
+    normalization: str,
+    weight_denominator: str,
+    group_ids: np.ndarray | None,
+    spacing: tuple[float, float],
+    gradient_normalization: str,
+    gradient_epsilon: float,
+) -> tuple[float, np.ndarray]:
+    edge_counts = np.zeros((int(pred.shape[0]),), dtype=np.int64)
+    if int(pred.shape[1]) >= 2:
+        edge_counts += np.sum(
+            np.minimum(sw[:, 1:, :], sw[:, :-1, :]) > 0.0,
+            axis=(1, 2),
+        )
+    if int(pred.shape[2]) >= 2:
+        edge_counts += np.sum(
+            np.minimum(sw[:, :, 1:], sw[:, :, :-1]) > 0.0,
+            axis=(1, 2),
+        )
+    empty = np.flatnonzero(edge_counts <= 0)
+    if empty.size:
+        raise ValueError(
+            "supervised spatial gradient has no active adjacent pixels: "
+            f"case_indices={empty.astype(int).tolist()}"
+        )
+    losses: list[float] = []
+    grads: list[np.ndarray] = []
+    for axis, axis_spacing in zip((1, 2), spacing):
+        if int(pred.shape[axis]) < 2:
+            continue
+        pred_diff = np.diff(pred, axis=axis).astype(np.float32)
+        target_diff = np.diff(target, axis=axis).astype(np.float32)
+        if axis == 1:
+            pair_sw = np.minimum(sw[:, 1:, :], sw[:, :-1, :]).astype(np.float32)
+        else:
+            pair_sw = np.minimum(sw[:, :, 1:], sw[:, :, :-1]).astype(np.float32)
+        scale = np.ones((int(pred.shape[0]), 1, 1), dtype=np.float32)
+        if gradient_normalization == "target_rms":
+            target_gradient = np.where(
+                pair_sw > 0.0,
+                target_diff / float(axis_spacing),
+                0.0,
+            ).astype(np.float32)
+            weighted_energy = np.sum(pair_sw * target_gradient * target_gradient, axis=(1, 2))
+            weight_sum = np.sum(pair_sw, axis=(1, 2))
+            scale[:, 0, 0] = np.maximum(
+                np.sqrt(weighted_energy / np.maximum(weight_sum, 1.0)),
+                float(gradient_epsilon),
+            )
+        loss_map, grad_map = _loss_map_and_grad_numpy(
+            (pred_diff - target_diff) / float(axis_spacing) / scale,
+            cfg,
+        )
+        loss, edge_grad = _weighted_reduce_numpy(
+            loss_map,
+            grad_map,
+            pair_sw,
+            normalization=normalization,
+            weight_denominator=weight_denominator,
+            group_ids=group_ids,
+        )
+        grad = np.zeros_like(pred, dtype=np.float32)
+        edge_grad = edge_grad / float(axis_spacing) / scale
+        if axis == 1:
+            grad[:, 1:, :] += edge_grad
+            grad[:, :-1, :] -= edge_grad
+        else:
+            grad[:, :, 1:] += edge_grad
+            grad[:, :, :-1] -= edge_grad
+        losses.append(float(loss))
+        grads.append(grad)
+    if not losses:
+        return 0.0, np.zeros_like(pred, dtype=np.float32)
+    return float(np.mean(losses)), (np.sum(grads, axis=0) / float(len(grads))).astype(np.float32)
+
+
+def _masked_pool_numpy(
+    values: np.ndarray,
+    sw: np.ndarray,
+    *,
+    scale: int,
+) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, int, int]]:
+    batch, height, width = values.shape
+    out_h = (height + int(scale) - 1) // int(scale)
+    out_w = (width + int(scale) - 1) // int(scale)
+    padded_h = out_h * int(scale)
+    padded_w = out_w * int(scale)
+    pad_h = padded_h - height
+    pad_w = padded_w - width
+    values_pad = np.pad(values, ((0, 0), (0, pad_h), (0, pad_w)), constant_values=0.0)
+    valid_pad = np.pad((sw > 0.0).astype(np.float32), ((0, 0), (0, pad_h), (0, pad_w)), constant_values=0.0)
+    value_blocks = values_pad.reshape(batch, out_h, scale, out_w, scale)
+    valid_blocks = valid_pad.reshape(batch, out_h, scale, out_w, scale)
+    valid_count = np.sum(valid_blocks, axis=(2, 4), keepdims=True).astype(np.float32)
+    safe_count = np.maximum(valid_count, 1.0).astype(np.float32)
+    pooled = (np.sum(value_blocks * valid_blocks, axis=(2, 4), keepdims=True) / safe_count)[:, :, 0, :, 0]
+    valid_fraction = (valid_count[:, :, 0, :, 0] / float(scale * scale)).astype(np.float32)
+    return pooled.astype(np.float32), valid_fraction, (valid_blocks, safe_count, height, width)
+
+
+def _multiscale_loss_numpy(
+    pred: np.ndarray,
+    target: np.ndarray,
+    sw: np.ndarray,
+    *,
+    cfg: dict[str, Any],
+    normalization: str,
+    weight_denominator: str,
+    group_ids: np.ndarray | None,
+    scales: tuple[int, ...],
+) -> tuple[float, np.ndarray]:
+    losses: list[float] = []
+    grads: list[np.ndarray] = []
+    for scale in scales:
+        pred_pool, pool_sw, cache = _masked_pool_numpy(pred, sw, scale=scale)
+        target_pool, _, _ = _masked_pool_numpy(target, sw, scale=scale)
+        loss_map, grad_map = _loss_map_and_grad_numpy(pred_pool - target_pool, cfg)
+        loss, pool_grad = _weighted_reduce_numpy(
+            loss_map,
+            grad_map,
+            pool_sw,
+            normalization=normalization,
+            weight_denominator=weight_denominator,
+            group_ids=group_ids,
+        )
+        valid_blocks, safe_count, height, width = cache
+        expanded = pool_grad[:, :, None, :, None] * valid_blocks / safe_count
+        padded_grad = expanded.reshape(pred.shape[0], valid_blocks.shape[1] * scale, valid_blocks.shape[3] * scale)
+        grad = padded_grad[:, :height, :width].astype(np.float32)
+        losses.append(float(loss))
+        grads.append(grad)
+    return float(np.mean(losses)), (np.sum(grads, axis=0) / float(len(grads))).astype(np.float32)
 
 
 def compose_supervised_numpy(
@@ -342,749 +547,372 @@ def compose_supervised_numpy(
     wafer_mask: np.ndarray | None = None,
     group_ids: np.ndarray | None = None,
     epoch_idx: int | None = None,
+    point_weight: np.ndarray | None = None,
+    target_affine: dict[str, dict[str, float]] | None = None,
 ) -> tuple[float, dict[str, np.ndarray], dict[str, float]]:
-    """Compose supervised loss/gradients for grid outputs with optional mask and uncertainty weighting."""
+    """Compose the product supervised loss for grid outputs."""
 
     cfg = _resolve_supervised_cfg(loss_cfg)
     mask_arr = None if mask is None else _as_bhw(mask, key="mask")
-    distance_arr = None if distance_any is None else _as_bhw(distance_any, key="distance_any")
-    region_cfg = dict(cfg.get("region_weighting", {}))
-    use_region = bool(region_cfg.get("enabled", False))
-    boundary_delta = float(region_cfg.get("boundary_delta", 2.0))
-    w_bulk = float(region_cfg.get("w_bulk", 1.0))
-    w_boundary = float(region_cfg.get("w_boundary", 3.0))
-    robust_cfg = dict(cfg.get("robust_weighting", {}))
-    use_robust = bool(robust_cfg.get("enabled", False))
-    robust_vars = {str(v) for v in robust_cfg.get("vars", ["phi", "Te"])}
-    robust_mad_scale = float(robust_cfg.get("mad_scale", 3.0))
-    robust_min_weight = float(robust_cfg.get("min_weight", 0.2))
     normalization = str(cfg.get("normalization", "pixel_mean")).strip().lower()
     sample_mean_group_mode = str(cfg.get("sample_mean_group_mode", "batch")).strip().lower()
     sample_mean_weight_denominator = str(cfg.get("sample_mean_weight_denominator", "weighted")).strip().lower()
     if sample_mean_group_mode != "batch":
         raise ValueError("supervised.sample_mean_group_mode must be one of: batch")
-    delta_by_var = dict(cfg.get("delta_by_var", {}))
-    unknown_delta_vars = sorted(set(str(k) for k in delta_by_var.keys()) - set(y_order))
-    if unknown_delta_vars:
-        raise ValueError(f"supervised.delta_by_var contains unknown vars: {unknown_delta_vars}")
-    for k, v in delta_by_var.items():
-        if float(v) <= 0.0:
-            raise ValueError(f"supervised.delta_by_var[{k}] must be > 0")
-    fixed_weights_by_var = dict(cfg.get("fixed_weights_by_var", {}))
-    if cfg["weighting"] != "fixed" and len(fixed_weights_by_var) > 0:
+
+    _mode, target_multipliers, target_groups = _resolve_loss_target_multipliers(
+        y_order=y_order,
+        loss_cfg=loss_cfg,
+    )
+
+    fixed_weights_by_var = _dict_or_empty(cfg.get("fixed_weights_by_var"))
+    _validate_var_payload(fixed_weights_by_var, key_name="multitask.fixed_weights_by_var", y_order=y_order)
+    if cfg["weighting"] != "fixed" and fixed_weights_by_var:
         raise ValueError("multitask.fixed_weights_by_var requires multitask.weighting=fixed")
-    unknown_fixed_weight_vars = sorted(set(str(k) for k in fixed_weights_by_var.keys()) - set(y_order))
-    if unknown_fixed_weight_vars:
-        raise ValueError(f"multitask.fixed_weights_by_var contains unknown vars: {unknown_fixed_weight_vars}")
-    nan_region_policy = str(cfg.get("nan_region_policy", "mask_only")).strip().lower()
-    if nan_region_policy not in {"mask_only", "sdf_continuous"}:
-        raise ValueError(f"Unsupported supervised.nan_region_policy: {nan_region_policy}")
-    sdf_distance_contract = str(cfg.get("sdf_distance_contract", "off")).strip().lower()
-    if sdf_distance_contract not in {"off", "warn", "error"}:
-        raise ValueError("supervised.sdf_distance_contract must be one of: off, warn, error")
-    global_target_region = str(cfg.get("global_target_region", "")).strip().lower()
-    if global_target_region and global_target_region not in {"plasma_only", "sdf_continuous"}:
-        raise ValueError(f"Unsupported supervised.global_target_region: {global_target_region}")
-    effective_region_policy = nan_region_policy
-    if global_target_region == "plasma_only":
-        effective_region_policy = "mask_only"
-    elif global_target_region == "sdf_continuous":
-        effective_region_policy = "sdf_continuous"
-    sdf_cfg = dict(cfg.get("sdf_weighting", {}))
-    chamber_weight_by_var = dict(cfg.get("chamber_weight_by_var", {}))
-    chamber_aux_cfg = dict(cfg.get("chamber_aux", {}))
-    region_balance_cfg = dict(cfg.get("region_balance", {}))
-    boundary_type_cfg = dict(cfg.get("boundary_type_weighting", {}))
-    boundary_profile_cfg = dict(cfg.get("boundary_profile_weighting", {}))
-    density_pos_cfg = dict(cfg.get("density_positivity_penalty", {}))
-    density_rel_cfg = dict(cfg.get("density_relative_weighting", {}))
-    spatial_consistency_cfg = dict(cfg.get("spatial_consistency", {}))
-    boundary_type_enabled = bool(boundary_type_cfg.get("enabled", False))
-    boundary_type_vars = {str(v) for v in boundary_type_cfg.get("vars", ["Te", "phi"])}
-    boundary_type_band_px = float(boundary_type_cfg.get("band_px", 2.0))
-    boundary_type_weights = dict(boundary_type_cfg.get("weights", {}))
-    boundary_type_weight_interface = float(boundary_type_weights.get("interface", 1.0))
-    boundary_type_weight_bc_dir = float(boundary_type_weights.get("bc_dir", 1.0))
-    boundary_type_weight_wafer = float(boundary_type_weights.get("wafer", 1.0))
-    if boundary_type_weight_interface < 0.0 or boundary_type_weight_bc_dir < 0.0 or boundary_type_weight_wafer < 0.0:
-        raise ValueError("supervised.boundary_type_weighting.weights must be >= 0")
-    if boundary_type_enabled:
-        unknown_boundary_type_vars = sorted(boundary_type_vars - set(y_order))
-        if unknown_boundary_type_vars:
-            raise ValueError(
-                f"supervised.boundary_type_weighting.vars contains unknown vars: {unknown_boundary_type_vars}"
-            )
-    boundary_profile_enabled = bool(boundary_profile_cfg.get("enabled", False))
-    boundary_profile_vars = {str(v) for v in boundary_profile_cfg.get("vars", ["Te", "phi"])}
-    boundary_profile_mode = str(boundary_profile_cfg.get("mode", "exp_decay")).strip().lower()
-    if boundary_profile_mode not in {"exp_decay"}:
-        raise ValueError("supervised.boundary_profile_weighting.mode must be: exp_decay")
-    boundary_profile_band_px = float(boundary_profile_cfg.get("band_px", 2.0))
-    boundary_profile_alpha = float(boundary_profile_cfg.get("alpha", 0.35))
-    boundary_profile_tau_px = float(boundary_profile_cfg.get("tau_px", 0.8))
-    boundary_profile_norm_plasma = bool(boundary_profile_cfg.get("normalize_plasma_mean_one", False))
-    if boundary_profile_band_px <= 0.0:
-        raise ValueError("supervised.boundary_profile_weighting.band_px must be > 0")
-    if boundary_profile_tau_px <= 0.0:
-        raise ValueError("supervised.boundary_profile_weighting.tau_px must be > 0")
-    if boundary_profile_alpha < 0.0:
-        raise ValueError("supervised.boundary_profile_weighting.alpha must be >= 0")
-    if boundary_profile_enabled:
-        unknown_boundary_profile_vars = sorted(boundary_profile_vars - set(y_order))
-        if unknown_boundary_profile_vars:
-            raise ValueError(
-                f"supervised.boundary_profile_weighting.vars contains unknown vars: {unknown_boundary_profile_vars}"
-            )
-    boundary_profile_mid_px = float(boundary_profile_cfg.get("mid_plasma_px", boundary_profile_cfg.get("deep_plasma_px", 10.0)))
-    boundary_profile_deep_px = float(boundary_profile_cfg.get("deep_plasma_px", 10.0))
-    boundary_profile_parts_raw = dict(boundary_profile_cfg.get("parts", {}))
-    valid_boundary_profile_parts = {"boundary_in", "plasma_mid", "plasma_deep"}
-    unknown_boundary_profile_parts = sorted(set(str(k) for k in boundary_profile_parts_raw.keys()) - valid_boundary_profile_parts)
-    if unknown_boundary_profile_parts:
-        raise ValueError(
-            "supervised.boundary_profile_weighting.parts contains unknown regions: "
-            f"{unknown_boundary_profile_parts}"
-        )
-    boundary_profile_parts: dict[str, tuple[float, float]] = {}
-    for part_name, part_cfg_raw in boundary_profile_parts_raw.items():
-        part_cfg = dict(part_cfg_raw or {})
-        part_alpha = float(part_cfg.get("alpha", boundary_profile_alpha))
-        part_tau = float(part_cfg.get("tau_px", boundary_profile_tau_px))
-        if part_alpha < 0.0:
-            raise ValueError(f"supervised.boundary_profile_weighting.parts.{part_name}.alpha must be >= 0")
-        if part_tau <= 0.0:
-            raise ValueError(f"supervised.boundary_profile_weighting.parts.{part_name}.tau_px must be > 0")
-        boundary_profile_parts[str(part_name)] = (part_alpha, part_tau)
-    if not boundary_profile_parts:
-        boundary_profile_parts = {"boundary_in": (boundary_profile_alpha, boundary_profile_tau_px)}
-    boundary_profile_type_mult = dict(boundary_profile_cfg.get("type_multiplier", {}))
-    boundary_profile_weight_interface = float(boundary_profile_type_mult.get("interface", 1.0))
-    boundary_profile_weight_bc_dir = float(boundary_profile_type_mult.get("bc_dir", 1.0))
-    boundary_profile_weight_wafer = float(boundary_profile_type_mult.get("wafer", 1.0))
-    if (
-        boundary_profile_weight_interface < 0.0
-        or boundary_profile_weight_bc_dir < 0.0
-        or boundary_profile_weight_wafer < 0.0
-    ):
-        raise ValueError("supervised.boundary_profile_weighting.type_multiplier values must be >= 0")
-    density_pos_enabled = bool(density_pos_cfg.get("enabled", False))
-    density_pos_vars = {str(v) for v in density_pos_cfg.get("vars", ["ne", "ni"])}
-    density_pos_floor = float(density_pos_cfg.get("floor", 0.0))
-    density_pos_lambda = float(density_pos_cfg.get("lambda", 0.0))
-    density_pos_affine_by_var = _resolve_density_affine_payload(
-        density_pos_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_positivity_penalty.affine_by_var",
-        y_order=y_order,
-    )
-    if density_pos_lambda < 0.0:
-        raise ValueError("supervised.density_positivity_penalty.lambda must be >= 0")
-    if density_pos_enabled:
-        unknown_density_pos_vars = sorted(density_pos_vars - set(y_order))
-        if unknown_density_pos_vars:
-            raise ValueError(
-                "supervised.density_positivity_penalty.vars contains unknown vars: "
-                f"{unknown_density_pos_vars}"
-            )
-    density_rel_enabled = bool(density_rel_cfg.get("enabled", False))
-    density_rel_vars = {str(v) for v in density_rel_cfg.get("vars", ["ne", "ni"])}
-    density_rel_lambda = float(density_rel_cfg.get("lambda", 0.0))
-    density_rel_affine_by_var = _resolve_density_affine_payload(
-        density_rel_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_relative_weighting.affine_by_var",
-        y_order=y_order,
-    )
-    if density_rel_lambda < 0.0:
-        raise ValueError("supervised.density_relative_weighting.lambda must be >= 0")
-    density_rel_eps_default = float(density_rel_cfg.get("eps", 1.0e-6))
-    density_rel_eps_min = float(density_rel_cfg.get("eps_min", 1.0e-8))
-    if density_rel_eps_default <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps must be > 0")
-    if density_rel_eps_min <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps_min must be > 0")
-    density_rel_eps_by_var = {str(k): float(v) for k, v in dict(density_rel_cfg.get("eps_by_var", {})).items()}
-    unknown_density_rel_eps_vars = sorted(set(density_rel_eps_by_var.keys()) - set(y_order))
-    if unknown_density_rel_eps_vars:
-        raise ValueError(
-            "supervised.density_relative_weighting.eps_by_var contains unknown vars: "
-            f"{unknown_density_rel_eps_vars}"
-        )
-    for key, value in density_rel_eps_by_var.items():
-        if float(value) <= 0.0:
-            raise ValueError(f"supervised.density_relative_weighting.eps_by_var[{key}] must be > 0")
-    if density_rel_enabled:
-        unknown_density_rel_vars = sorted(density_rel_vars - set(y_order))
-        if unknown_density_rel_vars:
-            raise ValueError(
-                "supervised.density_relative_weighting.vars contains unknown vars: "
-                f"{unknown_density_rel_vars}"
-            )
-    spatial_consistency_enabled = bool(spatial_consistency_cfg.get("enabled", False))
-    spatial_consistency_mode = str(spatial_consistency_cfg.get("mode", "grad_huber")).strip().lower()
-    if spatial_consistency_mode not in {"grad_huber"}:
-        raise ValueError("supervised.spatial_consistency.mode must be: grad_huber")
-    spatial_consistency_lambda = float(spatial_consistency_cfg.get("lambda", 0.05))
-    if spatial_consistency_lambda < 0.0:
-        raise ValueError("supervised.spatial_consistency.lambda must be >= 0")
-    spatial_consistency_delta = float(spatial_consistency_cfg.get("delta", 1.0))
-    if spatial_consistency_delta <= 0.0:
-        raise ValueError("supervised.spatial_consistency.delta must be > 0")
-    spatial_consistency_vars = {str(v) for v in spatial_consistency_cfg.get("vars", y_order)}
-    unknown_spatial_consistency_vars = sorted(spatial_consistency_vars - set(y_order))
-    if unknown_spatial_consistency_vars:
-        raise ValueError(
-            "supervised.spatial_consistency.vars contains unknown vars: "
-            f"{unknown_spatial_consistency_vars}"
-        )
-    spatial_consistency_region = str(spatial_consistency_cfg.get("apply_region", "plasma_only")).strip().lower()
-    if spatial_consistency_region not in {"plasma_only"}:
-        raise ValueError("supervised.spatial_consistency.apply_region must be: plasma_only")
-    spatial_consistency_normalize = bool(spatial_consistency_cfg.get("normalize_by_var_scale", False))
-    spatial_consistency_scale_by_var = _resolve_scale_payload(
-        spatial_consistency_cfg.get("scale_by_var", {}),
-        key_name="supervised.spatial_consistency.scale_by_var",
-        y_order=y_order,
-    )
-    spatial_consistency_ms_cfg = dict(spatial_consistency_cfg.get("multiscale", {}))
-    spatial_consistency_ms_enabled = bool(spatial_consistency_ms_cfg.get("enabled", False))
-    spatial_consistency_ms_scales_raw = spatial_consistency_ms_cfg.get("scales", [1, 2, 4])
-    if not isinstance(spatial_consistency_ms_scales_raw, list) or len(spatial_consistency_ms_scales_raw) == 0:
-        raise ValueError("supervised.spatial_consistency.multiscale.scales must be a non-empty list")
-    spatial_consistency_ms_scales = [int(max(int(v), 1)) for v in spatial_consistency_ms_scales_raw]
-    spatial_consistency_ms_weights_raw = spatial_consistency_ms_cfg.get("scale_weights", [1.0] * len(spatial_consistency_ms_scales))
-    if not isinstance(spatial_consistency_ms_weights_raw, list) or len(spatial_consistency_ms_weights_raw) != len(spatial_consistency_ms_scales):
-        raise ValueError("supervised.spatial_consistency.multiscale.scale_weights must match scales length")
-    spatial_consistency_ms_weights = [float(v) for v in spatial_consistency_ms_weights_raw]
-    if any((not np.isfinite(v) or v < 0.0) for v in spatial_consistency_ms_weights):
-        raise ValueError("supervised.spatial_consistency.multiscale.scale_weights must be finite and >= 0")
-    region_balance_enabled = bool(region_balance_cfg.get("enabled", False))
-    region_balance_mode = str(region_balance_cfg.get("mode", "replace")).strip().lower()
-    if region_balance_mode not in {"replace", "additive"}:
-        raise ValueError("supervised.region_balance.mode must be one of: replace, additive")
-    region_balance_lambda = float(region_balance_cfg.get("additive_lambda", 0.25))
-    if region_balance_lambda < 0.0:
-        raise ValueError("supervised.region_balance.additive_lambda must be >= 0")
-    region_balance_boundary_px = float(region_balance_cfg.get("boundary_in_px", 2.0))
-    region_balance_mid_px = float(region_balance_cfg.get("mid_plasma_px", region_balance_cfg.get("deep_plasma_px", 10.0)))
-    region_balance_deep_px = float(region_balance_cfg.get("deep_plasma_px", 10.0))
-    region_balance_vars = {str(v) for v in region_balance_cfg.get("vars", ["log_ne", "log_ni"])}
-    region_balance_w_boundary = float(region_balance_cfg.get("weight_boundary_in", 0.6))
-    region_balance_w_mid = float(region_balance_cfg.get("weight_plasma_mid", 0.0))
-    region_balance_w_deep = float(region_balance_cfg.get("weight_deep_plasma", 0.4))
-    region_balance_w_boundary, region_balance_w_mid, region_balance_w_deep = _resolve_region_balance_schedule_weights(
-        region_balance_cfg=region_balance_cfg,
-        w_boundary=region_balance_w_boundary,
-        w_mid=region_balance_w_mid,
-        w_deep=region_balance_w_deep,
-        epoch_idx=epoch_idx,
-    )
-    region_balance_reduce = str(region_balance_cfg.get("reduce", "mean_count")).strip().lower()
-    if region_balance_reduce not in {"mean_count"}:
-        raise ValueError("supervised.region_balance.reduce must be: mean_count")
-    chamber_aux_enabled = bool(chamber_aux_cfg.get("enabled", False))
-    chamber_aux_scope = str(chamber_aux_cfg.get("scope", "band_only")).strip().lower()
-    if chamber_aux_scope not in {"band_only", "full"}:
-        raise ValueError("supervised.chamber_aux.scope must be one of: band_only, full")
-    chamber_aux_band_px = float(chamber_aux_cfg.get("band_px", 2.0))
-    chamber_aux_weight_by_var = dict(chamber_aux_cfg.get("weight_by_var", {}))
-    chamber_aux_grad_clip_abs = float(chamber_aux_cfg.get("grad_clip_abs", 3.0))
-    robust_clip_stats = dict(cfg.get("robust_clip_stats", {}))
+
     grads: dict[str, np.ndarray] = {}
     per_var_loss: dict[str, float] = {}
     total = 0.0
-    chamber_aux_total = 0.0
-    density_pos_total = 0.0
-    density_rel_total = 0.0
-    spatial_consistency_total = 0.0
-    region_boundary_total = 0.0
-    region_mid_total = 0.0
-    region_deep_total = 0.0
-    eps = 1e-8
-    bc_dir_arr = None if bc_dir_mask is None else _as_bhw(bc_dir_mask, key="bc_dir_mask")
-    wafer_arr = None if wafer_mask is None else _as_bhw(wafer_mask, key="wafer_mask")
-    signed_arr = None if distance_signed is None else _as_bhw(distance_signed, key="distance_signed")
-    profile_region_masks_cache: dict[str, np.ndarray] | None = None
-    profile_type_masks_cache: dict[str, np.ndarray] | None = None
-
     for name in y_order:
         pred = _as_bhw(pred_fields[name], key=f"pred_{name}")
-        tgt = _as_bhw(target_fields[name], key=f"target_{name}")
-        if bool(cfg.get("label_clip_from_scaler", False)):
-            clip_stats = dict(robust_clip_stats.get(name, {}))
-            if "clip_q01" in clip_stats and "clip_q99" in clip_stats:
-                q_lo = float(clip_stats["clip_q01"])
-                q_hi = float(clip_stats["clip_q99"])
-                tgt = np.clip(tgt, q_lo, q_hi).astype(np.float32)
-        err = (pred - tgt).astype(np.float32)
-        var_delta = float(delta_by_var.get(name, cfg["delta"])) if delta_by_var else float(cfg["delta"])
-        if cfg["type"] == "huber":
-            loss_map, grad_map = _huber_loss_and_grad(err, delta=var_delta)
-        else:
-            loss_map = 0.5 * err * err
-            grad_map = err
+        target = _as_bhw(target_fields[name], key=f"target_{name}")
+        if pred.shape != target.shape:
+            raise ValueError(f"prediction/target shape mismatch for {name}: pred={pred.shape}, target={target.shape}")
+        sw = np.ones_like(pred, dtype=np.float32)
+        if mask_arr is not None:
+            sw = mask_arr
+            if sw.shape[0] == 1 and pred.shape[0] > 1:
+                sw = np.repeat(sw, pred.shape[0], axis=0)
+            if sw.shape != pred.shape:
+                raise ValueError(f"mask shape mismatch for {name}: expected {pred.shape}, got {sw.shape}")
+        sw = sw * _physical_point_weights_numpy(
+            name=name,
+            target_fields=target_fields,
+            shape=pred.shape,
+            cfg=cfg,
+            point_weight=point_weight,
+            target_affine=target_affine,
+        )
+        pred, target, sw = _sanitize_supervised_numpy(pred, target, sw, name=name)
+        if normalization == "sample_mean":
+            _require_nonempty_case_weights_numpy(
+                sw,
+                name=name,
+                component="point loss",
+            )
+        loss_map, grad_map = _loss_map_and_grad_numpy((pred - target).astype(np.float32), cfg)
 
-        if mask_arr is None:
-            sw = np.ones_like(loss_map, dtype=np.float32)
-            base_loss, grad = _weighted_reduce_numpy(
+        point_loss, grad = _weighted_reduce_numpy(
+            loss_map,
+            grad_map,
+            sw,
+            normalization=normalization,
+            weight_denominator=sample_mean_weight_denominator,
+            group_ids=group_ids,
+            group_mode=sample_mean_group_mode,
+        )
+        spatial_cfg = dict(cfg["spatial"])
+        boundary_loss = 0.0
+        gradient_loss = 0.0
+        multiscale_loss = 0.0
+        if float(spatial_cfg["boundary_weight"]) > 0.0:
+            boundary_sw = _boundary_weights_numpy(
+                distance_any,
+                sw,
+                band_px=float(spatial_cfg["boundary_band_px"]),
+                name=name,
+            )
+            boundary_loss, boundary_grad = _weighted_reduce_numpy(
                 loss_map,
                 grad_map,
-                sw,
+                boundary_sw,
                 normalization=normalization,
                 weight_denominator=sample_mean_weight_denominator,
                 group_ids=group_ids,
                 group_mode=sample_mean_group_mode,
             )
-        else:
-            m = mask_arr
-            d_map = distance_arr
-            d_signed = None
-            if m.shape[0] == 1 and pred.shape[0] > 1:
-                m = np.repeat(m, pred.shape[0], axis=0)
-            if d_map is not None and d_map.shape[0] == 1 and pred.shape[0] > 1:
-                d_map = np.repeat(d_map, pred.shape[0], axis=0)
-            if signed_arr is not None and signed_arr.shape[0] == 1 and pred.shape[0] > 1:
-                signed_arr = np.repeat(signed_arr, pred.shape[0], axis=0)
-            if effective_region_policy == "sdf_continuous":
-                if d_map is None:
-                    raise ValueError("nan_region_policy=sdf_continuous requires distance_any")
-                d_signed = build_signed_distance(m, d_map)
-                if not is_effective_signed_distance(m, d_signed):
-                    msg = (
-                        "sdf_continuous contract violation: signed distance has no negative chamber-side values; "
-                        "distance_any may be invalid for chamber supervision"
-                    )
-                    if sdf_distance_contract == "error":
-                        raise ValueError(msg)
-                    if sdf_distance_contract == "warn":
-                        warnings.warn(msg, RuntimeWarning, stacklevel=2)
-                sw = sdf_continuous_weight_map(m, d_signed, sdf_cfg)
-                if use_region:
-                    boundary = (d_map <= boundary_delta).astype(np.float32) * m
-                    bulk = np.clip(m - boundary, 0.0, 1.0)
-                    region_mult = boundary * max(w_boundary / max(w_bulk, eps), 1.0) + bulk
-                    outside = (1.0 - m).astype(np.float32)
-                    sw = sw * (region_mult + outside)
-            else:
-                if use_region:
-                    if d_map is None:
-                        raise ValueError("region_weighting.enabled requires distance_any")
-                    boundary = (d_map <= boundary_delta).astype(np.float32) * m
-                    bulk = np.clip(m - boundary, 0.0, 1.0)
-                    sw = boundary * w_boundary + bulk * w_bulk
-                else:
-                    sw = m
-            if boundary_type_enabled and name in boundary_type_vars and d_map is not None:
-                type_masks = build_boundary_type_masks(
-                    mask_plasma=m,
-                    distance_any=d_map,
-                    band_px=boundary_type_band_px,
-                    bc_dir_mask=bc_dir_arr,
-                    wafer_mask=wafer_arr,
-                )
-                type_mult = np.ones_like(sw, dtype=np.float32)
-                type_mult[type_masks["interface"]] = boundary_type_weight_interface
-                type_mult[type_masks["bc_dir"]] = boundary_type_weight_bc_dir
-                type_mult[type_masks["wafer"]] = boundary_type_weight_wafer
-                sw = sw * type_mult
-            if boundary_profile_enabled and name in boundary_profile_vars:
-                if d_signed is None:
-                    if d_map is not None:
-                        d_signed = build_signed_distance(m, d_map)
-                    else:
-                        raise ValueError(
-                            "supervised.boundary_profile_weighting requires distance_signed or distance_any"
-                        )
-                profile_mult = np.ones_like(sw, dtype=np.float32)
-                if profile_region_masks_cache is None:
-                    profile_region_masks_cache = build_region_masks(
-                        mask_plasma=m,
-                        distance_any=d_map,
-                        distance_signed=d_signed,
-                        boundary_in_px=boundary_profile_band_px,
-                        mid_plasma_px=boundary_profile_mid_px,
-                        deep_plasma_px=boundary_profile_deep_px,
-                    )
-                d_pos = np.clip(d_signed, 0.0, None).astype(np.float32)
-                for part_name, (part_alpha, part_tau) in boundary_profile_parts.items():
-                    if part_alpha <= 0.0:
-                        continue
-                    region_mask = np.asarray(profile_region_masks_cache.get(part_name, np.zeros_like(sw, dtype=bool)), dtype=bool)
-                    if not np.any(region_mask):
-                        continue
-                    profile_mult[region_mask] = (
-                        1.0 + float(part_alpha) * np.exp(-d_pos[region_mask] / float(part_tau))
-                    )
-                if (
-                    boundary_profile_weight_interface != 1.0
-                    or boundary_profile_weight_bc_dir != 1.0
-                    or boundary_profile_weight_wafer != 1.0
-                ):
-                    if profile_type_masks_cache is None:
-                        profile_type_masks_cache = build_boundary_type_masks(
-                            mask_plasma=m,
-                            distance_any=d_map if d_map is not None else np.abs(d_signed).astype(np.float32),
-                            band_px=boundary_profile_band_px,
-                            bc_dir_mask=bc_dir_arr,
-                            wafer_mask=wafer_arr,
-                        )
-                    profile_mult[profile_type_masks_cache["interface"]] *= boundary_profile_weight_interface
-                    profile_mult[profile_type_masks_cache["bc_dir"]] *= boundary_profile_weight_bc_dir
-                    profile_mult[profile_type_masks_cache["wafer"]] *= boundary_profile_weight_wafer
-                if boundary_profile_norm_plasma:
-                    plasma_active = np.asarray(m > 0.5, dtype=bool)
-                    if np.any(plasma_active):
-                        prof_mean = float(np.mean(profile_mult[plasma_active]))
-                        if np.isfinite(prof_mean) and prof_mean > 1.0e-12:
-                            profile_mult = (profile_mult / prof_mean).astype(np.float32)
-                sw = sw * profile_mult
-            if global_target_region != "plasma_only":
-                sw = _apply_chamber_override_numpy(
-                    sw,
-                    mask=m,
-                    var_name=name,
-                    chamber_weight_by_var=chamber_weight_by_var,
-                )
-            if use_robust and name in robust_vars:
-                active = sw > 0.5
-                if np.any(active):
-                    tgt_active = tgt[active]
-                    med = float(np.median(tgt_active))
-                    mad = float(np.median(np.abs(tgt_active - med)))
-                    scale = max(mad * robust_mad_scale, eps)
-                    rw = 1.0 / (1.0 + np.abs(tgt - med) / scale)
-                    rw = np.clip(rw, robust_min_weight, 1.0).astype(np.float32)
-                    sw = sw * rw
-            base_loss, grad = _weighted_reduce_numpy(
-                loss_map,
-                grad_map,
+            grad = grad + float(spatial_cfg["boundary_weight"]) * boundary_grad
+        if float(spatial_cfg["gradient_weight"]) > 0.0:
+            gradient_loss, gradient_grad = _gradient_loss_numpy(
+                pred,
+                target,
                 sw,
+                cfg=cfg,
                 normalization=normalization,
                 weight_denominator=sample_mean_weight_denominator,
                 group_ids=group_ids,
-                group_mode=sample_mean_group_mode,
+                spacing=tuple(spatial_cfg["gradient_spacing"]),
+                gradient_normalization=str(spatial_cfg["gradient_normalization"]),
+                gradient_epsilon=float(spatial_cfg["gradient_epsilon"]),
             )
-            if (
-                region_balance_enabled
-                and name in region_balance_vars
-                and d_map is not None
-                and m is not None
-            ):
-                d_signed_eff = (
-                    np.asarray(signed_arr, dtype=np.float32)
-                    if signed_arr is not None
-                    else np.where(m > 0.5, d_map, -d_map).astype(np.float32)
-                )
-                region_masks = build_region_masks(
-                    mask_plasma=m,
-                    distance_any=d_map,
-                    distance_signed=d_signed_eff,
-                    boundary_in_px=region_balance_boundary_px,
-                    mid_plasma_px=region_balance_mid_px,
-                    deep_plasma_px=region_balance_deep_px,
-                )
-                boundary_region = region_masks["boundary_in"]
-                mid_region = region_masks["plasma_mid"]
-                deep_region = region_masks["plasma_deep"]
-                l_boundary, g_boundary = _weighted_mean_count_numpy(
-                    loss_map,
-                    grad_map,
-                    sw,
-                    boundary_region.astype(np.float32),
-                )
-                l_mid, g_mid = _weighted_mean_count_numpy(
-                    loss_map,
-                    grad_map,
-                    sw,
-                    mid_region.astype(np.float32),
-                )
-                l_deep, g_deep = _weighted_mean_count_numpy(
-                    loss_map,
-                    grad_map,
-                    sw,
-                    deep_region.astype(np.float32),
-                )
-                region_loss = float(
-                    region_balance_w_boundary * l_boundary
-                    + region_balance_w_mid * l_mid
-                    + region_balance_w_deep * l_deep
-                )
-                region_grad = (
-                    region_balance_w_boundary * g_boundary
-                    + region_balance_w_mid * g_mid
-                    + region_balance_w_deep * g_deep
-                ).astype(np.float32)
-                if region_balance_mode == "replace":
-                    base_loss = region_loss
-                    grad = region_grad
-                else:
-                    base_loss = float(base_loss + region_balance_lambda * region_loss)
-                    grad = (grad + region_balance_lambda * region_grad).astype(np.float32)
-                region_boundary_total += float(l_boundary)
-                region_mid_total += float(l_mid)
-                region_deep_total += float(l_deep)
-            if chamber_aux_enabled and (name in chamber_aux_weight_by_var):
-                aux_w = float(chamber_aux_weight_by_var.get(name, 0.0))
-                if aux_w > 0.0:
-                    if chamber_aux_scope == "full":
-                        chamber_mask = (m <= 0.5).astype(np.float32)
-                    else:
-                        if d_signed is None:
-                            if d_map is None:
-                                raise ValueError("supervised.chamber_aux(scope=band_only) requires distance_any")
-                            d_signed = build_signed_distance(m, d_map)
-                        chamber_mask = np.logical_and(d_signed < 0.0, d_signed >= (-float(chamber_aux_band_px))).astype(
-                            np.float32
-                        )
-                    sw_aux = chamber_mask * aux_w
-                    aux_loss, aux_grad = _weighted_reduce_numpy(
-                        loss_map,
-                        grad_map,
-                        sw_aux,
-                        normalization=normalization,
-                        weight_denominator=sample_mean_weight_denominator,
-                        group_ids=group_ids,
-                        group_mode=sample_mean_group_mode,
-                    )
-                    if chamber_aux_grad_clip_abs > 0.0:
-                        aux_grad = np.clip(aux_grad, -chamber_aux_grad_clip_abs, chamber_aux_grad_clip_abs).astype(
-                            np.float32
-                        )
-                    grad = grad + aux_grad
-                    base_loss += float(aux_loss)
-                    chamber_aux_total += float(aux_loss)
-
-        if spatial_consistency_enabled and name in spatial_consistency_vars and spatial_consistency_lambda > 0.0:
-            if mask_arr is None:
-                raise ValueError("supervised.spatial_consistency requires supervised.mask=plasma_only")
-            m_sp = m if "m" in locals() else mask_arr
-            d_sp = d_map if "d_map" in locals() else distance_arr
-            ds_sp = d_signed if "d_signed" in locals() else signed_arr
-            if d_sp is None and ds_sp is None:
-                raise ValueError("supervised.spatial_consistency requires distance_any or distance_signed")
-            if ds_sp is None:
-                ds_sp = np.where(m_sp > 0.5, d_sp, -d_sp).astype(np.float32)
-            region_masks_sc = build_region_masks(
-                mask_plasma=m_sp,
-                distance_any=d_sp,
-                distance_signed=ds_sp,
-                boundary_in_px=2.0,
-                mid_plasma_px=10.0,
-                deep_plasma_px=10.0,
-            )
-            sc_region = np.asarray(region_masks_sc["all_plasma"], dtype=np.float32)
-            pred_sc = (
-                pred / float(max(spatial_consistency_scale_by_var.get(name, 1.0), 1.0e-12))
-                if spatial_consistency_normalize
-                else pred
-            )
-            tgt_sc = (
-                tgt / float(max(spatial_consistency_scale_by_var.get(name, 1.0), 1.0e-12))
-                if spatial_consistency_normalize
-                else tgt
-            )
-            full_shape = tuple(int(v) for v in pred_sc.shape)
-            if spatial_consistency_ms_enabled:
-                sc_loss = 0.0
-                sc_grad = np.zeros_like(pred_sc, dtype=np.float32)
-                for sc_scale, sc_weight in zip(spatial_consistency_ms_scales, spatial_consistency_ms_weights):
-                    if sc_weight <= 0.0:
-                        continue
-                    pred_s, crop = _avg_pool2d_bhw(pred_sc, sc_scale)
-                    tgt_s, _ = _avg_pool2d_bhw(tgt_sc, sc_scale)
-                    reg_s, _ = _avg_pool2d_bhw(sc_region, sc_scale)
-                    reg_s = (np.asarray(reg_s, dtype=np.float32) > 0.5).astype(np.float32)
-                    l_s, g_s = _spatial_consistency_grad_huber_numpy(
-                        pred=pred_s,
-                        target=tgt_s,
-                        region_mask=reg_s,
-                        delta=spatial_consistency_delta,
-                    )
-                    sc_loss += float(sc_weight) * float(l_s)
-                    sc_grad += float(sc_weight) * _avg_unpool2d_bhw(
-                        g_s,
-                        full_shape=full_shape,
-                        crop_shape=crop,
-                        scale=sc_scale,
-                    )
-            else:
-                sc_loss, sc_grad = _spatial_consistency_grad_huber_numpy(
-                    pred=pred_sc,
-                    target=tgt_sc,
-                    region_mask=sc_region,
-                    delta=spatial_consistency_delta,
-                )
-            if spatial_consistency_normalize:
-                scale_back = float(max(spatial_consistency_scale_by_var.get(name, 1.0), 1.0e-12))
-                sc_grad = (sc_grad / scale_back).astype(np.float32)
-            base_loss += float(spatial_consistency_lambda * sc_loss)
-            grad = (grad + float(spatial_consistency_lambda) * sc_grad).astype(np.float32)
-            spatial_consistency_total += float(spatial_consistency_lambda * sc_loss)
-
-        if density_pos_enabled and name in density_pos_vars and density_pos_lambda > 0.0:
-            mean_aff, std_aff = density_pos_affine_by_var.get(name, (0.0, 1.0))
-            std_safe = float(max(abs(float(std_aff)), 1.0e-12))
-            pred_phys = (pred * float(std_aff) + float(mean_aff)).astype(np.float32)
-            violation_norm = ((float(density_pos_floor) - pred_phys) / std_safe).astype(np.float32)
-            violation_pos = np.maximum(violation_norm, 0.0).astype(np.float32)
-            pos_loss_map = (0.5 * np.square(violation_pos)).astype(np.float32)
-            # d/d(pred_scaled) [0.5 * max(v_norm,0)^2], where v_norm=(floor-pred_phys)/std_safe.
-            # For std_aff>0 this derivative is -max(v_norm,0); using std_safe keeps it bounded.
-            pos_grad_map = np.where(violation_norm > 0.0, -violation_pos, 0.0).astype(np.float32)
-            pos_loss, pos_grad = _weighted_reduce_numpy(
-                pos_loss_map,
-                pos_grad_map,
+            grad = grad + float(spatial_cfg["gradient_weight"]) * gradient_grad
+        if float(spatial_cfg["multiscale_weight"]) > 0.0:
+            multiscale_loss, multiscale_grad = _multiscale_loss_numpy(
+                pred,
+                target,
                 sw,
+                cfg=cfg,
                 normalization=normalization,
                 weight_denominator=sample_mean_weight_denominator,
                 group_ids=group_ids,
-                group_mode=sample_mean_group_mode,
+                scales=tuple(spatial_cfg["multiscale_scales"]),
             )
-            base_loss += float(density_pos_lambda * pos_loss)
-            grad = (grad + float(density_pos_lambda) * pos_grad).astype(np.float32)
-            density_pos_total += float(density_pos_lambda * pos_loss)
-
-        if density_rel_enabled and name in density_rel_vars and density_rel_lambda > 0.0:
-            mean_aff, std_aff = density_rel_affine_by_var.get(name, (0.0, 1.0))
-            eps_var = float(density_rel_eps_by_var.get(name, density_rel_eps_default))
-            eps_var = max(eps_var, density_rel_eps_min)
-            pred_phys = (pred * float(std_aff) + float(mean_aff)).astype(np.float32)
-            tgt_phys = (tgt * float(std_aff) + float(mean_aff)).astype(np.float32)
-            err_phys = (pred_phys - tgt_phys).astype(np.float32)
-            rel_denom = (np.abs(tgt_phys).astype(np.float32) + float(eps_var)).astype(np.float32)
-            rel_loss_map = (np.abs(err_phys).astype(np.float32) / rel_denom).astype(np.float32)
-            rel_grad_map = (np.sign(err_phys).astype(np.float32) / rel_denom).astype(np.float32)
-            rel_grad_map = (rel_grad_map * float(std_aff)).astype(np.float32)
-            rel_loss, rel_grad = _weighted_reduce_numpy(
-                rel_loss_map,
-                rel_grad_map,
-                sw,
-                normalization=normalization,
-                weight_denominator=sample_mean_weight_denominator,
-                group_ids=group_ids,
-                group_mode=sample_mean_group_mode,
-            )
-            base_loss += float(density_rel_lambda * rel_loss)
-            grad = (grad + float(density_rel_lambda) * rel_grad).astype(np.float32)
-            density_rel_total += float(density_rel_lambda * rel_loss)
-
+            grad = grad + float(spatial_cfg["multiscale_weight"]) * multiscale_grad
+        base_loss = float(
+            point_loss
+            + float(spatial_cfg["boundary_weight"]) * boundary_loss
+            + float(spatial_cfg["gradient_weight"]) * gradient_loss
+            + float(spatial_cfg["multiscale_weight"]) * multiscale_loss
+        )
         sigma = _resolve_sigma_for_var(name, base_loss, cfg)
         if cfg["weighting"] == "uncertainty":
             weighted = float(np.exp(-sigma) * base_loss + sigma)
-            grad = grad * float(np.exp(-sigma))
+            grad = (grad * float(np.exp(-sigma))).astype(np.float32)
         else:
             fixed_weight = float(fixed_weights_by_var.get(name, 1.0)) if fixed_weights_by_var else 1.0
             weighted = float(base_loss * fixed_weight)
             grad = (grad * fixed_weight).astype(np.float32)
-
+        target_multiplier = float(target_multipliers.get(str(name), 1.0))
+        weighted = float(weighted * target_multiplier)
+        grad = (grad * target_multiplier).astype(np.float32)
+        component_factor = float(target_multiplier)
+        if cfg["weighting"] == "uncertainty":
+            component_factor *= float(np.exp(-sigma))
+        elif fixed_weights_by_var:
+            component_factor *= float(fixed_weights_by_var.get(name, 1.0))
         per_var_loss[name] = weighted
+        spatial_enabled = any(
+            float(spatial_cfg[key]) > 0.0
+            for key in ("boundary_weight", "gradient_weight", "multiscale_weight")
+        )
+        if spatial_enabled:
+            per_var_loss[f"loss_supervised_point_{name}"] = float(point_loss * component_factor)
+            per_var_loss[f"loss_supervised_spatial_boundary_{name}"] = float(
+                boundary_loss * float(spatial_cfg["boundary_weight"]) * component_factor
+            )
+            per_var_loss[f"loss_supervised_spatial_gradient_{name}"] = float(
+                gradient_loss * float(spatial_cfg["gradient_weight"]) * component_factor
+            )
+            per_var_loss[f"loss_supervised_spatial_multiscale_{name}"] = float(
+                multiscale_loss * float(spatial_cfg["multiscale_weight"]) * component_factor
+            )
         grads[name] = grad.astype(np.float32)
         total += weighted
-
-    if chamber_aux_enabled:
-        per_var_loss["__chamber_aux__"] = float(chamber_aux_total)
-    if density_pos_enabled and density_pos_lambda > 0.0:
-        per_var_loss["__density_positivity_penalty__"] = float(density_pos_total)
-    if density_rel_enabled and density_rel_lambda > 0.0:
-        per_var_loss["__density_relative_weighting__"] = float(density_rel_total)
-    if spatial_consistency_enabled and spatial_consistency_lambda > 0.0:
-        per_var_loss["__spatial_consistency__"] = float(spatial_consistency_total)
-    if region_balance_enabled:
-        per_var_loss["__region_boundary_in__"] = float(region_boundary_total)
-        per_var_loss["__region_mid_plasma__"] = float(region_mid_total)
-        per_var_loss["__region_deep_plasma__"] = float(region_deep_total)
-        per_var_loss["__region_balance_applied__"] = 1.0
+    _append_group_loss_breakdown(per_var_loss, groups=target_groups)
     return float(total), grads, per_var_loss
 
 
-def _as_bchw(x: Any, *, key: str):
+def _as_bchw(x: Any, *, key: str, device: Any | None = None):
     torch = require_torch()
-    t = torch.as_tensor(x, dtype=torch.float32)
-    if t.ndim == 2:
-        t = t[None, None, ...]
-    if t.ndim == 3:
-        t = t[:, None, ...]
-    if t.ndim != 4 or int(t.shape[1]) != 1:
-        raise ValueError(f"{key} must be [B,1,H,W] or [B,H,W], got {tuple(t.shape)}")
-    return t
-
-
-def _apply_chamber_override_torch(
-    sw,
-    *,
-    mask,
-    var_name: str,
-    chamber_weight_by_var: dict[str, Any],
-):
-    if not chamber_weight_by_var:
-        return sw
-    if var_name not in chamber_weight_by_var:
-        return sw
-    chamber_w = float(chamber_weight_by_var[var_name])
-    chamber = (mask <= 0.5).to(dtype=sw.dtype)
-    return sw * (1.0 - chamber) + chamber * chamber_w
+    tensor = torch.as_tensor(x, dtype=torch.float32, device=device)
+    if tensor.ndim == 2:
+        tensor = tensor[None, None, ...]
+    if tensor.ndim == 3:
+        tensor = tensor[:, None, ...]
+    if tensor.ndim != 4:
+        raise ValueError(f"{key} must be [B,H,W] or [B,1,H,W], got shape={tuple(tensor.shape)}")
+    return tensor
 
 
 def _weighted_reduce_torch(base_map, sw, *, normalization: str, weight_denominator: str = "weighted"):
     torch = require_torch()
-    norm = normalization
-    if norm not in {"pixel_mean", "sample_mean", "none"}:
-        raise ValueError(f"Unsupported supervised.normalization: {norm}")
+    if normalization not in {"pixel_mean", "sample_mean", "none"}:
+        raise ValueError(f"Unsupported supervised.normalization: {normalization}")
     if weight_denominator not in {"weighted", "count"}:
         raise ValueError("supervised.sample_mean_weight_denominator must be one of: weighted, count")
-    if norm == "none":
-        return (base_map * sw).sum()
-    if norm == "sample_mean":
-        numer = (base_map * sw).sum(dim=(1, 2, 3))
+    safe_base_map = torch.where(sw > 0.0, base_map, torch.zeros_like(base_map))
+    weighted = safe_base_map * sw
+    if normalization == "none":
+        return torch.sum(weighted)
+    if normalization == "sample_mean":
+        numer = torch.sum(weighted, dim=(1, 2, 3))
         if weight_denominator == "count":
-            denom = torch.clamp((sw > 0.0).to(dtype=sw.dtype).sum(dim=(1, 2, 3)), min=1.0)
+            denom = torch.clamp(torch.sum((sw > 0.0).to(dtype=base_map.dtype), dim=(1, 2, 3)), min=1.0)
         else:
-            denom = torch.clamp(sw.sum(dim=(1, 2, 3)), min=1.0)
-        return (numer / denom).mean()
-    denom = torch.clamp(sw.sum(), min=1.0)
-    return (base_map * sw).sum() / denom
+            denom = torch.clamp(torch.sum(sw, dim=(1, 2, 3)), min=1.0e-12)
+        return torch.mean(numer / denom)
+    denom = torch.clamp(torch.sum(sw), min=1.0e-12)
+    return torch.sum(weighted) / denom
 
 
-def _weighted_mean_count_torch(base_map, sw, region_mask):
+def _loss_map_torch(pred, target, cfg: dict[str, Any]):
     torch = require_torch()
-    reg = torch.as_tensor(region_mask, dtype=sw.dtype, device=sw.device)
-    numer = (base_map * sw * reg).sum()
-    denom = torch.clamp((reg > 0.0).to(dtype=sw.dtype).sum(), min=1.0)
-    return numer / denom
+    if cfg["type"] == "huber":
+        return torch.nn.functional.huber_loss(pred, target, delta=float(cfg["delta"]), reduction="none")
+    return 0.5 * (pred - target) ** 2
 
 
-def _resolve_torch_region_contract(
+def _sanitize_supervised_torch(pred, target, sw, *, name: str):
+    torch = require_torch()
+    if bool(torch.any(~torch.isfinite(sw)).detach().cpu().item()):
+        raise ValueError(f"mask contains non-finite values for {name}")
+    if bool(torch.any(sw < 0.0).detach().cpu().item()):
+        raise ValueError(f"mask contains negative values for {name}")
+    active = sw > 0.0
+    invalid_active = active & (~torch.isfinite(pred) | ~torch.isfinite(target))
+    if bool(torch.any(invalid_active).detach().cpu().item()):
+        count = int(torch.sum(invalid_active).detach().cpu().item())
+        raise ValueError(f"non-finite prediction/target on active mask for {name}: count={count}")
+    pred_safe = torch.where(active, pred, torch.zeros_like(pred))
+    target_safe = torch.where(active, target, torch.zeros_like(target))
+    return pred_safe, target_safe, sw
+
+
+def _require_nonempty_case_weights_torch(weights, *, name: str, component: str) -> None:
+    torch = require_torch()
+    active_per_case = torch.sum(weights > 0.0, dim=(1, 2, 3))
+    empty = torch.nonzero(active_per_case <= 0, as_tuple=False).reshape(-1)
+    if int(empty.numel()) > 0:
+        raise ValueError(
+            f"supervised {component} has no active samples for {name}: "
+            f"case_indices={empty.detach().cpu().to(dtype=torch.int64).tolist()}"
+        )
+
+
+def _boundary_weights_torch(distance_any, sw, *, band_px: float, name: str):
+    torch = require_torch()
+    if distance_any is None:
+        raise ValueError("supervised.spatial.boundary_weight > 0 requires distance_any")
+    distance = _as_bchw(distance_any, key="distance_any", device=sw.device)
+    if int(distance.shape[0]) == 1 and int(sw.shape[0]) > 1:
+        distance = distance.expand(int(sw.shape[0]), -1, -1, -1)
+    if tuple(distance.shape) != tuple(sw.shape):
+        raise ValueError(
+            f"distance_any shape mismatch for {name}: expected {tuple(sw.shape)}, got {tuple(distance.shape)}"
+        )
+    active = sw > 0.0
+    invalid_active = active & ~torch.isfinite(distance)
+    if bool(torch.any(invalid_active).detach().cpu().item()):
+        count = int(torch.sum(invalid_active).detach().cpu().item())
+        raise ValueError(f"distance_any is non-finite on active mask for {name}: count={count}")
+    distance_safe = torch.where(active, distance, torch.zeros_like(distance))
+    boundary = active & (torch.abs(distance_safe) <= float(band_px))
+    boundary_weights = torch.where(boundary, sw, torch.zeros_like(sw))
+    _require_nonempty_case_weights_torch(
+        boundary_weights,
+        name=name,
+        component="boundary band",
+    )
+    return boundary_weights
+
+
+def _gradient_loss_torch(
+    pred,
+    target,
+    sw,
     *,
     cfg: dict[str, Any],
-    y_order: list[str],
-) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    """Resolve canonical region contract for torch supervised loss.
-
-    Returns (region_balance_cfg, legacy_region_weighting_cfg, alias_used).
-    """
-
-    region_balance_cfg = dict(cfg.get("region_balance", {}))
-    legacy_region_cfg = dict(cfg.get("region_weighting", {}))
-    if region_balance_cfg and legacy_region_cfg:
+    normalization: str,
+    weight_denominator: str,
+    spacing: tuple[float, float],
+    gradient_normalization: str,
+    gradient_epsilon: float,
+):
+    torch = require_torch()
+    edge_counts = torch.zeros((int(pred.shape[0]),), dtype=torch.int64, device=pred.device)
+    if int(pred.shape[-2]) >= 2:
+        edge_counts = edge_counts + torch.sum(
+            torch.minimum(sw[:, :, 1:, :], sw[:, :, :-1, :]) > 0.0,
+            dim=(1, 2, 3),
+        )
+    if int(pred.shape[-1]) >= 2:
+        edge_counts = edge_counts + torch.sum(
+            torch.minimum(sw[:, :, :, 1:], sw[:, :, :, :-1]) > 0.0,
+            dim=(1, 2, 3),
+        )
+    empty = torch.nonzero(edge_counts <= 0, as_tuple=False).reshape(-1)
+    if int(empty.numel()) > 0:
         raise ValueError(
-            "supervised.region_balance and supervised.region_weighting cannot be specified together; "
-            "use supervised.region_balance (region_weighting is deprecated alias)"
+            "supervised spatial gradient has no active adjacent pixels: "
+            f"case_indices={empty.detach().cpu().to(dtype=torch.int64).tolist()}"
         )
-    alias_used = False
-    if (not region_balance_cfg) and legacy_region_cfg:
-        alias_used = True
-        warnings.warn(
-            "supervised.region_weighting is deprecated for torch path; "
-            "use supervised.region_balance instead",
-            DeprecationWarning,
-            stacklevel=3,
+    losses = []
+    if int(pred.shape[-2]) >= 2:
+        pred_diff = (pred[:, :, 1:, :] - pred[:, :, :-1, :]) / float(spacing[0])
+        target_diff = (target[:, :, 1:, :] - target[:, :, :-1, :]) / float(spacing[0])
+        pair_sw = torch.minimum(sw[:, :, 1:, :], sw[:, :, :-1, :])
+        scale = torch.ones((int(pred.shape[0]), 1, 1, 1), dtype=pred.dtype, device=pred.device)
+        if gradient_normalization == "target_rms":
+            target_active = torch.where(pair_sw > 0.0, target_diff, torch.zeros_like(target_diff))
+            energy = torch.sum(pair_sw * target_active.square(), dim=(1, 2, 3), keepdim=True)
+            weight = torch.sum(pair_sw, dim=(1, 2, 3), keepdim=True)
+            scale = torch.clamp(torch.sqrt(energy / torch.clamp(weight, min=1.0)), min=float(gradient_epsilon))
+        losses.append(
+            _weighted_reduce_torch(
+                _loss_map_torch(pred_diff / scale, target_diff / scale, cfg),
+                pair_sw,
+                normalization=normalization,
+                weight_denominator=weight_denominator,
+            )
         )
-        # Keep legacy semantics when only alias is provided.
-        return {}, legacy_region_cfg, alias_used
-    if not region_balance_cfg:
-        return {}, {}, alias_used
-    region_balance_cfg = dict(region_balance_cfg)
-    if "vars" not in region_balance_cfg:
-        region_balance_cfg["vars"] = list(y_order)
-    return region_balance_cfg, {}, alias_used
+    if int(pred.shape[-1]) >= 2:
+        pred_diff = (pred[:, :, :, 1:] - pred[:, :, :, :-1]) / float(spacing[1])
+        target_diff = (target[:, :, :, 1:] - target[:, :, :, :-1]) / float(spacing[1])
+        pair_sw = torch.minimum(sw[:, :, :, 1:], sw[:, :, :, :-1])
+        scale = torch.ones((int(pred.shape[0]), 1, 1, 1), dtype=pred.dtype, device=pred.device)
+        if gradient_normalization == "target_rms":
+            target_active = torch.where(pair_sw > 0.0, target_diff, torch.zeros_like(target_diff))
+            energy = torch.sum(pair_sw * target_active.square(), dim=(1, 2, 3), keepdim=True)
+            weight = torch.sum(pair_sw, dim=(1, 2, 3), keepdim=True)
+            scale = torch.clamp(torch.sqrt(energy / torch.clamp(weight, min=1.0)), min=float(gradient_epsilon))
+        losses.append(
+            _weighted_reduce_torch(
+                _loss_map_torch(pred_diff / scale, target_diff / scale, cfg),
+                pair_sw,
+                normalization=normalization,
+                weight_denominator=weight_denominator,
+            )
+        )
+    if not losses:
+        return torch.zeros((), dtype=pred.dtype, device=pred.device)
+    return torch.stack(losses).mean()
+
+
+def _masked_pool_torch(values, sw, *, scale: int):
+    torch = require_torch()
+    height, width = int(values.shape[-2]), int(values.shape[-1])
+    pad_h = (-height) % int(scale)
+    pad_w = (-width) % int(scale)
+    values = torch.nn.functional.pad(values, (0, pad_w, 0, pad_h), value=0.0)
+    valid = torch.nn.functional.pad(
+        (sw > 0.0).to(dtype=values.dtype),
+        (0, pad_w, 0, pad_h),
+        value=0.0,
+    )
+    valid_fraction = torch.nn.functional.avg_pool2d(valid, kernel_size=int(scale), stride=int(scale))
+    weighted_mean = torch.nn.functional.avg_pool2d(
+        values * valid,
+        kernel_size=int(scale),
+        stride=int(scale),
+    )
+    pooled = weighted_mean / torch.clamp(valid_fraction, min=1.0e-12)
+    return pooled, valid_fraction
+
+
+def _multiscale_loss_torch(
+    pred,
+    target,
+    sw,
+    *,
+    cfg: dict[str, Any],
+    normalization: str,
+    weight_denominator: str,
+    scales: tuple[int, ...],
+):
+    torch = require_torch()
+    losses = []
+    for scale in scales:
+        pred_pool, pool_sw = _masked_pool_torch(pred, sw, scale=int(scale))
+        target_pool, _ = _masked_pool_torch(target, sw, scale=int(scale))
+        losses.append(
+            _weighted_reduce_torch(
+                _loss_map_torch(pred_pool, target_pool, cfg),
+                pool_sw,
+                normalization=normalization,
+                weight_denominator=weight_denominator,
+            )
+        )
+    return torch.stack(losses).mean()
 
 
 def compose_supervised_torch(
@@ -1095,297 +923,172 @@ def compose_supervised_torch(
     loss_cfg: dict[str, Any] | None = None,
     mask: Any | None = None,
     distance_any: Any | None = None,
+    point_weight: Any | None = None,
+    target_affine: dict[str, dict[str, float]] | None = None,
 ):
-    """Compose supervised torch loss with optional mask and uncertainty weighting."""
+    """Compose the product supervised torch loss."""
 
     torch = require_torch()
     cfg = _resolve_supervised_cfg(loss_cfg)
-    tgt = torch.as_tensor(target_fields, dtype=torch.float32)
-    if tgt.ndim != 4:
-        raise ValueError(f"target_fields must be [B,C,H,W], got {tuple(tgt.shape)}")
-    if int(tgt.shape[1]) != len(y_order):
-        raise ValueError(f"target channel mismatch: expected {len(y_order)}, got {int(tgt.shape[1])}")
+    first_pred = pred_fields[str(y_order[0])] if y_order else None
+    pred_device = torch.as_tensor(first_pred, dtype=torch.float32).device if first_pred is not None else None
+    target = torch.as_tensor(target_fields, dtype=torch.float32, device=pred_device)
+    if target.ndim != 4:
+        raise ValueError(f"target_fields must be [B,C,H,W], got {tuple(target.shape)}")
+    if int(target.shape[1]) != len(y_order):
+        raise ValueError(f"target channel mismatch: expected {len(y_order)}, got {int(target.shape[1])}")
 
-    if mask is None:
-        m = None
-        d_any = None
-    else:
-        m = _as_bchw(mask, key="mask")
-        if int(m.shape[0]) == 1 and int(tgt.shape[0]) > 1:
-            m = m.expand(int(tgt.shape[0]), -1, -1, -1)
-        d_any = None
-        if distance_any is not None:
-            d_any = _as_bchw(distance_any, key="distance_any")
-            if int(d_any.shape[0]) == 1 and int(tgt.shape[0]) > 1:
-                d_any = d_any.expand(int(tgt.shape[0]), -1, -1, -1)
+    mask_tensor = None if mask is None else _as_bchw(mask, key="mask", device=target.device)
+    if mask_tensor is not None and int(mask_tensor.shape[0]) == 1 and int(target.shape[0]) > 1:
+        mask_tensor = mask_tensor.expand(int(target.shape[0]), -1, -1, -1)
 
-    region_cfg = dict(cfg.get("region_weighting", {}))
-    use_region = bool(region_cfg.get("enabled", False))
-    boundary_delta = float(region_cfg.get("boundary_delta", 2.0))
-    w_bulk = float(region_cfg.get("w_bulk", 1.0))
-    w_boundary = float(region_cfg.get("w_boundary", 3.0))
-    robust_cfg = dict(cfg.get("robust_weighting", {}))
-    use_robust = bool(robust_cfg.get("enabled", False))
-    robust_vars = {str(v) for v in robust_cfg.get("vars", ["phi", "Te"])}
-    robust_mad_scale = float(robust_cfg.get("mad_scale", 3.0))
-    robust_min_weight = float(robust_cfg.get("min_weight", 0.2))
-    region_balance_cfg, legacy_region_cfg, _ = _resolve_torch_region_contract(cfg=cfg, y_order=y_order)
-    region_balance_enabled = bool(region_balance_cfg.get("enabled", False))
-    region_balance_mode = str(region_balance_cfg.get("mode", "replace")).strip().lower()
-    if region_balance_mode not in {"replace", "additive"}:
-        raise ValueError("supervised.region_balance.mode must be one of: replace, additive")
-    region_balance_lambda = float(region_balance_cfg.get("additive_lambda", 0.25))
-    if region_balance_lambda < 0.0:
-        raise ValueError("supervised.region_balance.additive_lambda must be >= 0")
-    region_balance_boundary_px = float(region_balance_cfg.get("boundary_in_px", 2.0))
-    region_balance_mid_px = float(region_balance_cfg.get("mid_plasma_px", region_balance_cfg.get("deep_plasma_px", 10.0)))
-    region_balance_deep_px = float(region_balance_cfg.get("deep_plasma_px", 10.0))
-    region_balance_vars = {str(v) for v in region_balance_cfg.get("vars", list(y_order))}
-    region_balance_w_boundary = float(region_balance_cfg.get("weight_boundary_in", 0.6))
-    region_balance_w_mid = float(region_balance_cfg.get("weight_plasma_mid", 0.0))
-    region_balance_w_deep = float(region_balance_cfg.get("weight_deep_plasma", 0.4))
-    region_balance_reduce = str(region_balance_cfg.get("reduce", "mean_count")).strip().lower()
-    if region_balance_reduce not in {"mean_count"}:
-        raise ValueError("supervised.region_balance.reduce must be: mean_count")
-    legacy_region_enabled = bool(legacy_region_cfg.get("enabled", False))
-    boundary_delta = float(legacy_region_cfg.get("boundary_delta", 2.0))
-    w_bulk = float(legacy_region_cfg.get("w_bulk", 1.0))
-    w_boundary = float(legacy_region_cfg.get("w_boundary", 3.0))
+    physical_cfg = dict(cfg.get("physical_weighting", {}))
+    radial_tensor = None
+    if bool(physical_cfg.get("axisymmetric_volume", False)):
+        if point_weight is None:
+            raise ValueError("axisymmetric_volume weighting requires a radial point_weight map")
+        radial_tensor = _as_bchw(point_weight, key="axisymmetric radial point_weight", device=target.device)
+        if int(radial_tensor.shape[0]) == 1 and int(target.shape[0]) > 1:
+            radial_tensor = radial_tensor.expand(int(target.shape[0]), -1, -1, -1)
+        if tuple(radial_tensor.shape) != (int(target.shape[0]), 1, int(target.shape[2]), int(target.shape[3])):
+            raise ValueError(f"axisymmetric radial point_weight shape mismatch: {tuple(radial_tensor.shape)}")
+        if not bool(torch.all(torch.isfinite(radial_tensor))) or bool(torch.any(radial_tensor < 0.0)):
+            raise ValueError("axisymmetric radial point_weight must be finite and non-negative")
+
     normalization = str(cfg.get("normalization", "pixel_mean")).strip().lower()
-    sample_mean_weight_denominator = str(cfg.get("sample_mean_weight_denominator", "weighted")).strip().lower()
-    delta_by_var = dict(cfg.get("delta_by_var", {}))
-    unknown_delta_vars = sorted(set(str(k) for k in delta_by_var.keys()) - set(y_order))
-    if unknown_delta_vars:
-        raise ValueError(f"supervised.delta_by_var contains unknown vars: {unknown_delta_vars}")
-    for k, v in delta_by_var.items():
-        if float(v) <= 0.0:
-            raise ValueError(f"supervised.delta_by_var[{k}] must be > 0")
-    fixed_weights_by_var = dict(cfg.get("fixed_weights_by_var", {}))
-    if cfg["weighting"] != "fixed" and len(fixed_weights_by_var) > 0:
+    weight_denominator = str(cfg.get("sample_mean_weight_denominator", "weighted")).strip().lower()
+    _mode, target_multipliers, target_groups = _resolve_loss_target_multipliers(
+        y_order=y_order,
+        loss_cfg=loss_cfg,
+    )
+
+    fixed_weights_by_var = _dict_or_empty(cfg.get("fixed_weights_by_var"))
+    _validate_var_payload(fixed_weights_by_var, key_name="multitask.fixed_weights_by_var", y_order=y_order)
+    if cfg["weighting"] != "fixed" and fixed_weights_by_var:
         raise ValueError("multitask.fixed_weights_by_var requires multitask.weighting=fixed")
-    unknown_fixed_weight_vars = sorted(set(str(k) for k in fixed_weights_by_var.keys()) - set(y_order))
-    if unknown_fixed_weight_vars:
-        raise ValueError(f"multitask.fixed_weights_by_var contains unknown vars: {unknown_fixed_weight_vars}")
-    nan_region_policy = str(cfg.get("nan_region_policy", "mask_only")).strip().lower()
-    if nan_region_policy not in {"mask_only", "sdf_continuous"}:
-        raise ValueError(f"Unsupported supervised.nan_region_policy: {nan_region_policy}")
-    sdf_distance_contract = str(cfg.get("sdf_distance_contract", "off")).strip().lower()
-    if sdf_distance_contract not in {"off", "warn", "error"}:
-        raise ValueError("supervised.sdf_distance_contract must be one of: off, warn, error")
-    sdf_cfg = dict(cfg.get("sdf_weighting", {}))
-    chamber_weight_by_var = dict(cfg.get("chamber_weight_by_var", {}))
-    density_pos_cfg = dict(cfg.get("density_positivity_penalty", {}))
-    density_rel_cfg = dict(cfg.get("density_relative_weighting", {}))
-    density_pos_enabled = bool(density_pos_cfg.get("enabled", False))
-    density_pos_vars = {str(v) for v in density_pos_cfg.get("vars", ["ne", "ni"])}
-    density_pos_floor = float(density_pos_cfg.get("floor", 0.0))
-    density_pos_lambda = float(density_pos_cfg.get("lambda", 0.0))
-    density_pos_affine_by_var = _resolve_density_affine_payload(
-        density_pos_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_positivity_penalty.affine_by_var",
-        y_order=y_order,
-    )
-    if density_pos_lambda < 0.0:
-        raise ValueError("supervised.density_positivity_penalty.lambda must be >= 0")
-    if density_pos_enabled:
-        unknown_density_pos_vars = sorted(density_pos_vars - set(y_order))
-        if unknown_density_pos_vars:
-            raise ValueError(
-                "supervised.density_positivity_penalty.vars contains unknown vars: "
-                f"{unknown_density_pos_vars}"
-            )
-    density_rel_enabled = bool(density_rel_cfg.get("enabled", False))
-    density_rel_vars = {str(v) for v in density_rel_cfg.get("vars", ["ne", "ni"])}
-    density_rel_lambda = float(density_rel_cfg.get("lambda", 0.0))
-    density_rel_affine_by_var = _resolve_density_affine_payload(
-        density_rel_cfg.get("affine_by_var", {}),
-        key_name="supervised.density_relative_weighting.affine_by_var",
-        y_order=y_order,
-    )
-    if density_rel_lambda < 0.0:
-        raise ValueError("supervised.density_relative_weighting.lambda must be >= 0")
-    density_rel_eps_default = float(density_rel_cfg.get("eps", 1.0e-6))
-    density_rel_eps_min = float(density_rel_cfg.get("eps_min", 1.0e-8))
-    if density_rel_eps_default <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps must be > 0")
-    if density_rel_eps_min <= 0.0:
-        raise ValueError("supervised.density_relative_weighting.eps_min must be > 0")
-    density_rel_eps_by_var = {str(k): float(v) for k, v in dict(density_rel_cfg.get("eps_by_var", {})).items()}
-    unknown_density_rel_eps_vars = sorted(set(density_rel_eps_by_var.keys()) - set(y_order))
-    if unknown_density_rel_eps_vars:
-        raise ValueError(
-            "supervised.density_relative_weighting.eps_by_var contains unknown vars: "
-            f"{unknown_density_rel_eps_vars}"
-        )
-    for key, value in density_rel_eps_by_var.items():
-        if float(value) <= 0.0:
-            raise ValueError(f"supervised.density_relative_weighting.eps_by_var[{key}] must be > 0")
-    if density_rel_enabled:
-        unknown_density_rel_vars = sorted(density_rel_vars - set(y_order))
-        if unknown_density_rel_vars:
-            raise ValueError(
-                "supervised.density_relative_weighting.vars contains unknown vars: "
-                f"{unknown_density_rel_vars}"
-            )
-    total = torch.zeros((), dtype=torch.float32, device=tgt.device)
+
+    total = torch.zeros((), dtype=torch.float32, device=target.device)
     per_var: dict[str, float] = {}
-    region_masks_torch: dict[str, Any] | None = None
-    if region_balance_enabled:
-        if m is None or d_any is None:
-            raise ValueError("supervised.region_balance.enabled requires supervised.mask=plasma_only and distance_any")
-        d_signed_eff = torch.where(m > 0.5, d_any, -d_any).to(dtype=torch.float32)
-        region_masks_np = build_region_masks(
-            mask_plasma=np.asarray(m[:, 0].detach().cpu().numpy(), dtype=np.float32),
-            distance_any=np.asarray(d_any[:, 0].detach().cpu().numpy(), dtype=np.float32),
-            distance_signed=np.asarray(d_signed_eff[:, 0].detach().cpu().numpy(), dtype=np.float32),
-            boundary_in_px=region_balance_boundary_px,
-            mid_plasma_px=region_balance_mid_px,
-            deep_plasma_px=region_balance_deep_px,
-        )
-        region_masks_torch = {
-            str(k): torch.as_tensor(v.astype(np.float32), dtype=torch.float32, device=tgt.device)[:, None, ...]
-            for k, v in region_masks_np.items()
-        }
+    for idx, name in enumerate(y_order):
+        pred = _as_bchw(pred_fields[name], key=f"pred_{name}", device=target.device)
+        if pred.shape != target[:, idx : idx + 1].shape:
+            raise ValueError(
+                f"prediction shape mismatch for {name}: "
+                f"expected {tuple(target[:, idx : idx + 1].shape)}, got {tuple(pred.shape)}"
+            )
+        target_i = target[:, idx : idx + 1]
+        sw = torch.ones_like(pred, dtype=pred.dtype)
+        if mask_tensor is not None:
+            sw = mask_tensor.to(dtype=pred.dtype)
+            if tuple(sw.shape) != tuple(pred.shape):
+                raise ValueError(f"mask shape mismatch for {name}: expected {tuple(pred.shape)}, got {tuple(sw.shape)}")
+        if radial_tensor is not None:
+            sw = sw * radial_tensor.to(dtype=pred.dtype)
+        if name in set(physical_cfg.get("density_weighted_targets", ())):
+            source = str(physical_cfg.get("density_source", "ne"))
+            if source not in y_order:
+                raise ValueError(f"density weighting source {source!r} is not present in targets")
+            affine = dict((target_affine or {}).get(source, {}))
+            if "mean" not in affine or "scale" not in affine:
+                raise ValueError(f"density weighting requires linear inverse affine parameters for {source!r}")
+            source_idx = y_order.index(source)
+            density = target[:, source_idx : source_idx + 1] * float(affine["scale"]) + float(affine["mean"])
+            density = torch.clamp(density, min=0.0)
+            if not bool(torch.all(torch.isfinite(density))):
+                raise ValueError(f"density weighting source {source!r} contains non-finite physical values")
+            sw = sw * density.to(dtype=pred.dtype)
+        pred, target_i, sw = _sanitize_supervised_torch(pred, target_i, sw, name=name)
+        if normalization == "sample_mean":
+            _require_nonempty_case_weights_torch(
+                sw,
+                name=name,
+                component="point loss",
+            )
+        base_map = _loss_map_torch(pred, target_i, cfg)
 
-    for i, name in enumerate(y_order):
-        pred = _as_bchw(pred_fields[name], key=f"pred_{name}")
-        err = pred - tgt[:, i : i + 1]
-        var_delta = float(delta_by_var.get(name, cfg["delta"])) if delta_by_var else float(cfg["delta"])
-        if cfg["type"] == "huber":
-            base_map = torch.nn.functional.huber_loss(
+        point = _weighted_reduce_torch(base_map, sw, normalization=normalization, weight_denominator=weight_denominator)
+        spatial_cfg = dict(cfg["spatial"])
+        boundary = torch.zeros((), dtype=point.dtype, device=point.device)
+        gradient = torch.zeros((), dtype=point.dtype, device=point.device)
+        multiscale = torch.zeros((), dtype=point.dtype, device=point.device)
+        if float(spatial_cfg["boundary_weight"]) > 0.0:
+            boundary_sw = _boundary_weights_torch(
+                distance_any,
+                sw,
+                band_px=float(spatial_cfg["boundary_band_px"]),
+                name=name,
+            )
+            boundary = _weighted_reduce_torch(
+                base_map,
+                boundary_sw,
+                normalization=normalization,
+                weight_denominator=weight_denominator,
+            )
+        if float(spatial_cfg["gradient_weight"]) > 0.0:
+            gradient = _gradient_loss_torch(
                 pred,
-                tgt[:, i : i + 1],
-                delta=float(var_delta),
-                reduction="none",
-            )
-            grad_scale = 1.0  # autograd handles exact derivative.
-        else:
-            base_map = 0.5 * err * err
-            grad_scale = 1.0
-        if m is not None:
-            if nan_region_policy == "sdf_continuous":
-                if d_any is None:
-                    raise ValueError("nan_region_policy=sdf_continuous requires distance_any")
-                d_signed = torch.where(m > 0.5, d_any, -d_any)
-                if sdf_distance_contract != "off":
-                    m_np = np.asarray(m.detach().cpu().numpy(), dtype=np.float32)
-                    d_np = np.asarray(d_signed.detach().cpu().numpy(), dtype=np.float32)
-                    if not is_effective_signed_distance(m_np[:, 0], d_np[:, 0]):
-                        msg = (
-                            "sdf_continuous contract violation: signed distance has no negative chamber-side values; "
-                            "distance_any may be invalid for chamber supervision"
-                        )
-                        if sdf_distance_contract == "error":
-                            raise ValueError(msg)
-                        warnings.warn(msg, RuntimeWarning, stacklevel=2)
-                sw = sdf_continuous_weight_map_torch(m, d_signed, sdf_cfg).to(dtype=base_map.dtype)
-                if legacy_region_enabled:
-                    boundary = (d_any <= boundary_delta).to(dtype=base_map.dtype) * m
-                    bulk = (m - boundary).clamp(min=0.0)
-                    region_mult = boundary * max(w_boundary / max(w_bulk, 1e-8), 1.0) + bulk
-                    outside = (1.0 - m).clamp(min=0.0)
-                    sw = sw * (region_mult + outside)
-            else:
-                if legacy_region_enabled:
-                    if d_any is None:
-                        raise ValueError("region_weighting.enabled requires distance_any")
-                    boundary = (d_any <= boundary_delta).to(dtype=base_map.dtype) * m
-                    bulk = (m - boundary).clamp(min=0.0)
-                    sw = boundary * w_boundary + bulk * w_bulk
-                else:
-                    sw = m
-            sw = _apply_chamber_override_torch(
+                target_i,
                 sw,
-                mask=m,
-                var_name=name,
-                chamber_weight_by_var=chamber_weight_by_var,
-            )
-            if use_robust and name in robust_vars:
-                active = sw > 0.5
-                if bool(torch.any(active)):
-                    vals = tgt[:, i : i + 1]
-                    vals_active = vals[active]
-                    med = torch.median(vals_active)
-                    mad = torch.median(torch.abs(vals_active - med))
-                    scale = torch.clamp(mad * float(robust_mad_scale), min=1e-8)
-                    rw = 1.0 / (1.0 + torch.abs(vals - med) / scale)
-                    rw = torch.clamp(rw, min=float(robust_min_weight), max=1.0)
-                    sw = sw * rw
-            base = _weighted_reduce_torch(
-                base_map,
-                sw,
+                cfg=cfg,
                 normalization=normalization,
-                weight_denominator=sample_mean_weight_denominator,
+                weight_denominator=weight_denominator,
+                spacing=tuple(spatial_cfg["gradient_spacing"]),
+                gradient_normalization=str(spatial_cfg["gradient_normalization"]),
+                gradient_epsilon=float(spatial_cfg["gradient_epsilon"]),
             )
-        else:
-            sw = torch.ones_like(base_map, dtype=base_map.dtype)
-            base = _weighted_reduce_torch(
-                base_map,
+        if float(spatial_cfg["multiscale_weight"]) > 0.0:
+            multiscale = _multiscale_loss_torch(
+                pred,
+                target_i,
                 sw,
+                cfg=cfg,
                 normalization=normalization,
-                weight_denominator=sample_mean_weight_denominator,
+                weight_denominator=weight_denominator,
+                scales=tuple(spatial_cfg["multiscale_scales"]),
             )
-
-        if region_balance_enabled and name in region_balance_vars:
-            if region_masks_torch is None:
-                raise ValueError("supervised.region_balance.enabled requires region masks")
-            boundary_region = region_masks_torch["boundary_in"].to(dtype=base_map.dtype)
-            mid_region = region_masks_torch["plasma_mid"].to(dtype=base_map.dtype)
-            deep_region = region_masks_torch["plasma_deep"].to(dtype=base_map.dtype)
-            l_boundary = _weighted_mean_count_torch(base_map, sw, boundary_region)
-            l_mid = _weighted_mean_count_torch(base_map, sw, mid_region)
-            l_deep = _weighted_mean_count_torch(base_map, sw, deep_region)
-            region_loss = (
-                float(region_balance_w_boundary) * l_boundary
-                + float(region_balance_w_mid) * l_mid
-                + float(region_balance_w_deep) * l_deep
-            )
-            if region_balance_mode == "replace":
-                base = region_loss
-            else:
-                base = base + float(region_balance_lambda) * region_loss
-
-        if density_pos_enabled and name in density_pos_vars and density_pos_lambda > 0.0:
-            mean_aff, std_aff = density_pos_affine_by_var.get(name, (0.0, 1.0))
-            std_safe = float(max(abs(float(std_aff)), 1.0e-12))
-            pred_phys = pred * float(std_aff) + float(mean_aff)
-            violation_norm = (float(density_pos_floor) - pred_phys) / float(std_safe)
-            violation = torch.clamp(violation_norm, min=0.0)
-            pos_map = 0.5 * violation * violation
-            pos_loss = _weighted_reduce_torch(
-                pos_map,
-                sw,
-                normalization=normalization,
-                weight_denominator=sample_mean_weight_denominator,
-            )
-            base = base + float(density_pos_lambda) * pos_loss
-
-        if density_rel_enabled and name in density_rel_vars and density_rel_lambda > 0.0:
-            mean_aff, std_aff = density_rel_affine_by_var.get(name, (0.0, 1.0))
-            eps_var = float(density_rel_eps_by_var.get(name, density_rel_eps_default))
-            eps_var = max(eps_var, density_rel_eps_min)
-            pred_phys = pred * float(std_aff) + float(mean_aff)
-            tgt_phys = tgt[:, i : i + 1] * float(std_aff) + float(mean_aff)
-            rel_denom = torch.abs(tgt_phys) + float(eps_var)
-            rel_map = torch.abs(pred_phys - tgt_phys) / rel_denom
-            rel_loss = _weighted_reduce_torch(
-                rel_map,
-                sw,
-                normalization=normalization,
-                weight_denominator=sample_mean_weight_denominator,
-            )
-            base = base + float(density_rel_lambda) * rel_loss
-
+        base = (
+            point
+            + float(spatial_cfg["boundary_weight"]) * boundary
+            + float(spatial_cfg["gradient_weight"]) * gradient
+            + float(spatial_cfg["multiscale_weight"]) * multiscale
+        )
         base_loss = float(base.detach().cpu().item())
         sigma = _resolve_sigma_for_var(name, base_loss, cfg)
         if cfg["weighting"] == "uncertainty":
-            weighted = torch.exp(torch.tensor(-sigma, dtype=torch.float32, device=tgt.device)) * base + float(sigma)
+            weighted = torch.exp(torch.tensor(-sigma, dtype=torch.float32, device=target.device)) * base + float(sigma)
         else:
             fixed_weight = float(fixed_weights_by_var.get(name, 1.0)) if fixed_weights_by_var else 1.0
-            weighted = base * float(grad_scale) * float(fixed_weight)
+            weighted = base * float(fixed_weight)
+        weighted = weighted * float(target_multipliers.get(str(name), 1.0))
+        component_factor = float(target_multipliers.get(str(name), 1.0))
+        if cfg["weighting"] == "uncertainty":
+            component_factor *= float(np.exp(-sigma))
+        elif fixed_weights_by_var:
+            component_factor *= float(fixed_weights_by_var.get(name, 1.0))
         per_var[name] = float(weighted.detach().cpu().item())
+        spatial_enabled = any(
+            float(spatial_cfg[key]) > 0.0
+            for key in ("boundary_weight", "gradient_weight", "multiscale_weight")
+        )
+        if spatial_enabled:
+            per_var[f"loss_supervised_point_{name}"] = float(point.detach().cpu().item()) * component_factor
+            per_var[f"loss_supervised_spatial_boundary_{name}"] = (
+                float(boundary.detach().cpu().item())
+                * float(spatial_cfg["boundary_weight"])
+                * component_factor
+            )
+            per_var[f"loss_supervised_spatial_gradient_{name}"] = (
+                float(gradient.detach().cpu().item())
+                * float(spatial_cfg["gradient_weight"])
+                * component_factor
+            )
+            per_var[f"loss_supervised_spatial_multiscale_{name}"] = (
+                float(multiscale.detach().cpu().item())
+                * float(spatial_cfg["multiscale_weight"])
+                * component_factor
+            )
         total = total + weighted
-
+    _append_group_loss_breakdown(per_var, groups=target_groups)
     return total, per_var
 
 
@@ -1401,40 +1104,18 @@ def _as_bhw(arr: Any, *, key: str) -> np.ndarray:
 
 
 def _resolve_physics_symbol_keys(pred_fields: dict[str, Any], physics_cfg: dict[str, Any] | None) -> tuple[str, str, str]:
-    keys = [str(k) for k in pred_fields.keys()]
-    symbols = dict(dict(physics_cfg or {}).get("symbols", {}))
-
-    def _resolve(symbol_name: str, *, fallback: str | None = None) -> str | None:
-        raw = symbols.get(symbol_name, None)
-        if raw is not None:
-            key = str(raw)
-            if key not in set(keys):
-                raise ValueError(
-                    f"physics.symbols.{symbol_name}={key} not found in prediction fields; available={keys}"
-                )
-            return key
-        if fallback is not None and fallback in set(keys):
-            return fallback
-        return None
-
-    density_key = _resolve("density")
-    if density_key is None:
-        density_key = resolve_density_key(keys, canonical="ne", prefer_linear=True)
-    temperature_key = _resolve("temperature", fallback="Te")
-    potential_key = _resolve("potential", fallback="phi")
-    if density_key is None:
-        raise ValueError(
-            "physics enabled requires a density field. Provide physics.symbols.density or include ne/log_ne in targets."
-        )
-    if temperature_key is None:
-        raise ValueError(
-            "physics enabled requires a temperature field. Provide physics.symbols.temperature or include Te in targets."
-        )
-    if potential_key is None:
-        raise ValueError(
-            "physics enabled requires a potential field. Provide physics.symbols.potential or include phi in targets."
-        )
-    return str(density_key), str(temperature_key), str(potential_key)
+    keys = [str(key) for key in pred_fields.keys()]
+    cfg = dict(physics_cfg or {})
+    role_schema = cfg.get("target_role_schema")
+    if role_schema is None:
+        role_schema = cfg.get("target_roles")
+    resolved = resolve_physics_symbol_keys(
+        keys,
+        symbols=dict(cfg.get("symbols", {}) or {}),
+        target_role_schema=dict(role_schema or {}),
+        context="training physics",
+    )
+    return resolved["density"], resolved["temperature"], resolved["potential"]
 
 
 def _resolve_numpy_physics_fields(
@@ -1443,10 +1124,9 @@ def _resolve_numpy_physics_fields(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     density_key, temperature_key, potential_key = _resolve_physics_symbol_keys(pred_fields, physics_cfg)
     density = _as_bhw(pred_fields[density_key], key=density_key)
-    log_density = density if density_key == "log_ne" else np.log10(np.maximum(density, np.float32(1.0e-30))).astype(np.float32)
     temperature = _as_bhw(pred_fields[temperature_key], key=temperature_key)
     potential = _as_bhw(pred_fields[potential_key], key=potential_key)
-    return log_density, temperature, potential
+    return density, temperature, potential
 
 
 def compose_numpy(
@@ -1454,37 +1134,35 @@ def compose_numpy(
     physics_cfg: dict[str, Any] | None,
     resolved_terms: list[dict[str, Any]] | None = None,
 ) -> tuple[float, np.ndarray, dict[str, float]]:
-    """Compose numpy physics terms using the existing finite-difference implementation."""
+    """Compose numpy physics terms using the finite-difference implementation."""
+
     if not physics_cfg or not bool(physics_cfg.get("enabled", False)):
-        if "phi" in pred_fields:
-            ref = _as_bhw(pred_fields.get("phi"), key="phi")
-        elif len(pred_fields) > 0:
+        if pred_fields:
             first_key = str(next(iter(pred_fields.keys())))
             ref = _as_bhw(pred_fields[first_key], key=first_key)
         else:
             raise ValueError("compose_numpy requires at least one prediction field")
-        phi = np.zeros_like(ref, dtype=np.float32)
-        return 0.0, np.zeros_like(phi, dtype=np.float32), _empty_components()
-    log_ne, te, phi = _resolve_numpy_physics_fields(pred_fields, physics_cfg)
+        return 0.0, np.zeros_like(ref, dtype=np.float32), _empty_components()
+
+    density, temperature, potential = _resolve_numpy_physics_fields(pred_fields, physics_cfg)
     eff_cfg = dict(physics_cfg)
     if resolved_terms is not None:
         eff_cfg["resolved_terms"] = resolved_terms
-    term_map = {s.name: s for s in resolve_numpy_terms(eff_cfg)}
-    eff_cfg["lambda_poisson"] = (
+    term_map = {term.name: term for term in resolve_numpy_terms(eff_cfg)}
+    eff_cfg["poisson_weight"] = (
         float(term_map["poisson"].weight) if bool(term_map["poisson"].enabled) else 0.0
     )
-    eff_cfg["lambda_bc"] = (
+    eff_cfg["boundary_weight"] = (
         float(term_map["boundary"].weight) if bool(term_map["boundary"].enabled) else 0.0
     )
     bo_cfg = dict(eff_cfg.get("boundary_operator", {}))
-    bo_cfg["lambda"] = (
+    bo_cfg["weight"] = (
         float(term_map["boundary_operator"].weight) if bool(term_map["boundary_operator"].enabled) else 0.0
     )
     bo_cfg["enabled"] = bool(bo_cfg.get("enabled", False)) and bool(term_map["boundary_operator"].enabled)
     eff_cfg["boundary_operator"] = bo_cfg
 
-    phys_loss, grad_phi, terms = physics_loss_and_grad(phi=phi, cfg=eff_cfg, log_ne=log_ne, te=te)
-
+    phys_loss, grad_phi, terms = physics_loss_and_grad(phi=potential, cfg=eff_cfg, density=density, te=temperature)
     comps = _empty_components()
     comps["physics"] = float(phys_loss)
     comps["poisson"] = float(terms.get("poisson", 0.0))
@@ -1503,42 +1181,48 @@ def compose_torch(
     supervised_targets: dict[str, Any] | None = None,
     resolved_terms: list[dict[str, Any]] | None = None,
 ):
-    """Compose torch physics terms using the existing autograd-compatible implementation."""
+    """Compose torch physics terms using the autograd-compatible implementation."""
 
     torch = require_torch()
-    if "phi" in pred_fields:
-        ref = torch.as_tensor(pred_fields["phi"], dtype=torch.float32)
-    elif len(pred_fields) > 0:
+    if pred_fields:
         first_key = str(next(iter(pred_fields.keys())))
         ref = torch.as_tensor(pred_fields[first_key], dtype=torch.float32)
     else:
         raise ValueError("compose_torch requires at least one prediction field")
     if not physics_cfg or not bool(physics_cfg.get("enabled", False)):
         return torch.zeros((), dtype=torch.float32, device=ref.device), _empty_components()
+
     density_key, temperature_key, potential_key = _resolve_physics_symbol_keys(pred_fields, physics_cfg)
     ref = torch.as_tensor(pred_fields[potential_key], dtype=torch.float32, device=ref.device)
     eff_cfg = dict(physics_cfg)
     if resolved_terms is not None:
         eff_cfg["resolved_terms"] = resolved_terms
-    term_map = {s.name: s for s in resolve_torch_terms(eff_cfg)}
-    eff_cfg["lambda_poisson"] = (
+    term_map = {term.name: term for term in resolve_torch_terms(eff_cfg)}
+    unsupported = [
+        name
+        for name in ("boundary", "rho")
+        if bool(term_map[name].enabled) and float(term_map[name].weight) > 0.0
+    ]
+    if unsupported:
+        raise ValueError(
+            "Torch physics loss currently supports only poisson and boundary_operator terms; "
+            f"unsupported enabled terms: {unsupported}"
+        )
+    eff_cfg["poisson_weight"] = (
         float(term_map["poisson"].weight) if bool(term_map["poisson"].enabled) else 0.0
     )
     bo_cfg = dict(eff_cfg.get("boundary_operator", {}))
-    bo_cfg["lambda"] = (
+    bo_cfg["weight"] = (
         float(term_map["boundary_operator"].weight) if bool(term_map["boundary_operator"].enabled) else 0.0
     )
     bo_cfg["enabled"] = bool(bo_cfg.get("enabled", False)) and bool(term_map["boundary_operator"].enabled)
     eff_cfg["boundary_operator"] = bo_cfg
 
     density_t = torch.as_tensor(pred_fields[density_key], dtype=torch.float32, device=ref.device)
-    log_density_t = (
-        density_t if density_key == "log_ne" else torch.log10(torch.clamp(density_t, min=1.0e-30))
-    )
     physics_pred_fields = dict(pred_fields)
-    physics_pred_fields["log_ne"] = log_density_t
-    physics_pred_fields["Te"] = torch.as_tensor(pred_fields[temperature_key], dtype=torch.float32, device=ref.device)
-    physics_pred_fields["phi"] = ref
+    physics_pred_fields["density"] = density_t
+    physics_pred_fields["temperature"] = torch.as_tensor(pred_fields[temperature_key], dtype=torch.float32, device=ref.device)
+    physics_pred_fields["potential"] = ref
     total, terms = physics_terms_torch(
         pred_fields=physics_pred_fields,
         cond_vec=cond_vec,

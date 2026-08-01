@@ -1,0 +1,28 @@
+{
+  "figure": "Simplified GEC-CCP linear Z-score effect for electron density",
+  "presentation_revision": "single_target_two_panel_v2",
+  "shown_target": "ne",
+  "sample_scope": "train-only plasma cells",
+  "train_case_count": 54,
+  "sample_count": 1321920,
+  "value_transform": "identity",
+  "clip": "none",
+  "mean": 1291523868075286.8,
+  "std_ddof0": 1871264003629447.2,
+  "z_mean": 4.953674846257779e-17,
+  "z_std_ddof0": 1.0000000000000002,
+  "interpretation": "The linear Z-score changes location and scale, not distribution shape.",
+  "sources": {
+    "split": "runs\\gec_ccp_nn_operator_comparison_v1\\seed_411\\n78\\ffno\\preprocessing\\split\\split_interp_v1.json",
+    "scaler": "runs\\gec_ccp_nn_operator_comparison_v1\\seed_411\\n78\\ffno\\preprocessing\\scalers\\by_split\\interp\\y_scalers.json"
+  },
+  "display_quantiles": [
+    0.001,
+    0.995
+  ],
+  "output_files": [
+    "ccp_linear_zscore_effect.png",
+    "ccp_linear_zscore_effect.pdf",
+    "ccp_linear_zscore_effect.svg"
+  ]
+}

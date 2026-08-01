@@ -1,0 +1,34 @@
+{
+  "purpose": "conference plots for selected GEC-CCP models",
+  "dataset_size": 78,
+  "seed": 412,
+  "selection_split": "interp validation",
+  "curve_y_scale": "log",
+  "curve_note": "The plotted loss is each architecture's configured training objective; absolute loss values should not be used as a cross-architecture ranking.",
+  "models": [
+    {
+      "model_id": "ffno",
+      "display_name": "FFNO",
+      "run_root": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/ffno",
+      "metrics_csv": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/ffno/models/ffno/eval_protocol/interp/train/scalars/metrics.csv",
+      "leaderboard_csv": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/ffno/leaderboard.csv",
+      "selected_epoch": 202
+    },
+    {
+      "model_id": "deeponet_pod",
+      "display_name": "DeepONet (POD)",
+      "run_root": "runs/gec_ccp_pod_branch_tuned_v2/final/seed_412/n78/deeponet_pod",
+      "metrics_csv": "runs/gec_ccp_pod_branch_tuned_v2/final/seed_412/n78/deeponet_pod/models/deeponet_pod/eval_protocol/interp/train/scalars/metrics.csv",
+      "leaderboard_csv": "runs/gec_ccp_pod_branch_tuned_v2/final/seed_412/n78/deeponet_pod/leaderboard.csv",
+      "selected_epoch": 222
+    },
+    {
+      "model_id": "global_mlp",
+      "display_name": "Global MLP",
+      "run_root": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_mlp",
+      "metrics_csv": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_mlp/models/global_mlp/eval_protocol/interp/train/scalars/metrics.csv",
+      "leaderboard_csv": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_mlp/leaderboard.csv",
+      "selected_epoch": 190
+    }
+  ]
+}

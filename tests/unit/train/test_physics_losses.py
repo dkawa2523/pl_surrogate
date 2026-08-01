@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
-from plasma_surrogate.models.deeponet.boundary_operator_stub import BoundaryOperatorStub
 from plasma_surrogate.train.losses import (
     build_signed_distance,
+    boundary_operator_target,
     boundary_operator_grad,
     boundary_operator_loss,
     boundary_grad,
@@ -16,6 +17,24 @@ from plasma_surrogate.train.losses import (
     masked_region_huber_loss,
     sdf_continuous_weight_map,
 )
+
+
+class BoundaryOperatorStub:
+    def __init__(self, *, w_density: float = 0.08, w_te: float = 0.06, w_en: float = 0.04, bias: float = 0.0):
+        self.w_density = float(w_density)
+        self.w_te = float(w_te)
+        self.w_en = float(w_en)
+        self.bias = float(bias)
+
+    def predict_target(self, density: np.ndarray, te: np.ndarray, phi: np.ndarray) -> np.ndarray:
+        gy, gx = np.gradient(np.asarray(phi, dtype=np.float32), axis=(-2, -1), edge_order=1)
+        e_n = np.sqrt(gx**2 + gy**2).astype(np.float32)
+        return (
+            self.w_density * np.asarray(density, dtype=np.float32)
+            + self.w_te * np.asarray(te, dtype=np.float32)
+            + self.w_en * e_n
+            + self.bias
+        ).astype(np.float32)
 
 
 def test_laplacian_and_poisson_constant_is_zero():
@@ -41,8 +60,8 @@ def test_physics_loss_and_grad_combines_terms():
     phi = np.random.default_rng(0).normal(size=(2, 6, 6)).astype(np.float32)
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.1,
-        "lambda_bc": 0.2,
+        "poisson_weight": 0.1,
+        "boundary_weight": 0.2,
         "bc_mask": np.ones((6, 6), dtype=np.float32),
         "bc_value": np.zeros((6, 6), dtype=np.float32),
     }
@@ -56,12 +75,12 @@ def test_physics_loss_and_grad_combines_terms():
 def test_boundary_operator_loss_and_grad_positive():
     b, h, w = 2, 6, 6
     phi = np.zeros((b, h, w), dtype=np.float32)
-    log_ne = np.ones((b, h, w), dtype=np.float32) * 0.5
+    density = np.ones((b, h, w), dtype=np.float32) * 0.5
     te = np.ones((b, h, w), dtype=np.float32) * 2.0
     mask = np.zeros((h, w), dtype=np.float32)
     mask[0:2, :] = 1.0
-    loss = boundary_operator_loss(phi=phi, log_ne=log_ne, te=te, mask_band=mask)
-    grad = boundary_operator_grad(phi=phi, log_ne=log_ne, te=te, mask_band=mask)
+    loss = boundary_operator_loss(phi=phi, density=density, te=te, mask_band=mask)
+    grad = boundary_operator_grad(phi=phi, density=density, te=te, mask_band=mask)
     assert loss > 0.0
     assert grad.shape == phi.shape
     assert float(np.max(np.abs(grad))) > 0.0
@@ -71,22 +90,22 @@ def test_physics_loss_includes_boundary_operator_term():
     rng = np.random.default_rng(0)
     b, h, w = 2, 6, 6
     phi = rng.normal(size=(b, h, w)).astype(np.float32)
-    log_ne = rng.normal(size=(b, h, w)).astype(np.float32)
+    density = rng.normal(size=(b, h, w)).astype(np.float32)
     te = np.abs(rng.normal(size=(b, h, w)).astype(np.float32))
     mask_band = np.zeros((h, w), dtype=np.float32)
     mask_band[0:2, :] = 1.0
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
+        "poisson_weight": 0.0,
+        "boundary_weight": 0.0,
         "boundary_operator": {
             "enabled": True,
-            "lambda": 0.5,
+            "weight": 0.5,
             "mask_band": mask_band,
-            "target_coeffs": {"log_ne": 0.1, "Te": 0.1, "bias": 0.0},
+            "target_coeffs": {"density": 0.1, "temperature": 0.1, "bias": 0.0},
         },
     }
-    loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, log_ne=log_ne, te=te)
+    loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, density=density, te=te)
     assert loss > 0.0
     assert grad.shape == phi.shape
     assert terms["boundary_operator"] > 0.0
@@ -96,23 +115,23 @@ def test_boundary_operator_mode_operator_prior_runs():
     rng = np.random.default_rng(1)
     b, h, w = 2, 6, 6
     phi = rng.normal(size=(b, h, w)).astype(np.float32)
-    log_ne = rng.normal(size=(b, h, w)).astype(np.float32)
+    density = rng.normal(size=(b, h, w)).astype(np.float32)
     te = np.abs(rng.normal(size=(b, h, w)).astype(np.float32))
     mask_band = np.zeros((h, w), dtype=np.float32)
     mask_band[0:2, :] = 1.0
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
+        "poisson_weight": 0.0,
+        "boundary_weight": 0.0,
         "boundary_operator": {
             "enabled": True,
-            "lambda": 0.5,
+            "weight": 0.5,
             "mode": "operator_prior",
             "mask_band": mask_band,
-            "prior_coeffs": {"log_ne": 0.08, "Te": 0.06, "E_n": 0.04, "bias": 0.0},
+            "prior_coeffs": {"density": 0.08, "temperature": 0.06, "E_n": 0.04, "bias": 0.0},
         },
     }
-    loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, log_ne=log_ne, te=te)
+    loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, density=density, te=te)
     assert loss > 0.0
     assert grad.shape == phi.shape
     assert terms["boundary_operator"] > 0.0
@@ -122,54 +141,38 @@ def test_boundary_operator_mode_operator_prior_with_handle_runs():
     rng = np.random.default_rng(11)
     b, h, w = 2, 6, 6
     phi = rng.normal(size=(b, h, w)).astype(np.float32)
-    log_ne = rng.normal(size=(b, h, w)).astype(np.float32)
+    density = rng.normal(size=(b, h, w)).astype(np.float32)
     te = np.abs(rng.normal(size=(b, h, w)).astype(np.float32))
     mask_band = np.zeros((h, w), dtype=np.float32)
     mask_band[0:2, :] = 1.0
-    op = BoundaryOperatorStub(w_log_ne=0.09, w_te=0.05, w_en=0.02, bias=0.0)
+    op = BoundaryOperatorStub(w_density=0.09, w_te=0.05, w_en=0.02, bias=0.0)
     cfg = {
         "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
+        "poisson_weight": 0.0,
+        "boundary_weight": 0.0,
         "boundary_operator": {
             "enabled": True,
-            "lambda": 0.5,
+            "weight": 0.5,
             "mode": "operator_prior",
             "mask_band": mask_band,
             "operator_handle": op,
         },
     }
-    loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, log_ne=log_ne, te=te)
+    loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, density=density, te=te)
     assert loss > 0.0
     assert grad.shape == phi.shape
     assert terms["boundary_operator"] > 0.0
 
 
-def test_boundary_operator_mode_external_operator_runs():
+def test_boundary_operator_mode_external_operator_is_removed():
     rng = np.random.default_rng(2)
     b, h, w = 2, 6, 6
     phi = rng.normal(size=(b, h, w)).astype(np.float32)
-    log_ne = rng.normal(size=(b, h, w)).astype(np.float32)
+    density = rng.normal(size=(b, h, w)).astype(np.float32)
     te = np.abs(rng.normal(size=(b, h, w)).astype(np.float32))
-    mask_band = np.zeros((h, w), dtype=np.float32)
-    mask_band[0:2, :] = 1.0
-    op = BoundaryOperatorStub(w_log_ne=0.07, w_te=0.05, w_en=0.03, bias=0.0)
-    cfg = {
-        "enabled": True,
-        "lambda_poisson": 0.0,
-        "lambda_bc": 0.0,
-        "boundary_operator": {
-            "enabled": True,
-            "lambda": 0.5,
-            "mode": "external_operator",
-            "mask_band": mask_band,
-            "external_operator_handle": op,
-        },
-    }
-    loss, grad, terms = physics_loss_and_grad(phi, cfg=cfg, log_ne=log_ne, te=te)
-    assert loss > 0.0
-    assert grad.shape == phi.shape
-    assert terms["boundary_operator"] > 0.0
+
+    with pytest.raises(ValueError, match="Unknown boundary operator mode"):
+        boundary_operator_target(density=density, te=te, phi=phi, mode="external_operator")
 
 
 def test_masked_huber_loss_respects_mask():

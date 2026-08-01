@@ -1,0 +1,151 @@
+run_dir: runs/icp_stage4_core4/cno_smoke
+
+runtime:
+  input_mode: table_plus_structure
+  strict_input_mode: error
+  structure:
+    feature_profile: geom_v1_mainline
+    descriptor_profile: none
+    latent_profile: none
+    adapter_mode: auto
+    provider_mode: fixed
+
+dataset:
+  type: csv_npz
+  root: data/outputs_icp_stage4_enriched_360_csv_npz_core4_linear
+  index_csv: index_smoke.csv
+  targets:
+    - {id: ne, source_key: ne, value_transform: identity, units: "m^-3", dtype: float32, role: density_electron, field_family: density, positive: true}
+    - {id: ni, source_key: ni, value_transform: identity, units: "m^-3", dtype: float32, role: density_ion, field_family: density, positive: true}
+    - {id: Te, source_key: Te, value_transform: identity, units: "eV", dtype: float32, role: temperature_electron, field_family: temperature, positive: true}
+    - {id: phi, source_key: phi, value_transform: identity, units: "V", dtype: float32, role: potential, field_family: electrostatic, positive: false}
+  cond_columns: [llcoil, rrc, nncoil, rrce, zzc, pp, pp0]
+  axis_column: axis
+  fields_npz_column: fields_npz
+  case_id_column: case_id
+  base_case_id_column: base_case_id
+  split_group_column: split_group
+  geometry_root: geometry
+
+preprocessing:
+  split:
+    seed: 7
+    ratios: [0.8, 0.1, 0.1]
+    interp_mode: marginal
+    extrapolation:
+      key: pp
+      direction: high
+      holdout_ratio: 0.2
+      val_ratio: 0.2
+  scalers:
+    enforce_target_transforms: true
+    y_fit_policy: plasma_only
+    target_transforms:
+      ne: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+      ni: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+      Te: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+      phi: {value_transform: identity, scaler: zscore, fit_scope: plasma_only, clip: {mode: none}}
+  distance_contract:
+    require_negative_outside: error
+  coord_grid_contract:
+    require_requested_source: error
+  coord_grid_source: rz_linear
+  coord_features:
+    enabled: true
+    output: features/coord_feature_pack.npz
+    channels_from_profile: geom_v1_mainline
+    distance_transform_stats:
+      enabled: true
+      fit_scope: train_split
+      mask_scope: plasma_plus_band
+      chamber_band_px: 2.0
+      signed_quantile: 0.45
+      proximity_quantile: 0.25
+
+model:
+  name: cno
+  phi_mode: direct
+  backend: torch
+  cno_cfg:
+    width: 8
+    n_layers: 1
+    dropout: 0.0
+    kernel_size: 3
+
+train:
+  epochs: 1
+  lr: 0.001
+  physics:
+    enabled: false
+  unet_like:
+    batch_size_cases: 1
+    shuffle_cases: true
+  cno:
+    target_family: allvars
+    target_vars: [ne, ni, Te, phi]
+    input_features:
+      mode: geom_feature_pack
+      require_pack: error
+      features: [x, y, mask_plasma, distance_signed, distance_any]
+      distance_transform:
+        mode: raw
+    selection:
+      mode: best_val_allvars_balance
+      eval_every_n_epochs: 1
+      warmup_epochs: 0
+      weights:
+        ne: 0.25
+        ni: 0.25
+        Te: 0.25
+        phi: 0.25
+    model_cfg:
+      backend: torch
+      cno_cfg:
+        width: 8
+        n_layers: 1
+        dropout: 0.0
+        kernel_size: 3
+  loss:
+    supervised:
+      type: huber
+      delta: 1.0
+      normalization: sample_mean
+      sample_mean_group_mode: batch
+      sample_mean_weight_denominator: count
+      mask: plasma_only
+    multitask:
+      weighting: fixed
+      fixed_weights_by_var:
+        ne: 1.0
+        ni: 1.0
+        Te: 1.0
+        phi: 1.0
+
+inference:
+  qoi:
+    uniformity:
+      target: ne
+  single:
+    enabled: true
+    case_id: case_g001_op01
+    cond:
+      llcoil: 1.0145
+      rrc: 9.2677
+      nncoil: 2.0
+      rrce: 24.3392
+      zzc: 4.2826
+      pp: 2544.405
+      pp0: 0.004861
+    geom: {geom_id: default}
+    axis: {mode: steady, value: 0.0}
+  batch:
+    enabled: true
+    cases:
+      - case_id: case_g001_op01
+        cond: {llcoil: 1.0145, rrc: 9.2677, nncoil: 2.0, rrce: 24.3392, zzc: 4.2826, pp: 2544.405, pp0: 0.004861}
+        geom: {geom_id: default}
+        axis: {mode: steady, value: 0.0}
+      - case_id: case_g002_op01
+        cond: {llcoil: 0.5543, rrc: 3.7458, nncoil: 6.0, rrce: 29.6998, zzc: 0.9013, pp: 2823.804, pp0: 0.08349}
+        geom: {geom_id: default}
+        axis: {mode: steady, value: 0.0}

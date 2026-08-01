@@ -8,6 +8,10 @@ import numpy as np
 
 from plasma_surrogate.models.fno._spectral_cfg import normalize_common_spectral_cfg
 from plasma_surrogate.models.fno._torch_grid_base import _TorchGridFieldBaseline
+from plasma_surrogate.models.heads.role_grouped import (
+    build_role_grouped_conv2d_head,
+    is_grouped_output_head_mode,
+)
 
 
 class FNOBaseline(_TorchGridFieldBaseline):
@@ -26,6 +30,8 @@ class FNOBaseline(_TorchGridFieldBaseline):
         input_feature_channels: list[str] | None = None,
         spectral_cfg: dict[str, Any] | None = None,
         backend: str = "torch",
+        output_heads: dict[str, Any] | None = None,
+        target_role_schema: dict[str, Any] | None = None,
     ):
         super().__init__(
             input_dim=input_dim,
@@ -38,9 +44,11 @@ class FNOBaseline(_TorchGridFieldBaseline):
             input_feature_channels=input_feature_channels,
             backend=backend,
             cfg_prefix="train.fno",
-            default_output_keys=["ne", "Te", "phi"],
+            default_output_keys=[],
             impl_version="spectral_v2",
             head_arch_version="linear_v1",
+            output_heads=output_heads,
+            target_role_schema=target_role_schema,
         )
         self.n_modes = int(max(1, int(n_modes)))
         self.spectral_cfg, spectral_common = normalize_common_spectral_cfg(
@@ -52,6 +60,7 @@ class FNOBaseline(_TorchGridFieldBaseline):
         self.skip_filter = str(spectral_common["skip_filter"])
         torch = self.torch
         nn = torch.nn
+        output_head_group_options = dict(getattr(self, "output_head_group_options", {}) or {})
 
         class _SpectralConv2d(nn.Module):
             def __init__(self, in_ch: int, out_ch: int, modes: int, *, dealias_ratio: float, taper_alpha: float):
@@ -179,6 +188,10 @@ class FNOBaseline(_TorchGridFieldBaseline):
                 dealias_ratio: float,
                 taper_alpha: float,
                 skip_filter: str,
+                head_mode: str,
+                output_keys: list[str],
+                target_groups: dict[str, Any],
+                with_rho_eff_head: bool,
             ):
                 super().__init__()
                 self.in_proj = nn.Conv2d(in_channels, width, kernel_size=1)
@@ -194,18 +207,37 @@ class FNOBaseline(_TorchGridFieldBaseline):
                         for _ in range(max(int(n_layers), 1))
                     ]
                 )
-                self.post = nn.Sequential(
-                    nn.Conv2d(width, width, kernel_size=1),
-                    nn.GELU(),
-                    nn.Dropout(float(max(dropout, 0.0))),
-                    nn.Conv2d(width, out_channels, kernel_size=1),
-                )
+                if is_grouped_output_head_mode(head_mode):
+                    self.post = nn.Sequential(
+                        nn.Conv2d(width, width, kernel_size=1),
+                        nn.GELU(),
+                        nn.Dropout(float(max(dropout, 0.0))),
+                    )
+                    self.head = build_role_grouped_conv2d_head(
+                        torch=torch,
+                        in_channels=width,
+                        output_keys=output_keys,
+                        target_groups=target_groups,
+                        group_options=output_head_group_options,
+                        with_rho_eff_head=with_rho_eff_head,
+                    )
+                else:
+                    self.post = nn.Sequential(
+                        nn.Conv2d(width, width, kernel_size=1),
+                        nn.GELU(),
+                        nn.Dropout(float(max(dropout, 0.0))),
+                        nn.Conv2d(width, out_channels, kernel_size=1),
+                    )
+                    self.head = None
 
             def forward(self, x):
                 h = self.in_proj(x)
                 for block in self.blocks:
                     h = block(h)
-                return self.post(h)
+                h = self.post(h)
+                if self.head is not None:
+                    return self.head(h)
+                return h
 
         width = int(spectral_common["width"])
         n_layers = int(spectral_common["n_layers"])
@@ -220,6 +252,10 @@ class FNOBaseline(_TorchGridFieldBaseline):
             dealias_ratio=float(self.dealias_ratio),
             taper_alpha=float(self.taper_alpha),
             skip_filter=str(self.skip_filter),
+            head_mode=str(self.output_heads_mode),
+            output_keys=list(self.output_keys),
+            target_groups=dict(self.target_groups),
+            with_rho_eff_head=bool(self.with_rho_eff_head),
         )
         self._torch_width = int(width)
         self._torch_layers = int(n_layers)

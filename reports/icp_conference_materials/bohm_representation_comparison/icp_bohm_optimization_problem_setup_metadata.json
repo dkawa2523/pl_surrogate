@@ -1,0 +1,22 @@
+{
+  "title": "ICP Bohm-flux optimization problem setup",
+  "source_run": "runs\\icp_stage4_bohm_flux_sdf_500trials_spacing_slope_v4",
+  "source_trial_id": 281,
+  "coil_count": 4,
+  "wafer_layers": 10,
+  "radial_bins": 32,
+  "density_threshold_m3": 1e+17,
+  "bohm_flux": "Gamma_B = ni * sqrt(e * Te / m_Ar+)",
+  "e_charge_C": 1.602176634e-19,
+  "argon_ion_mass_kg": 6.63352146325368e-26,
+  "objective": "maximum local deviation of equal-area-binned wafer-near Bohm flux",
+  "outputs": [
+    "reports\\icp_conference_materials\\bohm_representation_comparison\\icp_bohm_optimization_problem_setup.png",
+    "reports\\icp_conference_materials\\bohm_representation_comparison\\icp_bohm_optimization_problem_setup.pdf",
+    "reports\\icp_conference_materials\\bohm_representation_comparison\\icp_bohm_optimization_problem_setup.svg",
+    "reports\\icp_conference_materials\\bohm_representation_comparison\\icp_bohm_objective_definition.png",
+    "reports\\icp_conference_materials\\bohm_representation_comparison\\icp_bohm_objective_definition.pdf",
+    "reports\\icp_conference_materials\\bohm_representation_comparison\\icp_bohm_objective_definition.svg"
+  ],
+  "validation_status": "surrogate_only_high_fidelity_icp_validation_pending"
+}

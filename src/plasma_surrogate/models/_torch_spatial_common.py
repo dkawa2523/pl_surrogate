@@ -43,8 +43,6 @@ def _resolve_batched_spatial_features(
     grid_shape: tuple[int, int],
     spatial_feature_dim: int,
     label: str,
-    coord_grid: np.ndarray | None = None,
-    allow_coord_fallback: bool = False,
     explicit_requirement_message: str | None = None,
 ) -> np.ndarray:
     x = np.asarray(cond, dtype=np.float32)
@@ -54,8 +52,6 @@ def _resolve_batched_spatial_features(
     h, w = tuple(grid_shape)
     src = spatial_features if spatial_features is not None else static_spatial_features
     if src is None:
-        if allow_coord_fallback and coord_grid is not None:
-            return np.repeat(np.asarray(coord_grid, dtype=np.float32)[None, ...], bsz, axis=0).astype(np.float32)
         if explicit_requirement_message:
             raise ValueError(str(explicit_requirement_message))
         raise ValueError(f"{label} input_features requires explicit spatial features")
@@ -91,18 +87,26 @@ def _state_dict_numpy_torch(net: Any) -> dict[str, np.ndarray]:
     }
 
 
+def _resolve_torch_device(torch: Any) -> Any:
+    return torch.device("cuda" if bool(torch.cuda.is_available()) else "cpu")
+
+
 def _load_state_dict_numpy_torch(
     state: dict[str, np.ndarray],
     *,
     torch: Any,
     net: Any,
     empty_message: str,
+    device: Any | None = None,
 ) -> None:
-    state_t = {
-        k.split("torch::", 1)[1]: torch.from_numpy(np.asarray(v, dtype=np.float32))
-        for k, v in state.items()
-        if str(k).startswith("torch::")
-    }
+    state_t = {}
+    for k, v in state.items():
+        if not str(k).startswith("torch::"):
+            continue
+        tensor = torch.from_numpy(np.asarray(v, dtype=np.float32))
+        if device is not None:
+            tensor = tensor.to(device)
+        state_t[k.split("torch::", 1)[1]] = tensor
     if not state_t:
         raise ValueError(empty_message)
     net.load_state_dict(state_t, strict=True)
@@ -159,6 +163,7 @@ __all__ = [
     "_build_unit_coord_grid",
     "_load_state_dict_numpy_torch",
     "_resolve_batched_spatial_features",
+    "_resolve_torch_device",
     "_state_dict_numpy_torch",
     "_validate_static_spatial_features",
 ]

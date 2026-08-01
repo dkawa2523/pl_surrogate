@@ -4,6 +4,7 @@ from pathlib import Path
 
 from plasma_surrogate.benchmark.runner import BenchmarkRunner
 from plasma_surrogate.benchmark.runtime_context import build_benchmark_data_context
+from tests._config_presets import default_target_transforms_four_field_example, runtime_table_only
 
 
 def test_build_benchmark_data_context_shapes_and_split(tmp_path: Path):
@@ -13,8 +14,12 @@ def test_build_benchmark_data_context_shapes_and_split(tmp_path: Path):
         "dataset": {"type": "synthetic", "n_cases": 9, "height": 8, "width": 8, "cond_dim": 3, "seed": 4},
         "profile": "m7_global_frozen_ref",
         "phi_mode": "direct",
+        "runtime": runtime_table_only(),
         "split": {"seed": 2, "ratios": [0.6, 0.2, 0.2]},
-        "preprocessing": {"axis_schema": {"mode": "steady", "harmonics": 1}},
+        "preprocessing": {
+            "axis_schema": {"mode": "steady", "harmonics": 1},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
+        },
     }
 
     profile_lock = BenchmarkRunner._resolve_profile_lock("m7_global_frozen_ref")
@@ -35,7 +40,11 @@ def test_build_benchmark_data_context_honors_benchmark_axis_mode_override(tmp_pa
         "profile": "m7_global_frozen_ref",
         "phi_mode": "direct",
         "axis_mode": "time",
-        "preprocessing": {"axis_schema": {"mode": "steady", "harmonics": 1}},
+        "runtime": runtime_table_only(),
+        "preprocessing": {
+            "axis_schema": {"mode": "steady", "harmonics": 1},
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
+        },
     }
     # Profile lock requires steady for m7_global_frozen_ref; runner should block before context builder.
     profile_lock = BenchmarkRunner._resolve_profile_lock("m7_global_frozen_ref")

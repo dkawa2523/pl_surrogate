@@ -1,0 +1,41 @@
+priority,category,asset_id,system,topic,recommended_use,available_files
+core,training_size,ccp_case_macro_relative_rmse_by_training_size,GEC-CCP,Case-macro field-value error vs training size,Overall training-size comparison,PNG|PDF|SVG|CSV|metadata
+core,training_size,ccp_case_macro_relative_gradient_error_by_training_size,GEC-CCP,Case-macro spatial-gradient error vs training size,Overall spatial-learning comparison,PNG|PDF|SVG|CSV|metadata
+core,training_size,ccp_ffno_densemlp_ne_error_by_training_size,GEC-CCP,Electron-density signed error at Ntrain=54 and 24,FFNO vs DenseMLP spatial comparison,PNG|PDF|SVG|metadata
+core,training_size,ccp_n54_ffno_pod_deeponet_densemlp_ne_comparison,GEC-CCP,Electron-density truth prediction and signed error at Ntrain=54,FFNO vs POD-DeepONet vs DenseMLP spatial comparison,PNG|PDF|SVG|metadata
+core,training_size,ccp_n54_relative_rmse_ne_vs_te,GEC-CCP,Electron-density vs electron-temperature case-macro relative RMSE at Ntrain=54,Model accuracy comparison by plasma quantity,PNG|PDF|SVG|CSV|metadata
+core,training_size,ccp_n54_relative_rmse_phi_vs_ni,GEC-CCP,Potential vs ion-density case-macro relative RMSE at Ntrain=54,Model accuracy comparison by plasma quantity,PNG|PDF|SVG|CSV|metadata
+core,geometry,ccp_geometry_conference,GEC-CCP,計算領域と境界,装置説明,PNG|PDF|SVG|metadata
+core,geometry,icp_geometry_conference,GEC-ICP,計算領域・基板・コイル,装置説明,PNG|PDF|SVG|metadata
+support,geometry,ccp_mesh_conference,GEC-CCP,COMSOLメッシュ,数値計算手法,PNG|PDF|SVG|metadata
+support,geometry,icp_mesh_conference,GEC-ICP,サロゲート構造格子,学習入出力の説明,PNG|PDF|SVG|metadata
+core,field,ccp_electron_density_2d,GEC-CCP,電子密度2D,代表プラズマ分布,PNG|PDF|SVG|metadata
+core,field,icp_electron_density_2d,GEC-ICP,電子密度2D,代表プラズマ分布,PNG|PDF|SVG|metadata
+support,field,ccp_ion_density_2d,GEC-CCP,イオン密度2D,物性別結果,PNG|PDF|SVG|metadata
+support,field,ccp_electron_temperature_2d,GEC-CCP,電子温度2D,物性別結果,PNG|PDF|SVG|metadata
+support,field,ccp_electric_potential_2d,GEC-CCP,電位2D,物性別結果,PNG|PDF|SVG|metadata
+support,field,icp_ion_density_2d,GEC-ICP,イオン密度2D,物性別結果,PNG|PDF|SVG|metadata
+support,field,icp_electron_temperature_2d,GEC-ICP,電子温度2D,物性別結果,PNG|PDF|SVG|metadata
+support,field,icp_electric_potential_2d,GEC-ICP,電位2D,物性別結果,PNG|PDF|SVG|metadata
+appendix,field,ccp_electron_density_perspective,GEC-CCP,電子密度平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+appendix,field,ccp_ion_density_perspective,GEC-CCP,イオン密度平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+appendix,field,ccp_electron_temperature_perspective,GEC-CCP,電子温度平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+appendix,field,ccp_electric_potential_perspective,GEC-CCP,電位平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+appendix,field,icp_electron_density_perspective,GEC-ICP,電子密度平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+appendix,field,icp_ion_density_perspective,GEC-ICP,イオン密度平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+appendix,field,icp_electron_temperature_perspective,GEC-ICP,電子温度平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+appendix,field,icp_electric_potential_perspective,GEC-ICP,電位平面斜視,表紙・概要,PNG|PDF|SVG|metadata
+core,dataset_quality,ccp_dataset_response_coverage,GEC-CCP,電子密度応答多様性,データ範囲の妥当性,PNG|PDF|SVG|metadata
+core,dataset_quality,icp_dataset_geometry_coverage,GEC-ICP,形状入力カバレッジ,構造汎化条件,PNG|PDF|SVG|metadata
+support,dataset_quality,icp_dataset_operating_coverage,GEC-ICP,運転入力と応答面,入力応答関係,PNG|PDF|SVG|metadata
+core,dataset_quality,icp_dataset_response_coverage,GEC-ICP,split別応答カバレッジ,分割の妥当性,PNG|PDF|SVG|metadata
+core,model_comparison,ccp_model_accuracy_scatter,GEC-CCP,値誤差と空間勾配誤差,総合モデル比較,PNG|PDF|SVG|CSV|metadata
+support,model_comparison,ccp_model_accuracy_scatter_zoom,GEC-CCP,高精度領域拡大,上位モデル比較,PNG|PDF|SVG
+support,model_comparison,ccp_model_accuracy_by_field,GEC-CCP,4物性別誤差,物性別モデル比較,PNG|PDF|SVG
+core,model_comparison,ccp_model_r2_ne_vs_te,GEC-CCP,電子密度と電子温度R2,物性別モデル比較,PNG|PDF|SVG|CSV
+core,model_comparison,ccp_model_r2_ni_vs_phi,GEC-CCP,イオン密度と電位R2,物性別モデル比較,PNG|PDF|SVG|CSV
+appendix,preprocessing,ccp_zscore_before,GEC-CCP,Z-score前,前処理説明,PNG|PDF|SVG|metadata
+appendix,preprocessing,ccp_zscore_after,GEC-CCP,Z-score後,前処理説明,PNG|PDF|SVG|metadata
+appendix,input_representation,icp_dimension_vector,GEC-ICP,形状寸法ベクトル,入力表現説明,PNG|PDF|SVG|metadata
+appendix,input_representation,icp_single_coil_sdf,GEC-ICP,単一コイルSDF,入力表現説明,PNG|PDF|SVG|metadata
+appendix,input_representation,icp_union_sdf,GEC-ICP,union SDF,入力表現説明,PNG|PDF|SVG|metadata

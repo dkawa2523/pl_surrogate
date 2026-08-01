@@ -1,0 +1,147 @@
+{
+  "figure": "Conference-ready representative GEC-CCP computational geometry",
+  "figure_variant": "color",
+  "representative_alternative": "base4",
+  "representative_rationale": "base4 matches the standard COMSOL dThick=3 mm dielectric break",
+  "coordinate_system": "2D axisymmetric r-z section",
+  "length_unit": "cm",
+  "dataset_condition_record": {
+    "Td": 0.03,
+    "interpretation_note": "Td is retained as a dataset condition and is not treated as dThick."
+  },
+  "geometry_dimensions_cm": {
+    "discharge_gap": 2.54,
+    "inner_radius": 5.38,
+    "outer_radius": 10.16,
+    "chamber_bottom": -3.81,
+    "chamber_top": 6.35,
+    "chamber_height": 10.16,
+    "driven_electrode_radius": 5.08,
+    "grounded_electrode_radius": 5.08,
+    "powered_side_dielectric_break": 0.3
+  },
+  "boundary_roles_zero_based_mphtxt_entity_id": {
+    "axis_of_symmetry": [
+      0
+    ],
+    "driven_electrode": [
+      1
+    ],
+    "dielectric_contact": [
+      3,
+      5
+    ],
+    "grounded_electrode_and_walls": [
+      2,
+      4,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ]
+  },
+  "boundary_segments_cm": [
+    {
+      "entity_id": 0,
+      "r0": 0.0,
+      "r1": 0.0,
+      "z0": 0.0,
+      "z1": 2.54
+    },
+    {
+      "entity_id": 1,
+      "r0": 0.0,
+      "r1": 5.08,
+      "z0": 0.0,
+      "z1": 0.0
+    },
+    {
+      "entity_id": 2,
+      "r0": 0.0,
+      "r1": 5.08,
+      "z0": 2.54,
+      "z1": 2.54
+    },
+    {
+      "entity_id": 3,
+      "r0": 5.08,
+      "r1": 5.38,
+      "z0": 0.0,
+      "z1": 0.0
+    },
+    {
+      "entity_id": 4,
+      "r0": 5.08,
+      "r1": 5.38,
+      "z0": 2.54,
+      "z1": 2.54
+    },
+    {
+      "entity_id": 5,
+      "r0": 5.38,
+      "r1": 5.38,
+      "z0": -3.81,
+      "z1": 0.0
+    },
+    {
+      "entity_id": 6,
+      "r0": 5.38,
+      "r1": 10.16,
+      "z0": -3.81,
+      "z1": -3.81
+    },
+    {
+      "entity_id": 7,
+      "r0": 5.38,
+      "r1": 5.38,
+      "z0": 2.54,
+      "z1": 6.35
+    },
+    {
+      "entity_id": 8,
+      "r0": 5.38,
+      "r1": 10.16,
+      "z0": 6.35,
+      "z1": 6.35
+    },
+    {
+      "entity_id": 9,
+      "r0": 10.16,
+      "r1": 10.16,
+      "z0": -3.81,
+      "z1": 0.0
+    },
+    {
+      "entity_id": 10,
+      "r0": 10.16,
+      "r1": 10.16,
+      "z0": 0.0,
+      "z1": 2.54
+    },
+    {
+      "entity_id": 11,
+      "r0": 10.16,
+      "r1": 10.16,
+      "z0": 2.54,
+      "z1": 6.35
+    }
+  ],
+  "dielectric_representation": "The source model provides a Dielectric Contact boundary condition, not a solid/material dielectric domain; the figure therefore shows only the verified contact boundaries.",
+  "material_claims": "No dielectric or electrode material is inferred from the available geometry data.",
+  "omitted_nonphysical_geometry": "Mesh-control edges are not presentation parts and are omitted.",
+  "sources": {
+    "mphtxt_geometry": "data\\outputs_merged_td_all_success_pa_ext0520\\structure\\base4\\argon_gec_ccp_base4.mphtxt",
+    "structure_index_csv": "data\\outputs_merged_td_all_success_pa_ext0520\\structure_file_index.csv",
+    "parts_manifest_json": "data\\outputs_merged_td_csv_periodic_ext0520_v2\\geometry\\parts_manifest.json",
+    "comsol_model_definition": "https://doc.comsol.com/6.4/doc/com.comsol.help.models.plasma.argon_gec_ccp/argon_gec_ccp.html",
+    "comsol_model_page": "https://www.comsol.com/model/gec-ccp-reactor-argon-chemistry-55011",
+    "comsol_dielectric_contact_definition": "https://doc.comsol.com/6.4/doc/com.comsol.help.plasma/plasma_ug_plasma.09.16.html"
+  },
+  "output_files": [
+    "gec_ccp_geometry_overview.png",
+    "gec_ccp_geometry_overview.pdf",
+    "gec_ccp_geometry_overview.svg"
+  ]
+}

@@ -1,0 +1,4 @@
+measurement_id,case_id,optimizer_seed,n_trials,best_trial,best_loss,max_stored_vs_recomputed_loss_abs_difference
+M1,case_td003_pa050_pp0_3_gamma_010__steady,20260715,100,40,0.05384094708295357,0.0
+M2,case_td016_pp0_1_gamma_007__steady,20260715,100,20,0.042925566539968686,0.0
+M3,case_td030_pa200_pp0_5_gamma_004__steady,20260715,100,100,0.05157235431250758,0.0

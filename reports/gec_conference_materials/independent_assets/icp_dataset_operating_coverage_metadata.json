@@ -1,0 +1,35 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The ICP operating-input samples cover the interpolated electron-density response surface",
+  "sources": {
+    "index": "data/outputs_icp_stage4_enriched_360_csv_npz_core4_part_lite_v2/index.csv",
+    "split": "runs/icp_stage4_coil_structure_v1/unet/preprocessing/split/split_structure_holdout_v1.json"
+  },
+  "unique_pairs": 360,
+  "pp_range": [
+    505.725,
+    2999.798
+  ],
+  "pp0_range": [
+    0.003005,
+    0.099809
+  ],
+  "response": "casewise plasma ne P95",
+  "response_unit": "m^-3",
+  "surface_interpolation": "piecewise linear triangulation in (log10(pp0), pp, log10(ne_P95))",
+  "surface_extrapolation": "none; only the sampled convex hull is filled",
+  "surface_display_log10_quantiles": [
+    16.116456620134205,
+    18.52202522897493
+  ],
+  "surface_case_count": 359,
+  "scatter_case_count": 360,
+  "excluded_from_surface_case_id": "case_g012_op01",
+  "excluded_from_surface_response_m3": 279381771.2,
+  "output_stem": "icp_dataset_operating_coverage",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_dataset_operating_coverage.png",
+    "reports/gec_conference_materials/independent_assets/icp_dataset_operating_coverage.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_dataset_operating_coverage.svg"
+  ]
+}

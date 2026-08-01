@@ -12,11 +12,12 @@ from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 
 def test_case_key_is_deterministic_for_same_payload(tmp_path: Path, geometry_root: Path):
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=0),
+            model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=0),
         cond_schema=CondSchema(order=["c0", "c1", "c2"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=FixedGeometryProvider(geometry_root),
         output_dir=tmp_path / "infer",
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
 
     cond_a = {"c1": 0.2, "c0": 0.1, "c2": 0.3}
@@ -35,23 +36,24 @@ def test_case_key_is_deterministic_for_same_payload(tmp_path: Path, geometry_roo
     assert (single_root / keys[0] / "fields_phys.npz").exists()
 
 
-def test_cycle1_accepts_geom_param_contract(tmp_path: Path, geometry_root: Path):
+def test_mainline_rejects_geom_param_for_fixed_provider(tmp_path: Path, geometry_root: Path):
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=0),
+            model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=0),
         cond_schema=CondSchema(order=["c0", "c1", "c2"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=FixedGeometryProvider(geometry_root),
         output_dir=tmp_path / "infer",
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
 
-    res = engine.single_run(
-        cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
-        geom={"geom_id": "alt_geometry", "geom_param": {"radius": 0.2, "gap": 1.1}},
-        axis={"mode": "steady", "value": 0.0},
-    )
-    assert "uniformity" in res.qoi
+    with pytest.raises(ValueError, match="provider_mode=parametric_parts"):
+        engine.single_run(
+            cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
+            geom={"geom_id": "alt_geometry", "geom_param": {"radius": 0.2, "gap": 1.1}},
+            axis={"mode": "steady", "value": 0.0},
+        )
 
-    with pytest.raises(TypeError):
+    with pytest.raises(ValueError, match="provider_mode=parametric_parts"):
         engine.single_run(
             cond={"c0": 0.1, "c1": 0.2, "c2": 0.3},
             geom={"geom_param": "invalid"},
@@ -59,13 +61,14 @@ def test_cycle1_accepts_geom_param_contract(tmp_path: Path, geometry_root: Path)
         )
 
 
-def test_ood_warning_for_cond_outside_stats(tmp_path: Path, geometry_root: Path):
+def test_inference_result_uses_diagnostics_without_warning_buckets(tmp_path: Path, geometry_root: Path):
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=0),
+            model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=0),
         cond_schema=CondSchema(order=["c0", "c1", "c2"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=FixedGeometryProvider(geometry_root),
         output_dir=tmp_path / "infer",
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
         cond_stats={
             "c0": {"min": 0.0, "max": 1.0},
             "c1": {"min": 0.0, "max": 1.0},
@@ -77,4 +80,6 @@ def test_ood_warning_for_cond_outside_stats(tmp_path: Path, geometry_root: Path)
         geom={"geom_id": "default"},
         axis={"mode": "steady", "value": 0.0},
     )
-    assert any("ood:cond:c0" in w for w in result.warnings)
+    assert result.diagnostics["physics_diagnostics_available"] is False
+    assert "finite_ratio_ne" in result.diagnostics
+    assert not hasattr(result, "warnings")

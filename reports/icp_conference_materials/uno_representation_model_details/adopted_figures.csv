@@ -1,0 +1,3 @@
+order,status,figure_id,claim,canonical_png,canonical_pdf,canonical_svg,data,metadata
+1,adopted_for_icp_conference,icp_uno_dimension_sdf_learning_curves,Controlled UNO training histories for Dimension-vector and Union-SDF structure inputs,dimension_sdf_learning_curves.png,dimension_sdf_learning_curves.pdf,dimension_sdf_learning_curves.svg,learning_curves.csv,metadata.json
+2,adopted_for_icp_conference,icp_uno_dimension_vs_sdf_ne_comparison,UNO electron-density truth prediction and signed-error comparison on one common held-out structure,dimension_vs_sdf_ne_comparison.png,dimension_vs_sdf_ne_comparison.pdf,dimension_vs_sdf_ne_comparison.svg,spatial_metrics.csv,metadata.json

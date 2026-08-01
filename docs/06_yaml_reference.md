@@ -1,417 +1,352 @@
 # 06 YAML Reference
 
-本章は、mainline 実用で触る YAML キーをカテゴリ単位で整理した辞書です。  
-すべての内部キーを列挙するのではなく、第三者運用で意味を持つキーに絞ります。
+This file shows minimal product YAML fragments. Dataset-specific experiments
+should live in `configs/experimental/`.
 
-各キーには以下を意識して説明します。
-
-- 何に使うか
-- 必須か任意か
-- mainline 既定の考え方
-- downstream でどこに効くか
-
-## 1. `dataset`
+## Table Only
 
 ```yaml
+runtime:
+  input_mode: table_only
+  structure:
+    adapter_mode: none
+    provider_mode: fixed
+
 dataset:
   type: csv_npz
-  root: data/my_dataset
+  root: data/product_dataset
   index_csv: index.csv
-  cond_columns: [p0, td, gamma]
-  axis_column: axis
+  cond_columns: [pressure, power, gap]
   fields_npz_column: fields_npz
   case_id_column: case_id
-  base_case_id_column: base_case_id
-  split_group_column: split_group
-  geometry_root: geometry
   targets:
-    - id: density
-      source_key: density_raw
+    - id: electron_density
+      source_key: electron_density_field
+      role: density_electron
+      positive: true
+      field_family: density
+      default_region: plasma_only
       value_transform: identity
-      units: "m^-3"
-      dtype: float32
+
+preprocessing:
+  scalers:
+    target_transforms:
+      electron_density:
+        value_transform: identity
+        scaler: zscore
+        fit_scope: plasma_only
+        clip:
+          mode: none
+
+model:
+  name: global_mlp
 ```
 
-### 何に使うか
-
-- source データを logical target と条件変数へ対応付ける
-- preprocess 以前の truth source を決める
-
-### 必須
-
-- `type`
-- `root`
-- `cond_columns`
-- `targets`
-
-### mainline 既定
-
-- `type=csv_npz`
-- target 名は固定しない
-
-### downstream
-
-- `dataset_io`
-- split
-- preprocess schema
-- model dispatch
-- metrics / benchmark / compare
-
-### mainline でよく触るキー
-
-- `targets`
-- `cond_columns`
-- `geometry_root`
-
-### mainline で禁止または非推奨
-
-- `output_vars`
-- `output_key_map`
-- `output_value_transform`
-
-## 2. `preprocessing`
+Use physical bounds when rare but valid regimes must survive fitting. Bounds
+are specified in physical units and persisted in both physical and transformed
+spaces:
 
 ```yaml
 preprocessing:
   scalers:
-    enforce_target_transforms: true
-    y_fit_policy: plasma_only
     target_transforms:
-      density:
-        value_transform: log10
+      electron_density:
+        value_transform: log10_floor
+        floor: 1.0e-30
         scaler: zscore
         fit_scope: plasma_only
         clip:
-          mode: quantile
-          q_low: 0.01
-          q_high: 0.99
+          mode: physical_bounds
+          min: 1.0e8
+          max: 1.0e19
 ```
 
-### 何に使うか
-
-- logical target を学習しやすい表現へ変換する
-- split / scaler / schema / feature artifact を生成する
-
-### `target_transforms.<var>`
-
-#### 用途
-
-- 各 target の個別前処理を定義する
-
-#### 主なキー
-
-- `value_transform`: `identity | log10`
-- `scaler`: `none | zscore | minmax`
-- `fit_scope`: `all | plasma_only`
-- `clip.mode`: `none | quantile`
-
-#### downstream
-
-- train
-- infer
-- evaluate
-
-### mainline 既定
-
-- target ごとに必ず定義する
-- transform 順序は `value_transform -> clip -> scaler`
-
-### mainline で禁止
-
-- `target_transform_policy`
-
-### よく触るキー
-
-- `scalers.target_transforms`
-- `coord_features.channels`
-- `coord_features.distance_transform_stats`
-
-## 3. `split`
+## Table Plus Structure
 
 ```yaml
-split:
-  seed: 7
-  ratios: [0.7, 0.15, 0.15]
+runtime:
+  input_mode: table_plus_structure
+  structure:
+    feature_profile: geom_v1_mainline
+    adapter_mode: grid_pack
+    provider_mode: fixed
+
+benchmark:
+  eval_protocol:
+    mode: dual_axis
+    primary_split: interp
+    interp_weight: 0.5
+    extrap_weight: 0.5
+  eval:
+    primary_metric: surrogate_quality_score
+    objective_mode: min
+    target_vars_for_score: auto
 ```
 
-### 用途
+For case-varying parts, make the row-to-geometry relation explicit and persist
+split static/case packs. `case_structure_feature_pack.npz` carries `case_ids`;
+training and evaluation reject misaligned rows.
 
-- train / val / test の分割を固定する
+```yaml
+runtime:
+  input_mode: table_plus_structure
+  structure:
+    feature_profile: part_lite_v1
+    descriptor_profile: none
+    adapter_mode: coord_pack
+    provider_mode: parametric_parts
 
-### 必須
+dataset:
+  structure_npz_column: structure_npz
 
-- `ratios`
+preprocessing:
+  coord_features:
+    enabled: true
+    channels_from_profile: part_lite_v1
+    static_output: features/static_spatial_feature_pack.npz
+    case_structure_output: features/case_structure_feature_pack.npz
+    require_case_variation: true
+    scaling:
+      enabled: true
+      mode: zscore
+      fit_scope: train_split
+```
 
-### downstream
+Static channels and case channels are reassembled in registered profile order.
+Raw supervision geometry is materialized separately from transformed model
+features, so case masks also control target-scaler fitting, loss, validation,
+and evaluation. A static fallback is used only when the case pack does not
+declare raw mask/distance channels.
 
-- preprocess
-- benchmark protocol
+A table-only baseline can still use case geometry as objective metadata without
+feeding it into the model. Declare that intent explicitly:
 
-## 4. `train`
+```yaml
+runtime:
+  input_mode: table_only
+  structure:
+    feature_profile: none
+    adapter_mode: none
 
-`train` はモデル共通の loss と、モデル別設定を持ちます。
+preprocessing:
+  coord_features:
+    enabled: true
+    usage: supervision_only
+    channels_from_profile: part_lite_v1
+    static_output: features/static_spatial_feature_pack.npz
+    case_structure_output: features/case_structure_feature_pack.npz
+```
 
-### 共通 loss
+`usage: supervision_only` affects scaler fitting, loss, checkpoint selection,
+and evaluation, but never extends the model condition vector.
+
+## Training
 
 ```yaml
 train:
   loss:
+    protocol: plasma_surrogate_v3
     supervised:
       type: huber
-      delta: 1.0
+      huber_delta: 1.0
+      mask: plasma_only
+      normalization: sample_mean
+      spatial:
+        gradient_weight: 0.10
+        gradient_spacing: [1.0, 1.0]
+        gradient_normalization: target_rms  # none | target_rms
+        gradient_epsilon: 0.05
+        multiscale_weight: 0.05
+        multiscale_scales: [2, 4]
+        boundary_weight: 0.25
+        boundary_band_px: 2.0
+        boundary_distance_channels: [distance_any]
+    group_weighting:
+      mode: uniform_by_group
+  fno:
+    selection:
+      mode: best_val_spatial_objective
+      eval_every_n_epochs: 2
+      warmup_epochs: 8
+      spatial:
+        point_weight: 1.0
+        gradient_weight: 0.10
+        gradient_normalization: target_rms
+        gradient_epsilon: 0.05
+        boundary_weight: 0.25
+        boundary_band_px: 2.0
+        gradient_spacing: [1.0, 1.0]
+      case_aggregation:
+        median_weight: 1.0
+        p90_weight: 0.25
+        worst_weight: 0.10
+```
+
+The same loss and selection contract applies to FNO, coordinate DeepONet,
+coordinate MLP/POD residual, and field-output baselines. Model names do not
+change metric semantics.
+
+Version 3 defaults to `uniform_by_group`: every non-empty `field_family` gets
+equal influence, and targets within a family share that influence. Therefore
+`target_role_schema.json` must cover every trained output exactly once. Use
+`uniform_by_target` only when every target channel should have equal influence,
+or `none` when reproducing legacy summed-target behavior.
+
+Target-family balancing can also be selected explicitly:
+
+```yaml
+train:
+  loss:
+    protocol: plasma_surrogate_v3
+    group_weighting:
+      mode: uniform_by_group
+```
+
+For the legacy point-only protocol, Huber is opt-in and MSE remains the
+default:
+
+```yaml
+train:
+  loss:
+    protocol: plasma_surrogate_v2
+    supervised:
+      type: huber
+      huber_delta: 1.0
       mask: plasma_only
 ```
 
-#### 用途
-
-- teacher supervision の形を決める
-
-#### よく触るキー
-
-- `type`
-- `delta`
-- `mask`
-- `normalization`
-
-### モデル共通で意味のあるキー
-
-- `target_family`
-- `target_vars`
-- `selection.mode`
-- `selection.weights`
-- `optimizer`
-
-### `train.global_mlp`
+Spatial terms can be overridden without replacing the other version-3
+defaults:
 
 ```yaml
 train:
-  global_mlp:
-    epochs: 80
-    lr: 8.0e-4
-    batch_size_cases: 6
+  loss:
+    protocol: plasma_surrogate_v3
+    supervised:
+      spatial:
+        gradient_weight: 0.10
+        multiscale_weight: 0.05
+        multiscale_scales: [2, 4]
 ```
 
-#### 用途
+Finite differences use only edges whose two cells are active in the supervised
+mask. Multiscale terms use masked pooling, so neither term crosses the plasma
+boundary.
 
-- 条件ベクトルから field を直接出す MLP
+`gradient_normalization: target_rms` makes the gradient term dimensionless per
+case. `gradient_epsilon` prevents nearly uniform target fields from producing
+an unstable divisor. The defaults are `none` and `0.05`, so legacy
+configurations retain their previous numerical behavior.
 
-#### よく触るキー
-
-- `epochs`
-- `lr`
-- `batch_size_cases`
-- `model_cfg.hidden`
-
-### `train.unet`
+For the mainline plasma DeepONet with case-varying geometry, pool the
+case-level sensor set in the branch while retaining local geometry in the
+trunk:
 
 ```yaml
+runtime:
+  input_mode: table_plus_structure
+  structure:
+    feature_profile: part_lite_v1
+    adapter_mode: coord_pack
+    provider_mode: parametric_parts
+
 train:
-  unet:
-    epochs: 80
-    target_family: allvars
-    target_vars: [density, temperature, potential]
+  loss:
+    supervised:
+      spatial:
+        # Chamber/plasma edge plus the nearest case-varying part surface.
+        boundary_distance_channels: [distance_any, part_sdf_nearest]
+  deeponet_plasma:
     input_features:
       mode: geom_feature_pack
-      require_pack: error
-      features: [x, y, mask_plasma, distance_signed, distance_any]
-    selection:
-      mode: best_val_allvars_balance
+      features:
+        - x
+        - y
+        - mask_plasma
+        - distance_signed
+        - distance_any
+        - normal_x
+        - normal_y
+        - curvature_proxy
+        - boundary_band
+        - part_sdf_nearest
+        - part_sdf_second
+        - part_gap_proxy
+        - solid_proximity
+    model_cfg:
+      trunk_input_mode: geom_feature_pack
+      branch_mode: set_mlp_pool
+      sensor_pool_mode: set_mlp_pool
 ```
 
-#### strict contract で意味を持つキー
+`deeponet_plasma` and coordinate MLP models accept `coord_pack` (or `auto`,
+which resolves to it). Descriptor adapters are accepted only by model lanes
+that explicitly load and validate descriptor artifacts.
 
-- `target_family`
-- `target_vars`
-- `input_features.mode`
-- `selection.mode`
-- `model_cfg.output_heads.mode`
-
-### `train.fno`
+Opt-in custom grouped heads for supported grid/operator models:
 
 ```yaml
 train:
   fno:
-    epochs: 80
-    target_family: allvars
-    target_vars: [density, temperature, potential]
-    input_features:
-      mode: geom_feature_pack
     model_cfg:
-      n_modes: 12
-      spectral_cfg:
-        width: 64
-        n_layers: 4
+      backend: torch
+      output_heads:
+        mode: custom_groups
+        strict: true
+        groups:
+          density:
+            targets: [electron_density, ion_density]
+          thermal:
+            targets: [electron_temperature]
+          electrostatic:
+            targets: [plasma_potential]
 ```
 
-#### strict contract で意味を持つキー
-
-- `target_family`
-- `target_vars`
-- `input_features.mode`
-- `selection.mode`
-
-#### 実運用でよく触るキー
-
-- `n_modes`
-- `spectral_cfg.width`
-- `spectral_cfg.n_layers`
-- `spectral_cfg.dealias_ratio`
-- `spectral_cfg.taper_alpha`
-
-### `train.deeponet_plasma`
-
-```yaml
-train:
-  deeponet_plasma:
-    strict_mainline: true
-    operator_mode: plain
-    target_family: allvars
-    target_vars: [density, temperature, potential]
-    input_features:
-      mode: geom_feature_pack
-    model_cfg:
-      trunk_input_mode: geom_feature_pack
-      branch_mode: cond_only
-```
-
-#### strict contract で意味を持つキー
-
-- `strict_mainline`
-- `operator_mode`
-- `target_family`
-- `target_vars`
-- `input_features.mode`
-- `model_cfg.trunk_input_mode`
-- `model_cfg.branch_mode`
-- `selection.mode`
-
-## 5. `inference`
-
-```yaml
-inference:
-  axis:
-    mode: steady
-    value: 0.0
-  ood:
-    physics:
-      enabled: false
-      symbols:
-        density: density
-```
-
-### 用途
-
-- 推論時の軸設定
-- OOD / physics / boundary operator の解釈
-
-### 重要キー
-
-- `axis.mode`
-- `axis.value`
-- `ood.physics.enabled`
-- `ood.physics.symbols`
-- `ood.boundary_operator.symbols`
-
-### mainline 既定
-
-- symbol 未解決のまま physics を有効化しない
-
-## 6. `physics`
+Physics residuals are configured separately from the supervised loss protocol:
 
 ```yaml
 physics:
   enabled: true
+  symbols:
+    density: electron_density
+    temperature: electron_temperature
+    potential: plasma_potential
   terms:
-    - name: pinn_residual
+    poisson:
+      enabled: true
       weight: 0.1
+    boundary_operator:
+      enabled: false
+      weight: 0.0
 ```
 
-### 用途
+## Optimization
 
-- train 側の物理項を registry 方式で有効化する
-
-### 現在の代表 term
-
-- `poisson`
-- `boundary`
-- `boundary_operator`
-- `rho`
-- alias: `pinn_residual`, `pino_operator`
-
-### downstream
-
-- `train/physics_terms.py`
-- loss composition
-
-## 7. `benchmark`
+Optional inference-time derived fields:
 
 ```yaml
-benchmark:
-  output_dir: runs/example
-  profile: m7_fno_isolated
-  eval:
-    target_family_for_score: allvars
-    target_vars_for_score: [density, temperature, potential]
-    primary_metric: test_r2_plasma_mean_dual
+inference:
+  derived_fields_strict: false
+  derived_fields:
+    - id: electric_field
+      operator: negative_gradient
+      source: plasma_potential
+    - id: electric_field_magnitude
+      operator: vector_magnitude
+      sources: [electric_field_x, electric_field_y]
 ```
-
-### 用途
-
-- benchmark 実行と集計ルールを定義する
-
-### よく触るキー
-
-- `profile`
-- `output_dir`
-- `eval.target_vars_for_score`
-- `eval.primary_metric`
-- `eval.aggregate_score`
-- `eval.region_bands`
-- `eval_protocol`
-
-### downstream
-
-- `benchmark/runner.py`
-- leaderboard
-- resolved_benchmark
-- compare 入力
-
-### 注意
-
-- compare / leaderboard は dynamic target 列前提
-- `target_vars_for_score` は active target の部分集合または同一集合
-
-## 8. `compare`
 
 ```yaml
-compare:
-  output_dir: runs/example_compare
-  objective_metric: auto_primary
-  objective_mode: max
-  rows:
-    - name: model_a
-      target_family: allvars
-      leaderboard_csv: runs/model_a/leaderboard.csv
-      model_id: fno
+inference:
+  optimize:
+    backend: random
+    objective:
+      mode: weighted_sum
+      terms:
+        - key: uniformity
+          direction: min
+          weight: 1.0
+    constraints:
+      - key: poisson_residual_norm
+        upper: 100.0
 ```
-
-### 用途
-
-- 複数 leaderboard から比較表を作る
-
-### 生成物
-
-- `selected_models_comparison.csv`
-
-### 重要な理解
-
-- ヘッダは固定ではない
-- 各 row の持つ dynamic target 列から最終列集合が決まる
-
-## 9. mainline で避けるべき設定
-
-- target 名のハードコード
-- `target_transform_policy`
-- fixed compare header を前提にした拡張
-- symbol mapping なしの physics
-- preprocess artifact を使わない feature 契約

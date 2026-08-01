@@ -1,0 +1,15 @@
+{
+  "run": "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1",
+  "trial_count": 500,
+  "fps": 12.0,
+  "nominal_fps_duration_seconds": 41.666666666666664,
+  "playback_duration_seconds": 43.38333333333333,
+  "loop": false,
+  "final_frame_hold_ms": 1800,
+  "response_color_floor_percent": 1.0,
+  "frames_dir": "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1\\trial_summary_frames",
+  "gif": "runs\\gec_ccp_ffno_pap_inverse_cmaes_target_at_mixed_best_gamma07_v1\\trial_summary_animation.gif",
+  "left_panel": "COMSOL truth line excluded from legend",
+  "loss_panel": "completed trials, current trial, and best-so-far",
+  "map_panel": "no legend; white history trajectory, current trial, and truth marker"
+}

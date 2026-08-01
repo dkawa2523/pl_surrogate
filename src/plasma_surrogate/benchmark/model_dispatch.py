@@ -8,6 +8,13 @@ from typing import Any
 
 import numpy as np
 
+from plasma_surrogate.core.input_modes import (
+    DESCRIPTOR_PROFILE_KEY,
+    LATENT_PROFILE_KEY,
+    STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY,
+    build_input_mode_effective_metadata,
+)
+from plasma_surrogate.core.model_input_policy import resolve_effective_input_mode_metadata_for_model
 from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
 
 
@@ -44,11 +51,23 @@ class BenchmarkModelContext:
     deeponet_boundary_meta: dict[str, Any]
     coord_feature_scaler: dict[str, Any] | None = None
     coord_feature_pack: dict[str, Any] | None = None
+    static_spatial_feature_pack: dict[str, Any] | None = None
+    case_structure_feature_pack: dict[str, Any] | None = None
     coord_distance_transform_stats: dict[str, Any] | None = None
+    structure_descriptor_pack: dict[str, Any] | None = None
+    latent_feature_pack: dict[str, Any] | None = None
+    case_ids: list[str] | None = None
+    input_mode_meta: dict[str, Any] | None = None
 
 
 def run_model_train_eval(ctx: BenchmarkModelContext) -> dict[str, Any]:
     train_cfg = dict(ctx.benchmark_cfg.get("train", {}))
+    input_mode_meta = dict(ctx.input_mode_meta or {})
+    if not input_mode_meta:
+        input_mode_meta = resolve_effective_input_mode_metadata_for_model(
+            model_name=ctx.model_name,
+            input_mode_meta=build_input_mode_effective_metadata(ctx.benchmark_cfg),
+        )
     if "fno_n_modes" in ctx.benchmark_cfg:
         n_modes = int(ctx.benchmark_cfg["fno_n_modes"])
         fno_cfg = dict(train_cfg.get("fno", train_cfg.get("fno_baseline", {})))
@@ -98,7 +117,20 @@ def run_model_train_eval(ctx: BenchmarkModelContext) -> dict[str, Any]:
             supervised_distance=ctx.supervised_distance,
             coord_feature_scaler=dict(ctx.coord_feature_scaler or {}),
             coord_feature_pack=ctx.coord_feature_pack,
+            static_spatial_feature_pack=ctx.static_spatial_feature_pack,
+            case_structure_feature_pack=ctx.case_structure_feature_pack,
             coord_distance_transform_stats=dict(ctx.coord_distance_transform_stats or {}),
+            structure_descriptor_pack=ctx.structure_descriptor_pack,
+            latent_feature_pack=ctx.latent_feature_pack,
+            case_ids=list(ctx.case_ids) if ctx.case_ids is not None else None,
+            input_mode_effective=str(input_mode_meta.get("input_mode_effective", "")),
+            structure_adapter_mode_effective=str(input_mode_meta.get(STRUCTURE_ADAPTER_MODE_EFFECTIVE_KEY, "")),
+            structure_descriptor_profile_effective=str(
+                input_mode_meta.get(DESCRIPTOR_PROFILE_KEY, "none")
+            ),
+            structure_latent_profile_effective=str(
+                input_mode_meta.get(LATENT_PROFILE_KEY, "none")
+            ),
         )
     )
     return {

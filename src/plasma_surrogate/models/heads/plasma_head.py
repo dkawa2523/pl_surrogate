@@ -1,4 +1,4 @@
-"""Shared plasma field head for phi_mode handling."""
+"""Shared potential-field head for configured post-processing modes."""
 
 from __future__ import annotations
 
@@ -8,7 +8,9 @@ from typing import Any
 import numpy as np
 
 from plasma_surrogate.data.geometry_context import GeometryContext
-from plasma_surrogate.train.losses import laplacian2d
+from plasma_surrogate.core.physics_numeric import laplacian2d
+
+POTENTIAL_HEAD_KEY = "phi"
 
 
 def _to_numpy_f32(x: Any) -> np.ndarray:
@@ -127,11 +129,15 @@ class PlasmaHead:
         refine_iters: int = 0,
         deeponet_head: Any | None = None,
         cond_vec: np.ndarray | None = None,
+        potential_key: str = POTENTIAL_HEAD_KEY,
     ) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray]]:
-        """Apply phi mode and return (fields, aux)."""
+        """Apply potential post-processing and return (fields, aux)."""
 
         out = {k: _to_numpy_f32(v).copy() for k, v in fields_phys.items()}
-        phi_in = np.asarray(out["phi"], dtype=np.float32)[:, 0]  # [B,H,W]
+        potential_name = str(potential_key)
+        if potential_name not in out:
+            raise KeyError(f"potential_key={potential_name!r} is missing from fields_phys")
+        phi_in = np.asarray(out[potential_name], dtype=np.float32)[:, 0]  # [B,H,W]
         bsz = phi_in.shape[0]
 
         active = _expand_batch(geom_ctx.mask_plasma, bsz)
@@ -156,7 +162,7 @@ class PlasmaHead:
         elif self.mode == "poisson_hybrid":
             rho_eff = out.get("rho_eff")
             if rho_eff is None:
-                # fallback keeps compatibility with direct-only backbones
+                # Direct-only backbones can still enter the hybrid solve.
                 rho_eff = -laplacian2d(phi_in)
             else:
                 rho_eff = np.asarray(rho_eff, dtype=np.float32)[:, 0]
@@ -172,7 +178,7 @@ class PlasmaHead:
             )
         elif self.mode == "deeponet_poisson":
             if deeponet_head is None:
-                raise NotImplementedError("deeponet_poisson head is not implemented in Cycle 1.4 without deeponet_head")
+                raise NotImplementedError("deeponet_poisson head requires deeponet_head")
             if cond_vec is None:
                 raise ValueError("deeponet_poisson requires cond_vec for deeponet_head prediction")
             cond_arr = np.asarray(cond_vec, dtype=np.float32)
@@ -196,9 +202,7 @@ class PlasmaHead:
                 phi0 = _to_numpy_f32(phi_pred)
                 if phi0.ndim == 4:
                     phi0 = phi0[:, 0]
-                elif phi0.ndim == 3:
-                    pass
-                else:
+                elif phi0.ndim != 3:
                     raise ValueError(f"deeponet_head.predict_phi returned invalid shape: {phi0.shape}")
             else:
                 if not hasattr(deeponet_head, "predict_fields"):
@@ -207,22 +211,24 @@ class PlasmaHead:
                     pred = deeponet_head.predict_fields(cond_arr, grid_shape=geom_ctx.mask_plasma.shape)
                 except TypeError:
                     pred = deeponet_head.predict_fields(cond_arr)
-                if not isinstance(pred, dict) or "phi" not in pred:
-                    raise ValueError("deeponet_head.predict_fields must return dict containing 'phi'")
-                phi0 = np.asarray(pred["phi"], dtype=np.float32)
+                if not isinstance(pred, dict) or potential_name not in pred:
+                    raise ValueError(
+                        f"deeponet_head.predict_fields must return dict containing potential_key={potential_name!r}"
+                    )
+                phi0 = np.asarray(pred[potential_name], dtype=np.float32)
                 if phi0.ndim == 4:
                     phi0 = phi0[:, 0]
-                elif phi0.ndim == 3:
-                    pass
                 elif phi0.ndim == 2:
                     phi0 = phi0[None, ...]
-                else:
-                    raise ValueError(f"deeponet_head phi has invalid shape: {phi0.shape}")
+                elif phi0.ndim != 3:
+                    raise ValueError(f"deeponet_head potential field has invalid shape: {phi0.shape}")
 
             if phi0.shape[0] == 1 and bsz > 1:
                 phi0 = np.repeat(phi0, bsz, axis=0)
             if phi0.shape != phi_in.shape:
-                raise ValueError(f"deeponet_head phi shape mismatch: expected {phi_in.shape}, got {phi0.shape}")
+                raise ValueError(
+                    f"deeponet_head potential field shape mismatch: expected {phi_in.shape}, got {phi0.shape}"
+                )
 
             rho_eff = out.get("rho_eff")
             if rho_eff is None:
@@ -240,7 +246,7 @@ class PlasmaHead:
                 n_iters=self.jacobi_iters + max(0, int(refine_iters)),
             )
         else:
-            raise ValueError(f"Unsupported phi mode: {self.mode}")
+            raise ValueError(f"Unsupported potential post-processing mode: {self.mode}")
 
-        out["phi"] = phi[:, None].astype(np.float32)
+        out[potential_name] = phi[:, None].astype(np.float32)
         return out, aux

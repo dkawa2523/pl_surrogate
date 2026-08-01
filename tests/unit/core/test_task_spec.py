@@ -10,8 +10,8 @@ def test_task_spec_v1_validate_ok(task_spec_dict: dict):
     spec.validate()
 
 
-def test_task_spec_v1_validate_missing_output(task_spec_dict: dict):
+def test_task_spec_v1_validate_missing_output_transform(task_spec_dict: dict):
     broken = dict(task_spec_dict)
-    broken["outputs"] = [o for o in broken["outputs"] if o["name"] != "phi"]
-    with pytest.raises(ValueError):
+    broken["transforms"] = {k: v for k, v in broken["transforms"].items() if k != "phi"}
+    with pytest.raises(ValueError, match="Missing transform for output: phi"):
         TaskSpecV1.from_dict(broken)

@@ -1,0 +1,51 @@
+{
+  "case_id": "case_td003_pp0_3_gamma_004__steady",
+  "case_conditions": {
+    "PP0": 3.0,
+    "Td": 0.03,
+    "gamma": 0.04,
+    "PA": 0.1
+  },
+  "split": "interp",
+  "case_label": "medium",
+  "training_condition_count": 54,
+  "field": "ne",
+  "units": "m^-3",
+  "common_density_color_scale_m3": [
+    0.0,
+    6193450215014400.0
+  ],
+  "error_definition": "100 * (prediction - truth) / max(abs(truth)) within plasma target",
+  "common_error_color_scale_percent": [
+    -10.0,
+    10.0
+  ],
+  "panel_layout": [
+    "ground_truth",
+    "prediction",
+    "signed_error"
+  ],
+  "figure_height_to_width_ratio": 0.7,
+  "model_order": [
+    "ffno",
+    "deeponet_pod",
+    "global_densemlp"
+  ],
+  "relative_rmse": {
+    "ffno": 0.013268275189992795,
+    "deeponet_pod": 0.021108388960168558,
+    "global_densemlp": 0.08809436725994575
+  },
+  "run_roots": {
+    "ffno": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/ffno",
+    "deeponet_pod": "runs/gec_ccp_pod_branch_tuned_v2/final/seed_412/n78/deeponet_pod",
+    "global_densemlp": "runs/gec_ccp_nn_operator_comparison_v1/seed_412/n78/global_densemlp"
+  },
+  "selection_manifest": "runs/gec_ccp_training_size_ablation_v1/summary_all_models/selection_manifest_n54.csv",
+  "outputs": [
+    "reports/gec_conference_materials/training_size_ablation/ccp_n54_ffno_pod_deeponet_densemlp_ne_comparison.png",
+    "reports/gec_conference_materials/training_size_ablation/ccp_n54_ffno_pod_deeponet_densemlp_ne_comparison.pdf",
+    "reports/gec_conference_materials/training_size_ablation/ccp_n54_ffno_pod_deeponet_densemlp_ne_comparison.svg"
+  ],
+  "generation_command": ".\\.venv-torch\\Scripts\\python.exe scripts/plot_gec_ccp_n54_model_density_comparison.py"
+}

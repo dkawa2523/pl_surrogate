@@ -1,263 +1,167 @@
-# 04 Training Models
+# 04 Training And Models
 
-## 1. 学習契約の入口
+Training reads preprocessing artifacts and model capabilities. The first
+question for a new model is what its product capability is, not where to add a
+special branch.
 
-mainline の学習契約は `src/plasma_surrogate/train/model_dispatch.py` に集約されています。  
-trainer はこの validation を通過した構成だけを実行します。
+## Training Contract
 
-共通前提:
+- Targets come from `dataset.targets[]` and `output_layout.vars`.
+- Roles come from `target_role_schema.json`.
+- Features come from feature pack metadata and `channel_map.json`.
+- Runtime metadata must include concrete target and feature schema hashes.
+- Checkpoints must preserve the effective runtime metadata used for training.
 
-- `target_family=allvars`
-- `target_vars == output_layout.vars`
-- `selection.mode=best_val_allvars_balance`
-- `selection.weights` は明示指定または target 数に応じた均等化
+## First-Class Model Registry
 
-重要なのは、target 名が固定ではないことです。  
-`ne / ni / Te / phi` は m7 の例であり、strict 契約そのものではありません。
+`src/plasma_surrogate/core/model_specs.py` is the source of truth for model
+status, category, input modes, adapter modes, and feature needs. Train, infer,
+and benchmark dispatch should use these specs and local adapters.
 
-## 2. モデル比較の見方
+Adapter names describe inputs that the runtime actually consumes. FNO/grid
+models use `grid_pack`; coordinate MLP and mainline plasma DeepONet use
+`coord_pack`; descriptor adapters are limited to the POD/geometry model lanes
+that explicitly load a structure-descriptor artifact. Unsupported combinations
+fail at the model/input policy gate instead of accepting and ignoring a
+descriptor.
 
-| Model | 入力 | geometry の使い方 | 空間依存の扱い | 向くケース |
-|---|---|---|---|---|
-| `global_mlp` | 条件ベクトル | 直接は使わない | field を直接出力 | 基準モデル、条件依存の大局傾向確認 |
-| `unet` | 条件 + grid feature | 強い | 局所畳み込み | 境界形状が重要な固定 grid 問題 |
-| `fno` | 条件 + spatial feature | 強い | spectral operator | 広域依存が強い fixed grid 問題 |
-| `deeponet_plasma` | 条件 + query/geometry feature | trunk 側で強い | operator 形 | 条件依存な operator として扱いたい問題 |
+## Spatial-Field Mainline
 
-## 3. `global_mlp`
+Spatial plasma surrogates use one contract across architectures:
 
-### 入力形
+1. the dataset declares target roles and the plasma geometry;
+2. the model declares whether it consumes spatial features;
+3. the loss composes case-balanced point, boundary, gradient, and multiscale
+   terms; and
+4. checkpoint selection uses a case-macro spatial validation objective.
 
-- 条件ベクトル
+This keeps FNO, coordinate operators, POD-residual models, and field-output MLP
+baselines on the same supervision and evaluation semantics. Model-specific
+branches belong only in the model adapter, not in the loss or inference path.
 
-### 出力形
+Model input geometry and objective geometry are separate contracts. For
+case-varying structure, preprocessing persists a static spatial pack and a
+case-aligned structure pack. Raw `mask_plasma` and configured boundary-distance
+channels are resolved independently for scaler fitting, training loss,
+checkpoint selection, and evaluation; they are not inferred from a model's
+transformed input channels.
+Case packs must preserve dataset `case_id` order. If a pack declares
+case-varying raw geometry, partial raw geometry is rejected instead of mixing
+it with a static fallback.
 
-- fixed grid 上の target field
+## Loss Protocol
 
-### geometry / feature の扱い
-
-- mainline では geometry feature を直接入力しない
-- そのため空間形状の複雑さより、条件依存の平均的な傾向把握に向く
-
-### 主な YAML 入口
-
-```yaml
-train:
-  global_mlp:
-    epochs: 80
-    lr: 8.0e-4
-    batch_size_cases: 6
-    model_cfg:
-      hidden: [128, 128]
-      dropout: 0.0
-```
-
-### 典型的な落とし穴
-
-- geometry が効かない前提なのに境界詳細の再現を期待しすぎる
-- target 数が増えても hidden 幅を据え置いてボトルネックにする
-
-## 4. `unet`
-
-### 入力形
-
-- 条件ベクトルを grid に broadcast
-- `coord_feature_pack` 由来の spatial feature をチャンネル結合
-
-### 出力形
-
-- 同一 grid の target field
-
-### geometry / feature の扱い
-
-- geometry 情報を spatial channel として直接使う
-- 局所構造の扱いに強い
-
-### mainline strict contract
-
-- `train.unet.target_family=allvars`
-- `train.unet.target_vars == output_layout.vars`
-- `train.unet.input_features.mode=geom_feature_pack`
-- `train.unet.model_cfg.output_heads.mode=shared`
-- `train.unet.selection.mode=best_val_allvars_balance`
-
-### 主な YAML 入口
+New spatial-field runs should use the versioned product protocol:
 
 ```yaml
 train:
-  unet:
-    epochs: 80
-    optimizer:
-      type: adamw
-      schedule: cosine
-    input_features:
-      mode: geom_feature_pack
-      require_pack: error
-      features: [x, y, mask_plasma, distance_signed, distance_any]
-    model_cfg:
-      backend: torch
-      base_channels: 32
-      output_heads:
-        mode: shared
+  loss:
+    protocol: plasma_surrogate_v3
 ```
 
-### 典型的な落とし穴
+Version 3 resolves to Huber supervision on `plasma_only`, `sample_mean`
+normalization, equal target-family weighting, and small gradient, multiscale,
+and boundary terms. Every case is reduced before the batch is reduced, so a
+large plasma mask cannot dominate a small one. Spatial terms share the same
+active mask; non-finite values outside that mask are ignored, while non-finite
+active values fail fast. The boundary is defined by
+`supervised.spatial.boundary_distance_channels` (default: `[distance_any]`)
+and uses the minimum absolute distance across all configured raw channels.
+This allows a structure-varying run to include part or electrode SDFs without
+hard-coding plasma-specific channel names in the loss. Every configured channel
+is mandatory and must be finite and case-aligned.
 
-- `input_features.mode` と preprocess artifact がずれる
-- target 数変更時に `target_vars` を更新しても `weights` を放置する
-- `split_density_field` のような mainline 外設定を紛れ込ませる
+For fields whose spatial derivatives have very different magnitudes, set
+`gradient_normalization: target_rms`. Each case's gradient residual is divided
+by its masked target-gradient RMS, with `gradient_epsilon` as a positive floor.
+The scale depends only on the target, so prediction rescaling cannot reduce the
+objective. Use the same settings in `selection.spatial` to keep training and
+checkpoint selection aligned.
 
-## 5. `fno`
+`plasma_surrogate_v2` remains available unchanged for old-run reproduction. It
+uses the earlier point-only defaults and does not silently opt in to spatial
+terms.
 
-### 入力形
+`train.loss.group_weighting` controls how complete per-target losses are
+combined:
 
-- 条件ベクトル
-- `geom_feature_pack` 由来の spatial feature
+- `uniform_by_group` is the version-3 default. It assigns equal share to each
+  non-empty `field_family`, then divides that share among the family's targets.
+  The authoritative `target_role_schema.json` must cover every trained output.
+- `uniform_by_target` averages target losses uniformly.
+- `weighted_by_group` uses explicit positive family weights.
+- `none` preserves the legacy summed per-target behavior and is the version-2
+  default.
 
-### 出力形
+Group modes report `loss_supervised_group_<group>` in training history. Missing
+or incomplete target role metadata fails fast rather than silently reverting to
+per-channel averaging. The resolved loss definition, version, and hash are
+stored with the run/checkpoint artifacts.
 
-- fixed grid の operator 出力
+Positive target metadata is used by evaluation/benchmark sign diagnostics. It
+does not currently add a separate positive training loss.
 
-### geometry / feature の扱い
+## Checkpoint Selection
 
-- geometry を spectral operator の入力チャネルとして使う
-- 局所だけでなく広域依存を扱いやすい
+For spatial-field runs use `selection.mode: best_val_spatial_objective`. It is
+lower-is-better and scores each validation case separately in the same
+train-fitted normalized field space. The objective combines point, gradient,
+and boundary RMSE, then adds median, p90, and worst-case penalties. If target
+roles are available, target families receive equal weight. Pooled validation
+R2 modes remain legacy compatibility options and should not be interpreted as
+evidence that local field structure is correct.
 
-### mainline strict contract
+POD-based models may expose a coefficient-space auxiliary loss. Trainers add
+the model-reported `loss_aux_total` to the optimization objective and record
+the raw and weighted coefficient terms separately. The field loss remains the
+common cross-architecture contract.
 
-- `train.fno.target_family=allvars`
-- `train.fno.target_vars == output_layout.vars`
-- `train.fno.input_features.mode=geom_feature_pack`
-- 必須チャネルは `x`, `y`, `mask_plasma`, `distance_signed`, `distance_any`
-- `selection.mode=best_val_allvars_balance`
+## DeepONet Geometry Contract
 
-### 主な YAML 入口
+The mainline `deeponet_plasma` trunk receives coordinates and local spatial
+features for each query. For case-varying geometry, set
+`branch_mode: set_mlp_pool` and `sensor_pool_mode: set_mlp_pool`. An order-invariant
+encoding of the case-level sensor set supplies non-local structure context to
+every query. `cond_only` plus `moments` remains a compatibility mode for
+fixed-geometry studies, but it cannot represent non-local changes that are
+absent from the local trunk row. The mainline runtime consumes `coord_pack`;
+it does not consume descriptor adapters.
 
-```yaml
-train:
-  fno:
-    epochs: 80
-    optimizer:
-      type: adamw
-      schedule: cosine
-    input_features:
-      mode: geom_feature_pack
-      require_pack: error
-    model_cfg:
-      n_modes: 12
-      spectral_cfg:
-        width: 64
-        n_layers: 4
-        dealias_ratio: 0.67
-        taper_alpha: 4.0
-        skip_filter: match_spectral
-```
+## Physics Training
 
-### 典型的な落とし穴
+Physics residual training follows the `physics.terms` flow. `train.loss`
+selects and combines supervised data loss, while `physics.terms` is the source
+of truth for physics residual names, enable flags, and weights.
 
-- `legacy_xy` 的な入力を mainline と混同する
-- `distance_transform_stats` を使う runtime 設定なのに preprocess を対応させない
-- target 追加時に selection や benchmark 側の評価 target を追随させない
+Registered physics terms are currently `poisson`, `boundary`,
+`boundary_operator`, and `rho`. Unknown term names fail fast; names for planned
+or experimental residuals are not registered until they have code and tests.
 
-## 6. `deeponet_plasma`
+Target symbols are resolved from explicit top-level `physics.symbols` first,
+then unique role/family metadata from `target_role_schema.json`. Term-local
+`symbols` are not supported. Missing or ambiguous symbols fail fast.
 
-### 入力形
+## Output Heads
 
-- branch: 条件ベクトル
-- trunk: query/grid 位置 + geometry/coord feature
+The default and shared allvars baseline is `output_heads.mode: shared`.
+Grid/operator models can opt in to grouped heads:
 
-### 出力形
+- `role_grouped`: groups targets from `target_role_schema.json` field-family metadata.
+- `custom_groups`: uses explicit `output_heads.groups.<name>.targets`.
 
-- 各 query または grid 点における target field
+Grouped heads are limited to grid/operator families (`fno`, `ffno`, `unet`,
+`unetpp`, `unetpp_attn`, `u_no`, `cno`). The trunk remains shared and only the
+lightweight final heads are split. `custom_groups` is strict by default: every
+`output_layout.vars` target must appear in exactly one configured group.
 
-### geometry / feature の扱い
+`output_heads.group_options` is reserved for optional experiment lanes on
+resolved groups. The only implemented group head is `head: default`; configured
+`head: poisson_hybrid` currently fails fast and is left for benchmark-backed
+follow-up work. Potential/electrostatic groups must be resolved from roles or
+field-family metadata, not from a fixed target name.
 
-- trunk 側で geometry / coord feature を使う
-- 条件依存 operator として出力分布を作る
+## Archive Boundary
 
-### mainline strict contract
-
-`model_dispatch` 上の制約が特に重要です。
-
-- `strict_mainline=true`
-- `operator_mode=plain`
-- `input_features.mode=geom_feature_pack`
-- `model_cfg.trunk_input_mode=geom_feature_pack`
-- `model_cfg.branch_mode=cond_only`
-- `target_family=allvars`
-- `target_vars == output_layout.vars`
-- `selection.mode=best_val_allvars_balance`
-
-### 主な YAML 入口
-
-```yaml
-train:
-  deeponet_plasma:
-    strict_mainline: true
-    epochs: 160
-    optimizer:
-      type: adamw
-      schedule: cosine
-    input_features:
-      mode: geom_feature_pack
-      require_pack: error
-      features: [x, y, mask_plasma, distance_signed, distance_any]
-    model_cfg:
-      latent_dim: 48
-      hidden_dim: 96
-      trunk_input_mode: geom_feature_pack
-      branch_mode: cond_only
-      trunk_fourier_n_freq: 4
-      trunk_fourier_mode: symmetric
-      output_path:
-        mode: dot
-```
-
-### 典型的な落とし穴
-
-- `strict_mainline` に対して legacy trunk / branch 設定を混ぜる
-- branch/trunk の役割を取り違えて feature 設定を置く
-- target 名を変えたのに physics symbol 側を更新しない
-
-## 7. `selection=best_val_allvars_balance`
-
-### 何を見ているか
-
-active target 群をまとめて扱う validation ベースの selection です。  
-個別 target の良し悪しを単純に 1 変数だけで選ぶのではなく、target 群全体のバランスを見ます。
-
-### target 非固定でどう動くか
-
-- `target_vars` に含まれる target 全体を対象とする
-- target 数が変わっても構成は維持される
-
-### `weights` の解釈
-
-- 明示指定があればその重みを使う
-- 未指定なら target 数に応じて均等化する
-
-### 注意点
-
-- target を追加・削除したときに `weights` が古いままだと validation mismatch を起こす
-
-## 8. trainer と `model_dispatch` の責務分離
-
-### `model_dispatch`
-
-- 設定が mainline 契約を満たすかを判定する
-- target 順序、feature 契約、許可/禁止設定を固める
-
-### trainer
-
-- optimizer を回す
-- loss を計算する
-- diagnostics を出力する
-
-この分離により、第三者が設定トラブルを見るときは、まず `model_dispatch` から読むのが最短です。
-
-## 9. 修正入口
-
-- モデル構造を変える: `src/plasma_surrogate/models/*`
-- build/save/load 経路: `src/plasma_surrogate/models/mlp/io.py`
-- strict contract を変える: `src/plasma_surrogate/train/model_dispatch.py`
-- 学習実行を変える: `src/plasma_surrogate/train/trainer.py`, `src/plasma_surrogate/train/torch_trainer.py`
+Experimental model variants and one-off studies belong in `configs/experimental/`
+or `experiments/`. They should not add product contracts until train, infer, and
+benchmark behavior is stable.

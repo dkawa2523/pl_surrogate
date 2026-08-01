@@ -1,0 +1,32 @@
+{
+  "created_utc": "2026-07-15T05:39:53.090861+00:00",
+  "optimizer_seeds": [
+    20260715,
+    20260716,
+    20260717,
+    20260718,
+    20260719
+  ],
+  "noise_seed_base": 20260715,
+  "point_noise_rel": 0.05,
+  "calibration_noise_rel": 0.0,
+  "measurements_are_identical_across_optimizer_seeds": true,
+  "case_ids": [
+    "case_td003_pa050_pp0_3_gamma_010__steady",
+    "case_td016_pp0_1_gamma_007__steady",
+    "case_td030_pa200_pp0_5_gamma_004__steady"
+  ],
+  "trials_per_method_per_measurement": 100,
+  "primary_target_ratio": 1.1,
+  "strict_target_ratio": 1.0,
+  "total_fno_optimizer_evaluations": 4500,
+  "total_measurement_execution_wall_s": 923.3293783000845,
+  "latest_orchestration_wall_s": 0.48966269998345524,
+  "seed_roots": {
+    "20260715": "runs\\gec_ccp_multi_sensor_input_optimization_cpu",
+    "20260716": "runs\\gec_ccp_multi_sensor_input_optimization_cpu_multiseed\\seed_20260716",
+    "20260717": "runs\\gec_ccp_multi_sensor_input_optimization_cpu_multiseed\\seed_20260717",
+    "20260718": "runs\\gec_ccp_multi_sensor_input_optimization_cpu_multiseed\\seed_20260718",
+    "20260719": "runs\\gec_ccp_multi_sensor_input_optimization_cpu_multiseed\\seed_20260719"
+  }
+}

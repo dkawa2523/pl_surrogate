@@ -1,0 +1,26 @@
+{
+  "presentation_revision": "standalone_single_claim_v1",
+  "claim": "The representative GEC-ICP case shows the spatial electric potential distribution",
+  "sources": {
+    "field": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/fields/case_g002_op01.npz",
+    "structure": "data/outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1/structure_features/case_g002_op01.npz"
+  },
+  "system": "GEC-ICP",
+  "case_id": "case_g002_op01",
+  "view": "2D axisymmetric map",
+  "shown_field": "phi",
+  "unit": "V",
+  "normalization": "linear color scale",
+  "color_encoding": "linear phi [V]",
+  "colormap": "cividis",
+  "display_limits": [
+    0.166909858584404,
+    10.528311729431152
+  ],
+  "output_stem": "icp_electric_potential_2d",
+  "outputs": [
+    "reports/gec_conference_materials/independent_assets/icp_electric_potential_2d.png",
+    "reports/gec_conference_materials/independent_assets/icp_electric_potential_2d.pdf",
+    "reports/gec_conference_materials/independent_assets/icp_electric_potential_2d.svg"
+  ]
+}

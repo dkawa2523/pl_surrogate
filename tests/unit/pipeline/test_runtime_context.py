@@ -1,32 +1,28 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
 
-from plasma_surrogate.cli.workflows import run_preprocess, run_train
+from plasma_surrogate.cli.workflows import run_evaluate, run_infer, run_preprocess, run_train
 from plasma_surrogate.pipeline.runtime_context import (
     build_infer_context,
     build_preprocess_context,
     build_train_context,
 )
+from tests._config_presets import default_target_transforms_four_field_example, runtime_table_only
 
 
 def _write_cfg(path: Path, run_dir: Path) -> None:
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_only(),
         "dataset": {"type": "synthetic", "n_cases": 8, "height": 8, "width": 8, "cond_dim": 3, "seed": 3},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
             "axis_schema": {"mode": "steady", "harmonics": 1},
-            "scalers": {
-                "target_transforms": {
-                    "ne": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "ni": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "Te": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "plasma_only", "clip": {"mode": "none"}},
-                    "phi": {"value_transform": "identity", "scaler": "zscore", "fit_scope": "all", "clip": {"mode": "none"}},
-                }
-            },
+            "scalers": {"target_transforms": default_target_transforms_four_field_example()},
         },
         "model": {"name": "global_mlp", "phi_mode": "direct"},
         "train": {"epochs": 2, "lr": 0.01},
@@ -71,3 +67,32 @@ def test_build_infer_context_bootstraps_checkpoint(tmp_path: Path):
     )
     assert ctx.bundle is not None
     assert ctx.bundle.model is not None
+
+
+def test_runtime_metadata_contract_flows_to_checkpoint_infer_and_evaluate(
+    tmp_path: Path,
+    assert_input_mode_metadata_keys,
+) -> None:
+    cfg_path = tmp_path / "cfg.yaml"
+    run_dir = tmp_path / "run"
+    _write_cfg(cfg_path, run_dir)
+
+    run_preprocess(cfg_path)
+    run_train(cfg_path)
+
+    checkpoint_meta = json.loads((run_dir / "checkpoints" / "meta.json").read_text(encoding="utf-8"))
+    assert_input_mode_metadata_keys(checkpoint_meta)
+    assert checkpoint_meta["input_mode_effective"] == "table_only"
+    assert checkpoint_meta["structure_feature_profile_effective"] == "none"
+    assert checkpoint_meta["structure_adapter_mode_effective"] == "none"
+    assert checkpoint_meta["geometry_provider_mode_effective"] == "fixed"
+    assert checkpoint_meta["target_schema_hash"]
+    assert checkpoint_meta["feature_schema_hash"]
+
+    infer_out = run_infer(cfg_path)
+    infer_summary = json.loads(Path(infer_out["summary"]).read_text(encoding="utf-8"))
+    assert_input_mode_metadata_keys(infer_summary)
+
+    evaluate_out = run_evaluate(cfg_path)
+    evaluate_summary = json.loads(Path(evaluate_out["summary"]).read_text(encoding="utf-8"))
+    assert_input_mode_metadata_keys(evaluate_summary)

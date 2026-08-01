@@ -1,0 +1,34 @@
+{
+  "figure": "Simplified GEC-CCP representative electron-density distribution",
+  "presentation_revision": "single_field_large_type_v2",
+  "case_id": "case_td003_pp0_3_gamma_007__steady",
+  "shown_field": "ne",
+  "physical_unit": "m^-3",
+  "source_fields_npz": "data\\outputs_merged_td_csv_periodic_ext0520_v2\\fields\\case_td003_pp0_3_gamma_007__steady.npz",
+  "source_structure_npz": "data\\outputs_merged_td_csv_periodic_ext0520_v2\\structure_features\\base4.npz",
+  "statistics_inside_plasma": {
+    "count": 24480,
+    "min": 125929996288.0,
+    "q01": 1495595994316.8,
+    "median": 859095028465664.0,
+    "q99": 5361846750103469.0,
+    "max": 5583899866431488.0
+  },
+  "display": {
+    "normalization": "logarithmic color scale on physical ne values",
+    "vmin": 1000000000000.0,
+    "vmax": 1e+16,
+    "values_below_vmin": "saturated and marked by the lower colorbar extension",
+    "vmax_policy": "rounded upward to a full decade; no high-end saturation",
+    "colormap": "viridis",
+    "outside_plasma": "light gray",
+    "labels": "large-font slide layout; no case footer or legend"
+  },
+  "geometry_alternative": "base4",
+  "source_geometry_mphtxt": "data\\outputs_merged_td_all_success_pa_ext0520\\structure\\base4\\argon_gec_ccp_base4.mphtxt",
+  "output_files": [
+    "ccp_representative_physical_fields.png",
+    "ccp_representative_physical_fields.pdf",
+    "ccp_representative_physical_fields.svg"
+  ]
+}

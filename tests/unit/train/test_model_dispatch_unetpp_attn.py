@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.train.model_dispatch import TrainDispatchContext, run_model_train_predict
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.train.trainer import TrainOutput, Trainer
 
 
@@ -23,9 +22,6 @@ class _IdentityTransforms:
     def inverse_fields(self, arr: np.ndarray) -> np.ndarray:
         return np.asarray(arr, dtype=np.float32)
 
-
-def _enable_torch() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
 
 
 def _ctx(tmp_path: Path, y_vars: list[str] | None = None) -> TrainDispatchContext:
@@ -71,6 +67,8 @@ def _ctx(tmp_path: Path, y_vars: list[str] | None = None) -> TrainDispatchContex
         deeponet_poisson_meta={},
         deeponet_boundary_index={},
         deeponet_boundary_meta={},
+        input_mode_effective="table_plus_structure",
+        structure_adapter_mode_effective="auto",
         coord_feature_pack={"data": coord_data, "channels": np.asarray(channels)},
         coord_distance_transform_stats={},
         config_base_dir=tmp_path,
@@ -86,7 +84,6 @@ def _valid_cfg(target_vars: list[str]) -> dict[str, Any]:
         "selection": {"mode": "best_val_allvars_balance"},
         "input_features": {
             "mode": "geom_feature_pack",
-            "require_pack": "error",
             "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
             "distance_transform": {"mode": "raw"},
         },
@@ -104,12 +101,20 @@ def _valid_cfg(target_vars: list[str]) -> dict[str, Any]:
     }
 
 
+def _role_schema(target_vars: list[str]) -> dict[str, Any]:
+    families = ["density", "temperature"]
+    return {
+        "targets": [
+            {"id": str(name), "field_family": families[idx % len(families)]}
+            for idx, name in enumerate(target_vars)
+        ]
+    }
+
+
 def test_unetpp_attn_mainline_accepts_valid_dynamic_allvars(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     custom_vars = ["density", "temperature"]
     ctx = _ctx(tmp_path, y_vars=custom_vars)
     ctx.run_cfg = {"train": {"unetpp_attn": _valid_cfg(custom_vars)}}
@@ -123,27 +128,37 @@ def test_unetpp_attn_mainline_accepts_valid_dynamic_allvars(
     )
     out = run_model_train_predict(ctx)
     assert set(out.metrics.keys()) == set(custom_vars)
-    contract = out.extra_artifacts.get("unet_contract_effective", {})
+    contract = out.extra_artifacts.get("model_contracts", {}).get("unet", {})
     assert contract.get("target_family_effective") == "allvars"
     assert contract.get("selection_weights_effective") == {"density": 0.5, "temperature": 0.5}
 
 
-def test_unetpp_attn_rejects_non_geom_feature_pack(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    cfg = _valid_cfg(ctx.y_vars)
-    cfg["input_features"]["mode"] = "legacy_xy"
+def test_unetpp_attn_mainline_accepts_role_grouped_head(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    require_torch_runtime()
+    custom_vars = ["density", "temperature"]
+    ctx = _ctx(tmp_path, y_vars=custom_vars)
+    ctx.physics_cfg = {**dict(ctx.physics_cfg), "target_role_schema": _role_schema(custom_vars)}
+    cfg = _valid_cfg(custom_vars)
+    cfg["model_cfg"]["output_heads"] = {"mode": "role_grouped"}
     ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
-    with pytest.raises(ValueError, match="geom_feature_pack"):
-        run_model_train_predict(ctx)
+    monkeypatch.setattr(
+        Trainer,
+        "run_unet",
+        lambda self, model, cond_train, y_train, cond_val, y_val, **kwargs: TrainOutput(
+            history=[{"epoch": 0.0, "train_loss": 0.0, "val_loss": 0.0}],
+            model=model,
+        ),
+    )
 
+    out = run_model_train_predict(ctx)
 
-def test_unetpp_attn_rejects_wrong_feature_order(tmp_path: Path) -> None:
-    ctx = _ctx(tmp_path)
-    cfg = _valid_cfg(ctx.y_vars)
-    cfg["input_features"]["features"] = ["x", "y", "distance_signed", "distance_any", "mask_plasma"]
-    ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
-    with pytest.raises(ValueError, match="input_features.features"):
-        run_model_train_predict(ctx)
+    assert set(out.metrics.keys()) == set(custom_vars)
+    contract = out.extra_artifacts.get("model_contracts", {}).get("unet", {})
+    assert contract.get("unet_output_heads_mode_effective") == "role_grouped"
+    assert [group["name"] for group in contract.get("target_groups", [])] == ["density", "temperature"]
+    assert "target_groups_hash" not in contract
 
 
 def test_unetpp_attn_rejects_non_shared_head(tmp_path: Path) -> None:
@@ -155,10 +170,10 @@ def test_unetpp_attn_rejects_non_shared_head(tmp_path: Path) -> None:
         run_model_train_predict(ctx)
 
 
-def test_unetpp_attn_rejects_non_mainline_selection_mode(tmp_path: Path) -> None:
+def test_unetpp_attn_rejects_removed_product_loss_key(tmp_path: Path) -> None:
     ctx = _ctx(tmp_path)
-    cfg = _valid_cfg(ctx.y_vars)
-    cfg["selection"] = {"mode": "last"}
-    ctx.run_cfg = {"train": {"unetpp_attn": cfg}}
-    with pytest.raises(ValueError, match="selection.mode must be best_val_allvars_balance"):
+    ctx.loss_cfg = {"supervised": {"type": "mse", "target_region_by_var": {"ne": "all_domain"}}}
+    ctx.run_cfg = {"train": {"unetpp_attn": _valid_cfg(ctx.y_vars)}}
+
+    with pytest.raises(ValueError, match="target_region_by_var"):
         run_model_train_predict(ctx)

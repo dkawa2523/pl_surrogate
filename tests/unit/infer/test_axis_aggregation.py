@@ -12,7 +12,7 @@ from plasma_surrogate.preprocessing.schema import AxisSchema, CondSchema
 
 def test_resolve_axis_samples_time_window():
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=0),
+        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=0),
         cond_schema=CondSchema(order=["c0", "c1"]),
         axis_schema=AxisSchema(mode="time"),
         geometry_provider=FixedGeometryProvider("tests/fixtures/does_not_matter"),
@@ -28,7 +28,7 @@ def test_resolve_axis_samples_time_window():
 
 def test_resolve_axis_samples_mode_mismatch_raises(tmp_path: Path, geometry_root: Path):
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=0),
+        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=0),
         cond_schema=CondSchema(order=["c0", "c1", "c2"]),
         axis_schema=AxisSchema(mode="steady"),
         geometry_provider=FixedGeometryProvider(geometry_root),
@@ -40,11 +40,12 @@ def test_resolve_axis_samples_mode_mismatch_raises(tmp_path: Path, geometry_root
 
 def test_single_run_aggregated_window_mean(tmp_path: Path, geometry_root: Path):
     engine = InferenceEngine(
-        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), seed=1),
+        model=GlobalMLP(input_dim=3, grid_shape=(8, 8), output_keys=["ne", "Te", "phi"], seed=1),
         cond_schema=CondSchema(order=["c0", "c1"]),
         axis_schema=AxisSchema(mode="time"),
         geometry_provider=FixedGeometryProvider(geometry_root),
         output_dir=tmp_path / "infer",
+        ood_cfg={"qoi": {"uniformity": {"target": "ne"}}},
     )
     out = engine.single_run_aggregated(
         cond={"c0": 0.2, "c1": 0.4},
@@ -54,4 +55,4 @@ def test_single_run_aggregated_window_mean(tmp_path: Path, geometry_root: Path):
     assert "uniformity" in out.qoi
     single_dirs = [p for p in (tmp_path / "infer" / "single").iterdir() if p.is_dir()]
     assert len(single_dirs) == 3
-    assert all((d / "ood_report.json").exists() for d in single_dirs)
+    assert all((d / "diagnostics.json").exists() for d in single_dirs)

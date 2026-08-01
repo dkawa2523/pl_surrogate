@@ -1,0 +1,40 @@
+{
+  "figure": "Simplified GEC-ICP dimension-vector and SDF geometry encoding",
+  "presentation_revision": "three_panel_representative_sdf_v2",
+  "case_id": "case_g002_op01",
+  "dimension_vector": [
+    "llcoil",
+    "rrc",
+    "nncoil",
+    "rrce",
+    "zzc"
+  ],
+  "dimension_values": {
+    "llcoil": 0.5543,
+    "rrc": 3.7458,
+    "nncoil": 6.0,
+    "rrce": 29.6998,
+    "zzc": 0.9013
+  },
+  "shown_sdf_slot": "sdf_coil_03",
+  "shown_summary": "part_sdf_union = min_j sdf_coil_j",
+  "sdf_source_unit": "grid pixels",
+  "display_unit": "cm",
+  "grid_spacing_cm": 0.05000007152557373,
+  "display_limits_cm": [
+    -0.25,
+    3.0
+  ],
+  "strict_sign_contradiction_cells": 0,
+  "omitted_from_main_figure": [
+    "five other slot maps",
+    "part_source_sum"
+  ],
+  "source_structure_npz": "data\\outputs_icp_stage4_enriched_360_csv_npz_multifield_structure_v1\\structure_features\\case_g002_op01.npz",
+  "source_coil_layout": "data\\outputs_icp_stage4_enriched_360\\structure\\coil_layout\\case_g002_op01__coil_layout.csv",
+  "output_files": [
+    "icp_geometry_features_sdf.png",
+    "icp_geometry_features_sdf.pdf",
+    "icp_geometry_features_sdf.svg"
+  ]
+}

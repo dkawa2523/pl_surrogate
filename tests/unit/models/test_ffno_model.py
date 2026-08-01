@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import os
+import pytest
 from pathlib import Path
 
 import numpy as np
-import pytest
 
-from plasma_surrogate.core.torch_backend import torch_runtime_available
 from plasma_surrogate.models.fno.factorized_fno import FFNOBaseline
+from tests._runtime_requirements import require_torch_runtime
 from plasma_surrogate.models.fno.simple_fno import FNOBaseline
-from plasma_surrogate.models.mlp.io import build_model_from_name, load_mlp_checkpoint, save_mlp_checkpoint
+from plasma_surrogate.models.checkpoint import build_model_from_name, load_checkpoint, save_checkpoint
 
-
-def _enable_torch() -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
+pytestmark = pytest.mark.torch_runtime
 
 
 def _spectral_cfg() -> dict[str, object]:
@@ -34,9 +31,7 @@ def _spectral_cfg_with_local_skip(*, enabled: bool, init_scale: float = 0.0) -> 
 
 
 def test_build_ffno_smoke() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = build_model_from_name(
         model_name="ffno",
         input_dim=3,
@@ -51,9 +46,7 @@ def test_build_ffno_smoke() -> None:
 
 
 def test_build_ffno_local_skip_smoke() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = build_model_from_name(
         model_name="ffno",
         input_dim=3,
@@ -69,9 +62,7 @@ def test_build_ffno_local_skip_smoke() -> None:
 
 
 def test_build_ffno_axis_mix_smoke() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     cfg = _spectral_cfg_with_local_skip(enabled=True)
     cfg["axis_mix_cfg"] = {"enabled": True, "init_h": 1.0, "init_w": 1.0}
     model = FFNOBaseline(
@@ -87,9 +78,7 @@ def test_build_ffno_axis_mix_smoke() -> None:
 
 
 def test_ffno_static_spatial_features_shape_validation() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = FFNOBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -102,9 +91,7 @@ def test_ffno_static_spatial_features_shape_validation() -> None:
 
 
 def test_ffno_forward_shape_with_dynamic_output_keys() -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = FFNOBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -136,9 +123,7 @@ def test_ffno_forward_shape_with_dynamic_output_keys() -> None:
     ],
 )
 def test_ffno_checkpoint_roundtrip(tmp_path: Path, local_skip_enabled: bool, expected_impl: str) -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = FFNOBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -152,8 +137,8 @@ def test_ffno_checkpoint_roundtrip(tmp_path: Path, local_skip_enabled: bool, exp
     cond = np.random.default_rng(1).normal(size=(2, 3)).astype(np.float32)
     model.set_static_spatial_features(spatial)
     pred_before = model.forward(cond)
-    save_mlp_checkpoint(model, tmp_path / "ckpt")
-    loaded = load_mlp_checkpoint(tmp_path / "ckpt")
+    save_checkpoint(model, tmp_path / "ckpt")
+    loaded = load_checkpoint(tmp_path / "ckpt")
     loaded.set_static_spatial_features(spatial)
     pred_after = loaded.forward(cond)
     assert isinstance(loaded, FFNOBaseline)
@@ -162,9 +147,7 @@ def test_ffno_checkpoint_roundtrip(tmp_path: Path, local_skip_enabled: bool, exp
 
 
 def test_fno_checkpoint_roundtrip_still_works_after_shared_spectral_cfg(tmp_path: Path) -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     model = FNOBaseline(
         input_dim=3,
         grid_shape=(8, 8),
@@ -178,39 +161,12 @@ def test_fno_checkpoint_roundtrip_still_works_after_shared_spectral_cfg(tmp_path
     cond = np.random.default_rng(3).normal(size=(2, 3)).astype(np.float32)
     model.set_static_spatial_features(spatial)
     pred_before = model.forward(cond)
-    save_mlp_checkpoint(model, tmp_path / "ckpt_fno")
-    loaded = load_mlp_checkpoint(tmp_path / "ckpt_fno")
+    save_checkpoint(model, tmp_path / "ckpt_fno")
+    loaded = load_checkpoint(tmp_path / "ckpt_fno")
     loaded.set_static_spatial_features(spatial)
     pred_after = loaded.forward(cond)
     assert isinstance(loaded, FNOBaseline)
     np.testing.assert_allclose(pred_before, pred_after, atol=1e-6, rtol=1e-6)
-
-
-@pytest.mark.parametrize("local_skip_enabled", [False, True])
-def test_ffno_load_legacy_weights_without_axis_mix_scalars(local_skip_enabled: bool) -> None:
-    _enable_torch()
-    if not torch_runtime_available():
-        pytest.skip("torch backend disabled for this environment")
-    model = FFNOBaseline(
-        input_dim=3,
-        grid_shape=(8, 8),
-        out_channels=2,
-        output_keys=["density", "temperature"],
-        input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-        n_modes=3,
-        spectral_cfg=_spectral_cfg_with_local_skip(enabled=local_skip_enabled),
-    )
-    legacy_like_state = {k: v for k, v in model.state_dict_numpy().items() if not k.endswith(".beta_h") and not k.endswith(".beta_w")}
-    target = FFNOBaseline(
-        input_dim=3,
-        grid_shape=(8, 8),
-        out_channels=2,
-        output_keys=["density", "temperature"],
-        input_feature_channels=["x", "y", "mask_plasma", "distance_signed", "distance_any"],
-        n_modes=3,
-        spectral_cfg=_spectral_cfg_with_local_skip(enabled=local_skip_enabled),
-    )
-    target.load_state_dict_numpy(legacy_like_state)
 
 
 @pytest.mark.parametrize(
@@ -223,9 +179,7 @@ def test_ffno_load_legacy_weights_without_axis_mix_scalars(local_skip_enabled: b
 def test_ffno_rejects_unsupported_factorized_v1_options(
     factorized_cfg: dict[str, object], message: str
 ) -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     with pytest.raises(ValueError, match=message):
         FFNOBaseline(
             input_dim=3,
@@ -239,9 +193,7 @@ def test_ffno_rejects_unsupported_factorized_v1_options(
 
 
 def test_ffno_matches_fno_forward_contract_shape() -> None:
-    _enable_torch()
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
     channels = ["x", "y", "mask_plasma", "distance_signed", "distance_any"]
     cond = np.random.default_rng(7).normal(size=(2, 3)).astype(np.float32)
     spatial = np.random.default_rng(8).normal(size=(8, 8, len(channels))).astype(np.float32)

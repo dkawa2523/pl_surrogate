@@ -1,24 +1,26 @@
 from __future__ import annotations
 
-import os
+import pytest
 from pathlib import Path
 
-import pytest
+
 import yaml
 
 from plasma_surrogate.cli.main import main
-from plasma_surrogate.core.torch_backend import torch_runtime_available
+from tests._config_presets import runtime_table_plus_structure
+from tests._runtime_requirements import require_torch_runtime
+
+pytestmark = pytest.mark.torch_runtime
 
 
 @pytest.mark.parametrize("local_skip_enabled", [False, True])
 def test_infer_ffno_smoke(tmp_path: Path, local_skip_enabled: bool) -> None:
-    os.environ["PLASMA_SURROGATE_ENABLE_TORCH"] = "1"
-    if not torch_runtime_available(refresh=True):
-        pytest.skip("torch backend disabled for this environment")
+    require_torch_runtime()
 
     run_dir = tmp_path / "ffno_run"
     cfg = {
         "run_dir": str(run_dir),
+        "runtime": runtime_table_plus_structure(feature_profile="geom_v1_mainline", adapter_mode="auto"),
         "dataset": {"type": "synthetic", "n_cases": 10, "height": 8, "width": 8, "cond_dim": 3, "seed": 5},
         "preprocessing": {
             "split": {"seed": 1, "ratios": [0.6, 0.2, 0.2]},
@@ -32,7 +34,7 @@ def test_infer_ffno_smoke(tmp_path: Path, local_skip_enabled: bool) -> None:
             },
             "coord_features": {
                 "enabled": True,
-                "channels": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
+                "channels_from_profile": "geom_v1_mainline",
                 "distance_transform_stats": {"enabled": True, "fit_scope": "train_split", "mask_scope": "plasma_plus_band"},
             },
         },
@@ -60,7 +62,6 @@ def test_infer_ffno_smoke(tmp_path: Path, local_skip_enabled: bool) -> None:
                 "target_family": "allvars",
                 "input_features": {
                     "mode": "geom_feature_pack",
-                    "require_pack": "error",
                     "features": ["x", "y", "mask_plasma", "distance_signed", "distance_any"],
                     "distance_transform": {"mode": "raw"},
                 },
@@ -80,7 +81,10 @@ def test_infer_ffno_smoke(tmp_path: Path, local_skip_enabled: bool) -> None:
                 },
             },
         },
-        "inference": {"single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}}},
+        "inference": {
+            "single": {"enabled": True, "cond": {"c0": 0.3, "c1": 0.4, "c2": 0.5}},
+            "qoi": {"uniformity": {"target": "ne"}},
+        },
     }
     cfg_path = tmp_path / "ffno.yaml"
     with cfg_path.open("w", encoding="utf-8") as f:
