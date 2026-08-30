@@ -1,0 +1,135 @@
+{
+  "optimization_space": "coil_structure_features_v1",
+  "param_specs": {
+    "part.coil_01.scale_x": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_01.scale_y": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_01.tx": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_01.ty": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_02.scale_x": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_02.scale_y": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_02.tx": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_02.ty": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_03.scale_x": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_03.scale_y": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_03.tx": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_03.ty": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_04.scale_x": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_04.scale_y": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_04.tx": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_04.ty": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_05.scale_x": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_05.scale_y": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_05.tx": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_05.ty": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_06.scale_x": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_06.scale_y": {
+      "default": 1.0,
+      "max": 1.1,
+      "min": 0.9
+    },
+    "part.coil_06.tx": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    },
+    "part.coil_06.ty": {
+      "default": 0.0,
+      "max": 0.02,
+      "min": -0.02
+    }
+  },
+  "part_ids": [
+    "coil_01",
+    "coil_02",
+    "coil_03",
+    "coil_04",
+    "coil_05",
+    "coil_06"
+  ],
+  "plasma_mode": "preserve",
+  "reference_case_id": "case_g002_op01"
+}

@@ -63,6 +63,20 @@ CUDA driver and GPU names; do not silently change the requirements file.
 
 ## Required data and weights
 
+On branch `docs/icp-uno-epoch500-portable-v47`, the complete frozen training
+dataset below is committed with Git LFS. After cloning or checking out the
+branch, materialize the array payloads before running the verifier:
+
+```powershell
+git lfs install
+git lfs pull --include="data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**"
+```
+
+Do not train from LFS pointer text. `git lfs fsck` must pass, and the
+portability verifier must still report 957 cases with a 685/136/136 split.
+The adopted checkpoints and the complete working-tree source snapshot remain
+separate transfer requirements unless they are committed independently.
+
 Transfer at minimum:
 
 ```text
@@ -103,4 +117,3 @@ Never point a new run's writable output directly into a v45 or v46 run.
 Maintain at least 20 GiB free during training. The recovery mechanism should
 retain only the latest resumable optimizer checkpoint and the best selected
 model; retaining every optimizer checkpoint can consume tens of GiB.
-

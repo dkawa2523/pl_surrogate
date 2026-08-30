@@ -1,0 +1,6 @@
+# ICP UNO epoch-500 portable dataset. Keep multi-megabyte arrays out of the
+# normal Git object database; CSV/JSON manifests remain ordinary Git files.
+data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/*.npz filter=lfs diff=lfs merge=lfs -text
+data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**/*.npz filter=lfs diff=lfs merge=lfs -text
+data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/*.npy filter=lfs diff=lfs merge=lfs -text
+data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**/*.npy filter=lfs diff=lfs merge=lfs -text

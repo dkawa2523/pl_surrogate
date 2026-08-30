@@ -1,0 +1,23 @@
+{
+  "schema": "icp-conference-continuity-v45-dataset-view",
+  "case_count": 957,
+  "split_counts": {
+    "train": 685,
+    "val": 136,
+    "test": 136
+  },
+  "hard_links_verified_or_created": 1922,
+  "legacy_vacuum_quadrature_order": 3,
+  "v43_vacuum_quadrature_order": 3,
+  "formal_dimension_collision_case_count": 160,
+  "formal_dimension_collision_row_count": 160,
+  "test_layout_kind_counts": {
+    "coupled_transform": 25,
+    "regular_anchor": 25,
+    "unknown_gap_topology": 25,
+    "unseen_rank_height_size": 25
+  },
+  "index_sha256": "aece11604552aa861a5250370901da7fec441b0af88687f3037593372a05b691",
+  "explicit_dimension_index_sha256": "2d5883c429a48aa8e486a0d29c7bcaeb7516f3e12922cd2d363a85d60f62cdf1",
+  "split_membership_sha256": "69f6d3a47fcbc8701b758f7685a664da95ac0fe27d3e081a06751cf69d16315f"
+}

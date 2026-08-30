@@ -5,6 +5,12 @@
 本ディレクトリは、次の4モデルを他環境で再学習・評価・最適化し、
 学会用グラフまで作成するための専用仕様書です。
 
+本ブランチでは、固定データセット
+`data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/` を Git LFS で管理します。
+別環境では checkout 後に `git lfs install` と
+`git lfs pull --include="data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**"`
+を実行し、配列実体を取得してから検証・学習してください。
+
 1. 正式SDF
 2. 正式Dimension
 3. ABC-SDF：多重解像度、入力群別lifting、適応的局所・大域混合
@@ -243,4 +249,3 @@ ABC-SDFがABC-Dimension-Pより次の両方で良いことが最低条件です�
 
 最適化の優位性はCOMSOL確認後にのみ主張します。結果が目的を支持しない場合も、
 その結果を削除・変更せず、正式モデルを上書きしません。
-
