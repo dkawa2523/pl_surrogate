@@ -42,6 +42,7 @@ _V3_SUPERVISED_KEYS = {
     "sample_mean_weight_denominator",
     "spatial",
     "physical_weighting",
+    "derived_qoi",
 }
 _V3_SPATIAL_KEYS = {
     "boundary_band_px",
@@ -53,6 +54,7 @@ _V3_SPATIAL_KEYS = {
     "gradient_weight",
     "multiscale_scales",
     "multiscale_weight",
+    "targets",
 }
 _V3_PHYSICAL_WEIGHTING_KEYS = {
     "axisymmetric_volume",

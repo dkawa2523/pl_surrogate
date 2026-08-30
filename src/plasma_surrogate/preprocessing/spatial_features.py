@@ -29,6 +29,7 @@ PART_SDF_SUMMARY_CHANNELS: tuple[str, ...] = (
     "solid_proximity",
 )
 PART_SOURCE_CHANNELS: tuple[str, ...] = ("part_sdf_union", "part_source_sum")
+PART_SOURCE_MEAN_CHANNELS: tuple[str, ...] = ("part_sdf_union", "part_source_mean")
 ICP_PART_SDF_LITE_CASE_CHANNELS: tuple[str, ...] = (*ICP_STRUCT_CASE_CHANNELS, *ICP_PART_SDF_CHANNELS)
 
 
@@ -100,11 +101,15 @@ def part_sdf_summary_maps_from_stack(
     gap_proxy = np.maximum(second - nearest, 0.0).astype(np.float32)
     tau_eff = max(float(proximity_tau), 1.0e-6)
     solid_proximity = np.exp(-np.maximum(nearest, 0.0) / tau_eff).astype(np.float32)
+    second_proximity = np.exp(-np.maximum(second, 0.0) / tau_eff).astype(np.float32)
+    part_competition = np.exp(-gap_proxy / tau_eff).astype(np.float32)
     return {
         "part_sdf_nearest": nearest.astype(np.float32),
         "part_sdf_second": second.astype(np.float32),
         "part_gap_proxy": gap_proxy.astype(np.float32),
         "solid_proximity": solid_proximity.astype(np.float32),
+        "part_second_proximity": second_proximity.astype(np.float32),
+        "part_competition": part_competition.astype(np.float32),
     }
 
 
@@ -133,6 +138,7 @@ def part_source_maps_from_stack(
         return {
             "part_sdf_union": np.full((h, w), float(h + w + 1), dtype=np.float32),
             "part_source_sum": np.zeros((h, w), dtype=np.float32),
+            "part_source_mean": np.zeros((h, w), dtype=np.float32),
         }
     union = np.maximum.reduce(active).astype(np.float32)
     source = np.sum(
@@ -143,6 +149,7 @@ def part_source_maps_from_stack(
     return {
         "part_sdf_union": sdf_from_part_mask(union).astype(np.float32),
         "part_source_sum": np.asarray(source, dtype=np.float32),
+        "part_source_mean": np.asarray(source / float(len(active)), dtype=np.float32),
     }
 
 

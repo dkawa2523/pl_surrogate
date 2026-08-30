@@ -30,6 +30,28 @@ def _resolve_basis_cfg(model_cfg: dict[str, Any], *, cfg_prefix: str) -> dict[st
     rank = int(basis_cfg.get("rank", 32))
     if rank < 1:
         raise ValueError(f"{cfg_prefix}.model_cfg.basis.rank must be >= 1")
+    min_rank = int(basis_cfg.get("min_rank", 1))
+    if min_rank < 1 or min_rank > rank:
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.basis.min_rank must be in [1, rank]"
+        )
+    energy_threshold_raw = basis_cfg.get("energy_threshold")
+    energy_threshold = None if energy_threshold_raw is None else float(energy_threshold_raw)
+    if energy_threshold is not None and (
+        not np.isfinite(energy_threshold) or not 0.0 < energy_threshold <= 1.0
+    ):
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.basis.energy_threshold must be finite and in (0, 1]"
+        )
+    coeff_std_floor_rel = float(basis_cfg.get("coeff_std_floor_rel", 0.0))
+    if (
+        not np.isfinite(coeff_std_floor_rel)
+        or coeff_std_floor_rel < 0.0
+        or coeff_std_floor_rel > 1.0
+    ):
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.basis.coeff_std_floor_rel must be finite and in [0, 1]"
+        )
     fit_scope = str(basis_cfg.get("fit_scope", "train_only")).strip().lower()
     if fit_scope != "train_only":
         raise ValueError(f"{cfg_prefix}.model_cfg.basis.fit_scope must be train_only")
@@ -39,6 +61,9 @@ def _resolve_basis_cfg(model_cfg: dict[str, Any], *, cfg_prefix: str) -> dict[st
     center = bool(basis_cfg.get("center", True))
     return {
         "rank": int(rank),
+        "min_rank": int(min_rank),
+        "energy_threshold": energy_threshold,
+        "coeff_std_floor_rel": float(coeff_std_floor_rel),
         "fit_scope": fit_scope,
         "per_var": per_var,
         "center": center,
@@ -62,6 +87,110 @@ def _resolve_hidden_dims(cfg: dict[str, Any], *, cfg_prefix: str) -> list[int]:
     return hidden
 
 
+def _resolve_activation_name(value: Any, *, cfg_key: str) -> str:
+    name = str(value).strip().lower()
+    if name not in {"gelu", "silu", "relu", "tanh"}:
+        raise ValueError(f"{cfg_key} must be one of: gelu, silu, relu, tanh")
+    return name
+
+
+def _resolve_branch_cfg(cfg: dict[str, Any], *, cfg_prefix: str) -> dict[str, Any]:
+    """Resolve the coefficient branch without hiding input-shape changes.
+
+    ``activate_last_hidden`` defaults to the legacy behavior.  Improved configs
+    opt in explicitly, which keeps both old YAML reruns and old checkpoints
+    numerically stable.
+
+    A structure descriptor, when present, is always the suffix after the
+    condition vector.  Keeping ``condition_dim`` and ``dim`` explicit prevents
+    an accidental descriptor slice from silently consuming condition columns.
+    """
+
+    branch_raw = dict(cfg.get("branch", {}) or {})
+    activation = _resolve_activation_name(
+        branch_raw.get("activation", "gelu"),
+        cfg_key=f"{cfg_prefix}.model_cfg.branch.activation",
+    )
+    activate_last_hidden = bool(branch_raw.get("activate_last_hidden", False))
+
+    descriptor_raw = dict(branch_raw.get("descriptor", {}) or {})
+    mode = str(descriptor_raw.get("mode", "raw")).strip().lower()
+    mode_aliases = {
+        "drop_descriptor": "drop",
+        "compact_descriptor": "compact",
+    }
+    mode = mode_aliases.get(mode, mode)
+    if mode not in {"raw", "drop", "compact"}:
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch.descriptor.mode must be one of: raw, drop, compact"
+        )
+
+    descriptor_dim = int(descriptor_raw.get("dim", 0))
+    if descriptor_dim < 0:
+        raise ValueError(f"{cfg_prefix}.model_cfg.branch.descriptor.dim must be >= 0")
+    condition_dim_raw = descriptor_raw.get("condition_dim")
+    condition_dim = None if condition_dim_raw is None else int(condition_dim_raw)
+    if condition_dim is not None and condition_dim < 1:
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch.descriptor.condition_dim must be >= 1"
+        )
+
+    normalization_default = "layer_norm" if mode == "compact" else "none"
+    normalization = str(
+        descriptor_raw.get("normalization", normalization_default)
+    ).strip().lower()
+    if normalization not in {"none", "layer_norm", "train_zscore"}:
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch.descriptor.normalization must be one of: "
+            "none, layer_norm, train_zscore"
+        )
+    if descriptor_dim == 0:
+        if mode != "raw":
+            raise ValueError(
+                f"{cfg_prefix}.model_cfg.branch.descriptor.dim must be >= 1 when mode={mode}"
+            )
+        if normalization != "none":
+            raise ValueError(
+                f"{cfg_prefix}.model_cfg.branch.descriptor.normalization must be none when dim=0"
+            )
+    if mode == "drop" and normalization != "none":
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch.descriptor.normalization must be none when mode=drop"
+        )
+
+    compact_dim_raw = descriptor_raw.get("compact_dim")
+    compact_dim = None if compact_dim_raw is None else int(compact_dim_raw)
+    if mode == "compact":
+        if compact_dim is None or compact_dim < 1:
+            raise ValueError(
+                f"{cfg_prefix}.model_cfg.branch.descriptor.compact_dim must be >= 1 "
+                "when mode=compact"
+            )
+        compact_activation = _resolve_activation_name(
+            descriptor_raw.get("compact_activation", activation),
+            cfg_key=f"{cfg_prefix}.model_cfg.branch.descriptor.compact_activation",
+        )
+    else:
+        if compact_dim is not None:
+            raise ValueError(
+                f"{cfg_prefix}.model_cfg.branch.descriptor.compact_dim is only valid when mode=compact"
+            )
+        compact_activation = activation
+
+    return {
+        "activation": activation,
+        "activate_last_hidden": activate_last_hidden,
+        "descriptor": {
+            "mode": mode,
+            "dim": descriptor_dim,
+            "condition_dim": condition_dim,
+            "normalization": normalization,
+            "compact_dim": compact_dim,
+            "compact_activation": compact_activation,
+        },
+    }
+
+
 def normalize_pod_deeponet_model_cfg(
     raw_cfg: dict[str, Any] | None,
     *,
@@ -71,6 +200,7 @@ def normalize_pod_deeponet_model_cfg(
     cfg_prefix = _cfg_prefix(model_type)
     hidden = _resolve_hidden_dims(cfg, cfg_prefix=cfg_prefix)
     basis_cfg = _resolve_basis_cfg(cfg, cfg_prefix=cfg_prefix)
+    branch_cfg = _resolve_branch_cfg(cfg, cfg_prefix=cfg_prefix)
     coeff_loss_weight = float(cfg.get("coeff_loss_weight", 0.1))
     if not np.isfinite(coeff_loss_weight) or coeff_loss_weight < 0.0:
         raise ValueError(f"{cfg_prefix}.model_cfg.coeff_loss_weight must be finite and >= 0")
@@ -78,8 +208,42 @@ def normalize_pod_deeponet_model_cfg(
         "hidden": list(hidden),
         "latent_dim": int(hidden[-1]),
         "basis": basis_cfg,
+        "branch": branch_cfg,
         "coeff_loss_weight": float(coeff_loss_weight),
     }
+
+
+def _activation_module(nn: Any, name: str) -> Any:
+    if name == "gelu":
+        return nn.GELU()
+    if name == "silu":
+        return nn.SiLU()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "tanh":
+        return nn.Tanh()
+    raise RuntimeError(f"unresolved POD-DeepONet branch activation: {name!r}")
+
+
+def fit_pod_descriptor_train_zscore(descriptor_train: np.ndarray) -> dict[str, np.ndarray]:
+    """Fit a stable featurewise descriptor transform from training rows only."""
+
+    arr = np.asarray(descriptor_train, dtype=np.float32)
+    if arr.ndim != 2 or int(arr.shape[0]) < 1 or int(arr.shape[1]) < 1:
+        raise ValueError(
+            "deeponet_pod train_zscore descriptor_train must be a non-empty [N,D] matrix; "
+            f"got {arr.shape}"
+        )
+    if not np.all(np.isfinite(arr)):
+        raise ValueError("deeponet_pod train_zscore descriptor_train must contain only finite values")
+    mean = np.mean(arr, axis=0, dtype=np.float64).astype(np.float32)
+    std_raw = np.std(arr, axis=0, dtype=np.float64).astype(np.float32)
+    max_std = float(np.max(std_raw, initial=np.float32(0.0)))
+    floor = np.float32(max(1.0e-6, 1.0e-6 * max_std))
+    # A train-constant descriptor maps exactly to zero.  A unit fallback scale
+    # avoids magnifying numerical noise and remains well-defined at inference.
+    std = np.where(std_raw > floor, std_raw, np.float32(1.0)).astype(np.float32)
+    return {"mean": mean, "std": std}
 
 
 @dataclass(frozen=True)
@@ -146,6 +310,9 @@ def fit_pod_basis_from_targets(
     center: bool,
     per_var: bool,
     active_mask: np.ndarray | None = None,
+    energy_threshold: float | None = None,
+    min_rank: int = 1,
+    coeff_std_floor_rel: float = 0.0,
 ) -> PODBasisBundle:
     if not bool(per_var):
         raise ValueError("deeponet_pod v1 requires per_var=true")
@@ -159,6 +326,21 @@ def fit_pod_basis_from_targets(
         raise ValueError(
             f"deeponet_pod basis fitting target mismatch: got C={n_targets}, output_keys={list(output_keys)}"
         )
+    max_rank = max(int(requested_rank), 1)
+    min_rank = int(min_rank)
+    if min_rank < 1 or min_rank > max_rank:
+        raise ValueError("deeponet_pod min_rank must be in [1, requested_rank]")
+    if energy_threshold is not None:
+        energy_threshold = float(energy_threshold)
+        if not np.isfinite(energy_threshold) or not 0.0 < energy_threshold <= 1.0:
+            raise ValueError("deeponet_pod energy_threshold must be finite and in (0, 1]")
+    coeff_std_floor_rel = float(coeff_std_floor_rel)
+    if (
+        not np.isfinite(coeff_std_floor_rel)
+        or coeff_std_floor_rel < 0.0
+        or coeff_std_floor_rel > 1.0
+    ):
+        raise ValueError("deeponet_pod coeff_std_floor_rel must be finite and in [0, 1]")
     if active_mask is None:
         mask = np.ones((n_samples, h, w), dtype=bool)
     else:
@@ -185,7 +367,6 @@ def fit_pod_basis_from_targets(
     mean_by_var: dict[str, np.ndarray] = {}
     rank_by_var: dict[str, int] = {}
     coeff_std_by_var: dict[str, np.ndarray] = {}
-    max_rank = max(int(requested_rank), 1)
     flat_dim = int(h * w)
     for idx, var_name in enumerate(output_keys):
         snapshots = arr[:, idx].reshape(n_samples, flat_dim).astype(np.float32)
@@ -210,12 +391,31 @@ def fit_pod_basis_from_targets(
         # solid-region fill values out of the SVD while retaining the union of
         # all train-case plasma supports.
         centered = np.where(mask_flat, snapshots - mean_flat[None, :], 0.0).astype(np.float32)
-        rank_eff = int(min(max_rank, n_samples, flat_dim))
-        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        rank_cap = int(min(max_rank, n_samples, flat_dim))
+        _, singular_values, vh = np.linalg.svd(centered, full_matrices=False)
+        rank_eff = rank_cap
+        if energy_threshold is not None:
+            energy = np.square(np.asarray(singular_values, dtype=np.float64))
+            total_energy = float(np.sum(energy, dtype=np.float64))
+            if total_energy > 0.0:
+                cumulative = np.cumsum(energy, dtype=np.float64) / total_energy
+                energy_rank = int(np.searchsorted(cumulative, energy_threshold, side="left") + 1)
+            else:
+                energy_rank = 1
+            rank_eff = int(min(rank_cap, max(min_rank, energy_rank)))
         basis_flat = np.asarray(vh[:rank_eff], dtype=np.float32)
         coeff_raw = centered @ basis_flat.T
         coeff_std = np.std(coeff_raw, axis=0, dtype=np.float32).astype(np.float32)
-        coeff_std = np.where(coeff_std > np.float32(1.0e-6), coeff_std, np.float32(1.0)).astype(np.float32)
+        if coeff_std_floor_rel > 0.0:
+            relative_floor = np.float32(coeff_std_floor_rel * float(np.max(coeff_std, initial=0.0)))
+            coeff_floor = np.maximum(np.float32(1.0e-6), relative_floor)
+            coeff_std = np.maximum(coeff_std, coeff_floor).astype(np.float32)
+        else:
+            # Preserve the legacy fixed-rank behavior when the new weighting
+            # control is not requested.
+            coeff_std = np.where(
+                coeff_std > np.float32(1.0e-6), coeff_std, np.float32(1.0)
+            ).astype(np.float32)
         basis_by_var[str(var_name)] = basis_flat.reshape(rank_eff, h, w).astype(np.float32)
         mean_by_var[str(var_name)] = mean_flat.reshape(h, w).astype(np.float32)
         rank_by_var[str(var_name)] = int(rank_eff)
@@ -247,6 +447,7 @@ class PODDeepONetTorch:
         pod_basis: dict[str, np.ndarray] | None = None,
         pod_mean: dict[str, np.ndarray] | None = None,
         model_cfg: dict[str, Any] | None = None,
+        descriptor_normalization_stats: dict[str, np.ndarray] | None = None,
         basis_rank_by_var: dict[str, int] | None = None,
         seed: int = 0,
         backend: str = "torch",
@@ -309,13 +510,96 @@ class PODDeepONetTorch:
         hidden = [int(v) for v in list(self.model_cfg["hidden"])]
         if len(hidden) == 0:
             raise ValueError("deeponet_pod model_cfg.hidden must be non-empty")
+        branch_cfg = dict(self.model_cfg["branch"])
+        descriptor_cfg = dict(branch_cfg["descriptor"])
+        self.branch_activation = str(branch_cfg["activation"])
+        self.activate_last_hidden = bool(branch_cfg["activate_last_hidden"])
+        self.descriptor_mode = str(descriptor_cfg["mode"])
+        self.descriptor_dim = int(descriptor_cfg["dim"])
+        inferred_condition_dim = int(self.input_dim - self.descriptor_dim)
+        configured_condition_dim = descriptor_cfg.get("condition_dim")
+        self.condition_dim = (
+            inferred_condition_dim
+            if configured_condition_dim is None
+            else int(configured_condition_dim)
+        )
+        if self.descriptor_dim > self.input_dim:
+            raise ValueError(
+                f"{_cfg_prefix(self.model_type)}.model_cfg.branch.descriptor.dim exceeds model input_dim: "
+                f"descriptor_dim={self.descriptor_dim}, input_dim={self.input_dim}"
+            )
+        if self.condition_dim + self.descriptor_dim != self.input_dim:
+            raise ValueError(
+                f"{_cfg_prefix(self.model_type)}.model_cfg.branch.descriptor dimensions must cover "
+                "the model input exactly: "
+                f"condition_dim={self.condition_dim}, descriptor_dim={self.descriptor_dim}, "
+                f"input_dim={self.input_dim}"
+            )
+        if self.condition_dim < 1:
+            raise ValueError("deeponet_pod coefficient branch requires at least one condition feature")
+
         self.net = nn.Module()
+        descriptor_normalization = str(descriptor_cfg["normalization"])
+        self.descriptor_normalization = descriptor_normalization
+        self.net.descriptor_norm = nn.Identity()
+        if descriptor_normalization == "layer_norm":
+            self.net.descriptor_norm = nn.LayerNorm(
+                self.descriptor_dim,
+                elementwise_affine=False,
+            )
+        elif descriptor_normalization == "train_zscore":
+            stats = dict(descriptor_normalization_stats or {})
+            if "mean" not in stats or "std" not in stats:
+                raise ValueError(
+                    "deeponet_pod descriptor normalization=train_zscore requires "
+                    "training-only mean/std statistics"
+                )
+            mean_arr = np.asarray(stats["mean"], dtype=np.float32).reshape(-1)
+            std_arr = np.asarray(stats["std"], dtype=np.float32).reshape(-1)
+            if mean_arr.shape != (self.descriptor_dim,) or std_arr.shape != (
+                self.descriptor_dim,
+            ):
+                raise ValueError(
+                    "deeponet_pod train_zscore descriptor stats shape mismatch: "
+                    f"expected={(self.descriptor_dim,)}, mean={mean_arr.shape}, std={std_arr.shape}"
+                )
+            if not np.all(np.isfinite(mean_arr)) or not np.all(np.isfinite(std_arr)):
+                raise ValueError("deeponet_pod train_zscore descriptor stats must be finite")
+            if np.any(std_arr <= 0.0):
+                raise ValueError("deeponet_pod train_zscore descriptor std must be positive")
+            self.net.register_buffer(
+                "_pod_descriptor_mean",
+                self.torch.as_tensor(mean_arr, dtype=self.torch.float32),
+                persistent=True,
+            )
+            self.net.register_buffer(
+                "_pod_descriptor_std",
+                self.torch.as_tensor(std_arr, dtype=self.torch.float32),
+                persistent=True,
+            )
+        if self.descriptor_mode == "compact":
+            compact_dim = int(descriptor_cfg["compact_dim"])
+            self.net.descriptor_compactor = nn.Sequential(
+                nn.Linear(self.descriptor_dim, compact_dim),
+                _activation_module(nn, str(descriptor_cfg["compact_activation"])),
+            )
+            branch_input_dim = int(self.condition_dim + compact_dim)
+        else:
+            self.net.descriptor_compactor = nn.Identity()
+            branch_input_dim = (
+                int(self.condition_dim)
+                if self.descriptor_mode == "drop"
+                else int(self.input_dim)
+            )
+        self.branch_input_dim = int(branch_input_dim)
+
         trunk_layers: list[Any] = []
-        dims = [self.input_dim, *hidden]
+        dims = [self.branch_input_dim, *hidden]
         for idx, (fan_in, fan_out) in enumerate(zip(dims[:-1], dims[1:])):
             trunk_layers.append(nn.Linear(int(fan_in), int(fan_out)))
-            if idx != len(dims) - 2:
-                trunk_layers.append(nn.GELU())
+            is_last_hidden = idx == len(dims) - 2
+            if not is_last_hidden or self.activate_last_hidden:
+                trunk_layers.append(_activation_module(nn, self.branch_activation))
         self.net.trunk = nn.Sequential(*trunk_layers)
         self.net.var_heads = nn.ModuleDict(
             {str(name): nn.Linear(int(hidden[-1]), int(self.basis_rank_by_var[name])) for name in self.basis_keys}
@@ -379,8 +663,30 @@ class PODDeepONetTorch:
             fields.append(field_flat.reshape(bsz, *self.grid_shape))
         return self.torch.stack(fields, dim=1)
 
+    def _adapt_branch_input_torch(self, cond_t):
+        if self.descriptor_dim == 0:
+            return cond_t
+        conditions = cond_t[:, : self.condition_dim]
+        descriptor = cond_t[:, self.condition_dim :]
+        if int(descriptor.shape[1]) != self.descriptor_dim:
+            raise ValueError(
+                "deeponet_pod descriptor slice mismatch: "
+                f"expected={self.descriptor_dim}, got={int(descriptor.shape[1])}"
+            )
+        if self.descriptor_mode == "drop":
+            return conditions
+        if self.descriptor_normalization == "train_zscore":
+            descriptor = (
+                descriptor - self.net._pod_descriptor_mean.reshape(1, -1)
+            ) / self.net._pod_descriptor_std.reshape(1, -1)
+        else:
+            descriptor = self.net.descriptor_norm(descriptor)
+        if self.descriptor_mode == "compact":
+            descriptor = self.net.descriptor_compactor(descriptor)
+        return self.torch.cat([conditions, descriptor], dim=1)
+
     def _predict_coeff_norm_torch(self, cond_t):
-        z = self.net.trunk(cond_t)
+        z = self.net.trunk(self._adapt_branch_input_torch(cond_t))
         chunks = [self.net.var_heads[name](z) for name in self.basis_keys]
         return self.torch.cat(chunks, dim=1)
 
@@ -827,5 +1133,6 @@ __all__ = [
     "PODDeepONetTorch",
     "POD_DEEPONET_IMPL_VERSION",
     "fit_pod_basis_from_targets",
+    "fit_pod_descriptor_train_zscore",
     "normalize_pod_deeponet_model_cfg",
 ]

@@ -14,7 +14,6 @@ from plasma_surrogate.core.deeponet_contract import allvars_plasma_balance_score
 from plasma_surrogate.core.physics_contract import resolve_epoch_scaled_physics
 from plasma_surrogate.core.spatial_regions import align_bhw_batch, build_region_masks
 from plasma_surrogate.core.target_roles import resolve_physics_symbol_keys
-from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
 from plasma_surrogate.models.unet.simple_unet import UNetBaseline
 from plasma_surrogate.train.artifact_writers import (
     save_numpy_optimization_diagnostics,
@@ -419,7 +418,7 @@ def _is_effective_clip(
 
 
 def train_one_epoch_global(
-    model: GlobalMLP,
+    model: Any,
     cond_matrix: np.ndarray,
     y_flat: np.ndarray,
     lr: float = 1e-3,
@@ -436,7 +435,7 @@ def train_one_epoch_global(
 
 
 def train_one_epoch_global_physics(
-    model: GlobalMLP,
+    model: Any,
     cond_matrix: np.ndarray,
     y_field: np.ndarray,
     lr: float = 1e-3,
@@ -853,7 +852,7 @@ class Trainer:
 
     def run_global(
         self,
-        model: GlobalMLP,
+        model: Any,
         cond_train: np.ndarray,
         y_train: np.ndarray,
         cond_val: np.ndarray,
@@ -876,6 +875,7 @@ class Trainer:
         selection_cfg: dict[str, Any] | None = None,
         supervision_train: Any | None = None,
         supervision_val: Any | None = None,
+        cfg_prefix: str = "train.global_mlp",
     ) -> TrainOutput:
         save_resolved_physics(
             store=self.store,
@@ -900,7 +900,7 @@ class Trainer:
         }
         if selection_mode not in {"last", *selection_score_modes, "best_val_loss"}:
             raise ValueError(
-                "train.global_mlp.selection.mode must be one of: last, best_val_allvars_balance, "
+                f"{cfg_prefix}.selection.mode must be one of: last, best_val_allvars_balance, "
                 "best_val_group_balance, best_val_spatial_objective, best_val_loss"
             )
         if selection_mode == SPATIAL_SELECTION_MODE:
@@ -911,7 +911,7 @@ class Trainer:
         selection_weights = resolve_mainline_selection_weights(
             selection_cfg=selection_cfg,
             target_vars=list(y_vars),
-            cfg_prefix="train.global_mlp",
+            cfg_prefix=cfg_prefix,
         )
         selection_target_groups = {}
         selection_group_weights: dict[str, float] = {}
@@ -932,7 +932,7 @@ class Trainer:
                 selection_group_weights = resolve_selection_group_weights(
                     dict(selection_cfg.get("group_weights", {}) or {}),
                     groups=selection_target_groups,
-                    cfg_prefix="train.global_mlp",
+                    cfg_prefix=cfg_prefix,
                 )
         selection_target_part_keys = {
             str(name): (
@@ -1001,7 +1001,7 @@ class Trainer:
                     selection_cfg=selection_cfg,
                 ),
             )
-            val_data_loss, _, _ = compose_supervised_numpy(
+            val_data_loss, _, val_data_parts = compose_supervised_numpy(
                 {name: val_fields[:, i] for i, name in enumerate(y_vars)},
                 {name: y_val_field[:, i] for i, name in enumerate(y_vars)},
                 y_order=y_vars,
@@ -1471,7 +1471,7 @@ class Trainer:
                 key: float(value / float(max(int(cond_val.shape[0]), 1)))
                 for key, value in val_aux_diagnostic_num.items()
             }
-            val_data_loss, _, _ = compose_supervised_numpy(
+            val_data_loss, _, val_data_parts = compose_supervised_numpy(
                 {name: val_pred[:, i] for i, name in enumerate(y_vars)},
                 {name: y_val[:, i] for i, name in enumerate(y_vars)},
                 y_order=y_vars,
@@ -1658,6 +1658,11 @@ class Trainer:
                     **{
                         f"val_{key}": float(value)
                         for key, value in val_aux_diagnostics.items()
+                    },
+                    **{
+                        f"val_{key}": float(value)
+                        for key, value in val_data_parts.items()
+                        if str(key).startswith("loss_supervised_")
                     },
                 }
             )

@@ -7,6 +7,7 @@ from importlib import import_module
 __all__ = [
     "CoordMLPTorch",
     "GlobalMLP",
+    "GlobalVectorMLP",
     "UNetBaseline",
     "FNOBaseline",
     "FFNOBaseline",
@@ -26,6 +27,7 @@ __all__ = [
 _EXPORT_MAP = {
     "CoordMLPTorch": "plasma_surrogate.models.mlp.coord_mlp_torch",
     "GlobalMLP": "plasma_surrogate.models.mlp.global_mlp",
+    "GlobalVectorMLP": "plasma_surrogate.models.mlp.global_vector_mlp",
     "UNetBaseline": "plasma_surrogate.models.unet.simple_unet",
     "FNOBaseline": "plasma_surrogate.models.fno.simple_fno",
     "FFNOBaseline": "plasma_surrogate.models.fno.factorized_fno",

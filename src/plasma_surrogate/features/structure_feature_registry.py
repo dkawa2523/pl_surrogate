@@ -24,14 +24,21 @@ ALLOWED_SPATIAL_CHANNELS: tuple[str, ...] = (
     "part_sdf_second",
     "part_gap_proxy",
     "solid_proximity",
+    "part_second_proximity",
+    "part_competition",
     "part_sdf_union",
     "part_source_sum",
+    "part_source_mean",
     "sdf_coil_01",
     "sdf_coil_02",
     "sdf_coil_03",
     "sdf_coil_04",
     "sdf_coil_05",
     "sdf_coil_06",
+    "vacuum_aphi_unit",
+    "vacuum_br_unit",
+    "vacuum_bz_unit",
+    "vacuum_bmag_unit",
 )
 
 GEOM_V1_MAINLINE_CHANNELS: tuple[str, ...] = (
@@ -90,6 +97,100 @@ FEATURE_PROFILE_CHANNELS: dict[str, tuple[str, ...]] = {
         "distance_signed",
         "part_sdf_union",
         "part_source_sum",
+    ),
+    # Order-invariant ICP coil-source contract.  The occupancy field carries
+    # topology without per-coil slot labels or union-SDF medial axes.  Loaded
+    # electromagnetic fields are supervised as causal intermediate targets.
+    "icp_coil_source_v1": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "mask_coil",
+    ),
+    # Fair shape-representation comparison profile.  It differs from
+    # geom_v1_mainline only by the order-invariant union coil SDF and carries
+    # neither coil-slot identity nor additional electromagnetic information.
+    "icp_coil_union_sdf_v1": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "part_sdf_union",
+    ),
+    # Optimization-ready ICP representation.  The union SDF carries geometry
+    # and the additive source field preserves multiplicity that a nearest-part
+    # distance alone can hide after encoder downsampling.
+    "icp_coil_sdf_source_v2": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "part_sdf_union",
+        "part_source_sum",
+    ),
+    # Count-neutral successor to v2. Averaging active equal-strength source
+    # maps removes the automatic amplitude increase when coil count changes,
+    # while union SDF continues to encode geometry and topology.
+    "icp_coil_sdf_source_mean_v3": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "part_sdf_union",
+        "part_source_mean",
+    ),
+    # Structure-only long-range electromagnetic encoding.  These fields are
+    # deterministic unit-current vacuum solutions, so they remain available
+    # for unseen coil generation and do not leak plasma simulation outputs.
+    "icp_vacuum_field_v1": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "vacuum_aphi_unit",
+        "vacuum_br_unit",
+        "vacuum_bz_unit",
+        "vacuum_bmag_unit",
+    ),
+    # Conference-continuity electromagnetic carrier. This preserves the
+    # adopted union-SDF/source representation and appends only deterministic
+    # unit-current vacuum fields that remain available for unseen layouts.
+    "icp_coil_sdf_source_mean_vacuum_v1": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "part_sdf_union",
+        "part_source_mean",
+        "vacuum_aphi_unit",
+        "vacuum_br_unit",
+        "vacuum_bz_unit",
+        "vacuum_bmag_unit",
+    ),
+    # Order-invariant structural refinement of the electromagnetic carrier.
+    # Multi-coil spacing, size and height remain visible without coil slots.
+    "icp_coil_sdf_source_mean_vacuum_structure_v1": (
+        "x",
+        "y",
+        "mask_plasma",
+        "distance_signed",
+        "distance_any",
+        "part_sdf_union",
+        "part_source_mean",
+        "vacuum_aphi_unit",
+        "vacuum_br_unit",
+        "vacuum_bz_unit",
+        "vacuum_bmag_unit",
+        "part_second_proximity",
+        "part_competition",
+        "solid_proximity",
     ),
     # part_lite_v1 uses order-invariant summaries; semantic/ICP profiles keep their existing shapes.
     "part_lite_v1": (

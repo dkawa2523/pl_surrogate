@@ -57,6 +57,26 @@ BENCHMARK_PROFILE_LOCKS: dict[str, dict[str, Any]] = {
         "sensor_query_seed": None,
         "sensor_query_spec_hash": "",
     },
+    "m7_global_resmlp_isolated": {
+        "profile": "m7_global_resmlp_isolated",
+        "dimension": "2d_steady",
+        "models": ["global_resmlp"],
+        "phi_mode": "direct",
+        "axis_mode": "steady",
+        "poisson_refine_iters": 0,
+        "sensor_query_seed": None,
+        "sensor_query_spec_hash": "",
+    },
+    "m7_global_densemlp_isolated": {
+        "profile": "m7_global_densemlp_isolated",
+        "dimension": "2d_steady",
+        "models": ["global_densemlp"],
+        "phi_mode": "direct",
+        "axis_mode": "steady",
+        "poisson_refine_iters": 0,
+        "sensor_query_seed": None,
+        "sensor_query_spec_hash": "",
+    },
     "m7_unet_operator_v2": {
         "profile": "m7_unet_operator_v2",
         "dimension": "2d_steady",
@@ -211,6 +231,8 @@ BENCHMARK_PROFILE_LOCKS: dict[str, dict[str, Any]] = {
 
 PROFILE_ALIASES = {
     "m7_common": "m7_periodic_common",
+    "m7_global_resmlp": "m7_global_resmlp_isolated",
+    "m7_global_densemlp": "m7_global_densemlp_isolated",
     "m7_unet": "m7_unet_isolated",
     "m7_unetpp": "m7_unetpp_isolated",
     "m7_unetpp_attn": "m7_unetpp_attn_isolated",

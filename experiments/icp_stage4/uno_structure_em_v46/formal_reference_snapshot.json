@@ -1,0 +1,13 @@
+{
+  "purpose": "Read-only hash guard captured before isolated v46 full training",
+  "conference_dimension_weights": {
+    "path": "runs/icp_conference_continuity_v45/final/conference_dimension/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz",
+    "sha256": "A87AADB88C3FE383BC2B2BB27F306DCC8BBA5735E5C4F1BA2796559C856B04FF",
+    "bytes": 79307127
+  },
+  "conference_sdf_weights": {
+    "path": "runs/icp_conference_continuity_v45/final/conference_sdf/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz",
+    "sha256": "DB8568A958D7D1A2208C036F27B9B22EB93615008012D0C72E4FF642946FAAC1",
+    "bytes": 79328844
+  }
+}

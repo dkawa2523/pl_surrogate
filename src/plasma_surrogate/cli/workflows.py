@@ -12,7 +12,11 @@ import numpy as np
 import yaml
 
 from plasma_surrogate.core.artifact_store import ArtifactStore
-from plasma_surrogate.core.model_families import COND_ONLY_TORCH_MODELS, GRID_TORCH_MODELS
+from plasma_surrogate.core.model_families import (
+    COND_ONLY_TORCH_MODELS,
+    GLOBAL_MLP_FAMILY_MODELS,
+    GRID_TORCH_MODELS,
+)
 from plasma_surrogate.core.cond_utils import build_cond_matrix_with_axis
 from plasma_surrogate.core.data_cleaning_audit import run_data_audit
 from plasma_surrogate.core.input_modes import (
@@ -575,10 +579,20 @@ def run_train(config_path: str | Path) -> dict[str, Any]:
     plasma_head = PlasmaHead(mode=phi_mode, jacobi_iters=phi_hybrid_steps)
 
     train_dispatch_cfg: dict[str, Any] = {"train": {}}
-    if model_name == "global_mlp":
+    if model_name in GLOBAL_MLP_FAMILY_MODELS:
         per_model_cfg = dict(train_cfg.get(model_name, {}))
         merged_model_cfg = dict(per_model_cfg.get("model_cfg", {}))
-        merged_model_cfg.update(dict(model_cfg))
+        if model_name == "global_mlp":
+            # Preserve the legacy root-model configuration contract.
+            merged_model_cfg.update(dict(model_cfg))
+        else:
+            routing_keys = {"name", "phi_mode", "phi_hybrid_steps", "seed"}
+            misplaced_keys = sorted(set(model_cfg) - routing_keys)
+            if misplaced_keys:
+                raise ValueError(
+                    f"model options for {model_name} must be placed under "
+                    f"train.{model_name}.model_cfg; misplaced keys={misplaced_keys}"
+                )
         train_dispatch_cfg["train"][model_name] = {
             **per_model_cfg,
             "epochs": int(per_model_cfg.get("epochs", epochs)),

@@ -1,0 +1,51 @@
+{
+  "variant": "conference_sdf",
+  "source_checkpoint": "runs\\icp_axisymmetric_operator_case_v1\\final\\union_sdf\\u_no\\seed_1237\\models\\u_no\\eval_protocol\\structure_holdout\\checkpoints\\weights.npz",
+  "source_input_labels": [
+    "pp",
+    "pp0",
+    "x",
+    "y",
+    "mask_plasma",
+    "distance_signed",
+    "distance_any",
+    "part_sdf_union",
+    "part_source_mean"
+  ],
+  "target_input_labels": [
+    "pp",
+    "pp0",
+    "x",
+    "y",
+    "mask_plasma",
+    "distance_signed",
+    "distance_any",
+    "part_sdf_union",
+    "part_source_mean"
+  ],
+  "copied_input_labels": [
+    "pp",
+    "pp0",
+    "x",
+    "y",
+    "mask_plasma",
+    "distance_signed",
+    "distance_any",
+    "part_sdf_union",
+    "part_source_mean"
+  ],
+  "zero_initialized_input_labels": [],
+  "all_layers_trainable": true,
+  "density_stats": {
+    "ne": {
+      "count": 87680000,
+      "mean": 2.579604046664495e+17,
+      "std": 4.967701704137918e+17
+    },
+    "ni": {
+      "count": 87680000,
+      "mean": 2.5797007385686822e+17,
+      "std": 4.967655043715358e+17
+    }
+  }
+}

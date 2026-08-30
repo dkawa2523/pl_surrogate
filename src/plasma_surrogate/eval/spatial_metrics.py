@@ -315,8 +315,12 @@ def _profile_rmse(true_field: np.ndarray, pred_field: np.ndarray, mask: np.ndarr
     valid = counts > 0.0
     if not np.any(valid):
         return float("nan")
-    true_sum = np.sum(np.where(active, true_field, 0.0), axis=reduce_axis).astype(np.float64)
-    pred_sum = np.sum(np.where(active, pred_field, 0.0), axis=reduce_axis).astype(np.float64)
+    true_sum = np.sum(
+        np.where(active, np.asarray(true_field, dtype=np.float64), 0.0), axis=reduce_axis
+    )
+    pred_sum = np.sum(
+        np.where(active, np.asarray(pred_field, dtype=np.float64), 0.0), axis=reduce_axis
+    )
     true_prof = true_sum[valid] / counts[valid]
     pred_prof = pred_sum[valid] / counts[valid]
     return float(np.sqrt(np.mean((pred_prof - true_prof) ** 2)))
@@ -361,7 +365,9 @@ def _shape_corr(true_vals: np.ndarray, pred_vals: np.ndarray) -> float:
 
 
 def _relative_l2(true_vals: np.ndarray, pred_vals: np.ndarray, *, eps: float) -> float:
-    return float(np.linalg.norm(pred_vals - true_vals) / max(float(np.linalg.norm(true_vals)), eps))
+    true64 = np.asarray(true_vals, dtype=np.float64)
+    pred64 = np.asarray(pred_vals, dtype=np.float64)
+    return float(np.linalg.norm(pred64 - true64) / max(float(np.linalg.norm(true64)), eps))
 
 
 def _gradient_relative_l2(true_field: np.ndarray, pred_field: np.ndarray, mask: np.ndarray, *, eps: float) -> float:
@@ -370,8 +376,8 @@ def _gradient_relative_l2(true_field: np.ndarray, pred_field: np.ndarray, mask: 
     active = np.asarray(mask, dtype=bool)
     for axis in (0, 1):
         pair_mask = (active[1:, :] & active[:-1, :]) if axis == 0 else (active[:, 1:] & active[:, :-1])
-        true_diff = np.diff(true_field, axis=axis)[pair_mask]
-        pred_diff = np.diff(pred_field, axis=axis)[pair_mask]
+        true_diff = np.diff(np.asarray(true_field, dtype=np.float64), axis=axis)[pair_mask]
+        pred_diff = np.diff(np.asarray(pred_field, dtype=np.float64), axis=axis)[pair_mask]
         numer += float(np.sum((pred_diff - true_diff) ** 2))
         denom += float(np.sum(true_diff**2))
     return float(np.sqrt(numer) / max(np.sqrt(denom), eps))

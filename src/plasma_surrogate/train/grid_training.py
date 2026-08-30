@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -77,7 +78,18 @@ def _resolve_physical_point_weighting(
     physical = dict(supervised.get("physical_weighting", {}) or {})
     axisymmetric = bool(physical.get("axisymmetric_volume", False))
     density_targets = [str(name) for name in physical.get("density_weighted_targets", [])]
-    if not axisymmetric and not density_targets:
+    density_decomposition = dict(supervised.get("density_decomposition", {}) or {})
+    affine_targets = set()
+    if density_targets:
+        affine_targets.add(str(physical.get("density_source", "ne")))
+    if bool(density_decomposition.get("enabled", False)):
+        affine_targets.update(str(name) for name in density_decomposition.get("targets", ["ne", "ni"]))
+    derived_qoi = dict(supervised.get("derived_qoi", {}) or {})
+    bohm_qoi = dict(derived_qoi.get("bohm_wafer_profile", {}) or {})
+    if bool(bohm_qoi.get("enabled", False)):
+        affine_targets.add(str(bohm_qoi.get("ion_density_key", "ni")))
+        affine_targets.add(str(bohm_qoi.get("temperature_key", "Te")))
+    if not axisymmetric and not affine_targets:
         return None, None
 
     point_weight = None
@@ -95,21 +107,20 @@ def _resolve_physical_point_weighting(
             raise ValueError("axisymmetric radial coordinates must be finite, non-negative, and non-zero")
 
     target_affine: dict[str, dict[str, float]] = {}
-    if density_targets:
-        density_source = str(physical.get("density_source", "ne"))
-        if density_source not in target_vars:
-            raise ValueError(f"density weighting source {density_source!r} must be a trained target")
-        transform_spec = dict(ctx.transforms.target_transforms.get(density_source, {}) or {})
+    for target_name in sorted(affine_targets):
+        if target_name not in target_vars:
+            raise ValueError(f"physical affine target {target_name!r} must be a trained target")
+        transform_spec = dict(ctx.transforms.target_transforms.get(target_name, {}) or {})
         if str(transform_spec.get("value_transform", "identity")).strip().lower() != "identity":
-            raise ValueError("density weighting requires a linear identity target transform")
-        scaler = dict(ctx.transforms.y_scalers[density_source].to_dict())
+            raise ValueError("physical supervised loss requires a linear identity target transform")
+        scaler = dict(ctx.transforms.y_scalers[target_name].to_dict())
         if str(scaler.get("type", "")).strip().lower() != "zscore":
-            raise ValueError("density weighting requires a zscore density scaler")
+            raise ValueError("physical supervised loss requires a zscore target scaler")
         mean = np.asarray(scaler.get("mean"), dtype=np.float64).reshape(-1)
         std = np.asarray(scaler.get("std"), dtype=np.float64).reshape(-1)
         if mean.size != 1 or std.size != 1 or not np.isfinite(mean[0]) or not np.isfinite(std[0]) or std[0] <= 0.0:
-            raise ValueError("density zscore scaler must contain one finite mean and positive std")
-        target_affine[density_source] = {"mean": float(mean[0]), "scale": float(std[0])}
+            raise ValueError("physical target zscore scaler must contain one finite mean and positive std")
+        target_affine[target_name] = {"mean": float(mean[0]), "scale": float(std[0])}
     return point_weight, (target_affine or None)
 
 
@@ -297,6 +308,36 @@ def run_grid_torch_train_predict(
         grid_backend_effective = "torch"
 
     model_cfg_for_build = dict(cfg.get("model_cfg", cfg))
+    conv_cfg_for_build = dict(model_cfg_for_build.get("conv_cfg", {}) or {})
+    is_unet_response = str(conv_cfg_for_build.get("architecture", "unet")).strip().lower() == "response_scale"
+    operator_response_cfg = dict(model_cfg_for_build.get("operator_response_cfg", {}) or {})
+    if is_unet_response or bool(operator_response_cfg.get("enabled", False)):
+        response_cfg = (
+            dict(conv_cfg_for_build.get("response_scale_cfg", {}) or {})
+            if is_unet_response
+            else operator_response_cfg
+        )
+        target_affine: dict[str, dict[str, float]] = {}
+        for density_name in ("ne", "ni"):
+            if density_name not in grid_target_vars:
+                raise ValueError(f"response_scale requires target {density_name!r}")
+            transform = dict(ctx.transforms.target_transforms.get(density_name, {}) or {})
+            if str(transform.get("value_transform", "identity")).strip().lower() != "identity":
+                raise ValueError("response_scale density reconstruction requires identity target transforms")
+            scaler = dict(ctx.transforms.y_scalers[density_name].to_dict())
+            if str(scaler.get("type", "")).strip().lower() != "zscore":
+                raise ValueError("response_scale density reconstruction requires zscore target scalers")
+            mean = np.asarray(scaler.get("mean"), dtype=np.float64).reshape(-1)
+            std = np.asarray(scaler.get("std"), dtype=np.float64).reshape(-1)
+            if mean.size != 1 or std.size != 1 or not np.isfinite(mean[0]) or not np.isfinite(std[0]) or std[0] <= 0:
+                raise ValueError(f"invalid response_scale target scaler for {density_name}")
+            target_affine[density_name] = {"mean": float(mean[0]), "scale": float(std[0])}
+        response_cfg["target_affine"] = target_affine
+        if is_unet_response:
+            conv_cfg_for_build["response_scale_cfg"] = response_cfg
+            model_cfg_for_build["conv_cfg"] = conv_cfg_for_build
+        else:
+            model_cfg_for_build["operator_response_cfg"] = response_cfg
     if is_grouped_output_head_mode(dict(model_cfg_for_build.get("output_heads", {})).get("mode", "shared")):
         model_cfg_for_build["target_role_schema"] = dict(dict(ctx.physics_cfg or {}).get("target_role_schema", {}) or {})
 
@@ -447,6 +488,22 @@ def run_grid_torch_train_predict(
         unet_feature_channels=grid_feature_channels,
         pod_basis_bundle=pod_basis_bundle,
     )
+    initial_weights_raw = cfg.get("initial_weights_path")
+    if initial_weights_raw:
+        initial_weights_path = Path(str(initial_weights_raw)).expanduser()
+        if not initial_weights_path.is_absolute():
+            initial_weights_path = Path.cwd() / initial_weights_path
+        initial_weights_path = initial_weights_path.resolve()
+        if not initial_weights_path.is_file():
+            raise FileNotFoundError(f"initial grid-model weights not found: {initial_weights_path}")
+        if not hasattr(model, "load_state_dict_numpy"):
+            raise TypeError(f"{model_name} does not support initial_weights_path")
+        with np.load(initial_weights_path, allow_pickle=False) as state:
+            model.load_state_dict_numpy(
+                {str(name): np.asarray(state[name], dtype=np.float32) for name in state.files}
+            )
+        extra_artifacts["initial_weights_path"] = str(initial_weights_path)
+        extra_artifacts["initial_weights_loaded"] = True
     if spatial is not None and hasattr(model, "set_static_spatial_features"):
         model.set_static_spatial_features(spatial)
     if ctx.geom_ctx is not None:

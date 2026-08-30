@@ -2,7 +2,7 @@
 
 日本語の概要と実行判断は [README_JA.md](README_JA.md) を参照してください。
 
-> **Isolation boundary:** this directory is a new, specification-only study.
+> **Isolation boundary:** this directory is a new, portable implementation study.
 > It must not edit, regenerate, rename, or overwrite any file under
 > `experiments/icp_stage4/conference_continuity_v45`,
 > `experiments/icp_stage4/uno_structure_em_v46`,
@@ -32,6 +32,8 @@ optimization and figure generation, reserve five to six days.
 ## Study status
 
 - Protocol freeze: complete.
+- Frozen dataset, source snapshot, initial weights and formal references:
+  available on the portable branch through Git LFS.
 - Existing v45/v46 evidence inventory: complete.
 - 500-epoch implementation and runs: **not started by this document task**.
 - This package does not claim any 500-epoch result.
@@ -86,11 +88,12 @@ runs/icp_uno_epoch500_four_model_v47/
 
 Critical input hashes are recorded in [SOURCE_INVENTORY.json](SOURCE_INVENTORY.json).
 
-## Reproducibility warning
+## Reproducibility entry point
 
-The current workspace is based on Git commit
-`ad5ca0854c2e754b1193b67ef921ad791f3e4bfa`, but the ICP implementation also
-contains uncommitted and untracked source files. Checking out that commit alone
-is therefore insufficient. A new environment must receive a frozen copy of the
-complete working-tree source plus the files listed in `SOURCE_INVENTORY.json`.
-Do not silently replace the working-tree snapshot with repository HEAD.
+Use branch `docs/icp-uno-epoch500-portable-v47`, materialize every Git LFS
+object, and run `verify_portability.py --require-formal-references` before
+implementation or training. Start with
+[REMOTE_TRAINING_START_HERE_JA.md](REMOTE_TRAINING_START_HERE_JA.md). The
+portable branch freezes the current Python source and required reference
+assets; it does not claim that the not-yet-created v47 launcher or 500-epoch
+results already exist.

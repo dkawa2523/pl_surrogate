@@ -10,7 +10,8 @@
 
 ## Environment and data
 
-- [ ] Full working-tree source snapshot transferred; Git HEAD alone was not used.
+- [ ] Portable branch checked out and frozen source files match `SOURCE_INVENTORY.json`.
+- [ ] `git lfs pull` and `git lfs fsck` completed for data, weights and references.
 - [ ] `SOURCE_INVENTORY.json` hashes pass.
 - [ ] Python, torch, CUDA, GPU and dependency versions recorded.
 - [ ] CUDA is available and the expected GPU is selected.
@@ -60,4 +61,3 @@
 - [ ] Figure annotations reconcile with source CSV files.
 - [ ] `CHART_MAP.md` and `figure_manifest.json` exist.
 - [ ] Final formal hashes still match.
-

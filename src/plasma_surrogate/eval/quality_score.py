@@ -602,8 +602,12 @@ def build_spatial_huber_quality_components(
                 pair_mask = (active[1:, :] & active[:-1, :]) if axis == 0 else (active[:, 1:] & active[:, :-1])
                 if np.any(pair_mask):
                     grad_terms.append(_huber_map(pred_diff[pair_mask] - true_diff[pair_mask], delta=delta))
-                    pred_phys_diff = np.diff(pred_arr[case_idx], axis=axis)[pair_mask]
-                    true_phys_diff = np.diff(true_arr[case_idx], axis=axis)[pair_mask]
+                    pred_phys_diff = np.diff(
+                        np.asarray(pred_arr[case_idx], dtype=np.float64), axis=axis
+                    )[pair_mask]
+                    true_phys_diff = np.diff(
+                        np.asarray(true_arr[case_idx], dtype=np.float64), axis=axis
+                    )[pair_mask]
                     physical_grad_num += float(np.sum((pred_phys_diff - true_phys_diff) ** 2))
                     physical_grad_den += float(np.sum(true_phys_diff**2))
             gradient = float(np.mean(np.concatenate(grad_terms))) if grad_terms else 0.0

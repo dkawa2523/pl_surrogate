@@ -11,6 +11,7 @@ from plasma_surrogate.core.target_groups import TargetGroup, resolve_target_grou
 OUTPUT_HEAD_MODE_SHARED = "shared"
 OUTPUT_HEAD_MODE_ROLE_GROUPED = "role_grouped"
 OUTPUT_HEAD_MODE_CUSTOM_GROUPS = "custom_groups"
+OUTPUT_HEAD_MODE_CAUSAL_EM = "causal_em"
 GROUPED_OUTPUT_HEAD_MODES = frozenset({OUTPUT_HEAD_MODE_ROLE_GROUPED, OUTPUT_HEAD_MODE_CUSTOM_GROUPS})
 OUTPUT_GROUP_HEAD_DEFAULT = "default"
 OUTPUT_GROUP_HEAD_SPATIAL_REFINE = "spatial_refine"
@@ -252,7 +253,7 @@ def configure_output_head_metadata(
 ) -> str:
     head_cfg = dict(output_heads or {})
     mode = str(head_cfg.get("mode", OUTPUT_HEAD_MODE_SHARED)).strip().lower()
-    allowed = {OUTPUT_HEAD_MODE_SHARED, *GROUPED_OUTPUT_HEAD_MODES}
+    allowed = {OUTPUT_HEAD_MODE_SHARED, OUTPUT_HEAD_MODE_CAUSAL_EM, *GROUPED_OUTPUT_HEAD_MODES}
     if mode not in allowed:
         allowed_text = ", ".join(sorted(allowed))
         raise ValueError(f"{cfg_prefix}.model_cfg.output_heads.mode must be one of: {allowed_text}")
@@ -282,6 +283,20 @@ def configure_output_head_metadata(
     model.target_groups = groups
     model.target_groups_metadata = metadata
     effective: dict[str, Any] = {"mode": mode}
+    if mode == OUTPUT_HEAD_MODE_CAUSAL_EM:
+        allowed_keys = {
+            "mode",
+            "driver_targets",
+            "response_targets",
+            "hidden_channels",
+            "detach_driver",
+        }
+        unsupported = sorted(set(head_cfg) - allowed_keys)
+        if unsupported:
+            raise ValueError(
+                f"{cfg_prefix}.model_cfg.output_heads has unsupported causal_em keys: {unsupported}"
+            )
+        effective.update({key: value for key, value in head_cfg.items() if key != "mode"})
     if mode == OUTPUT_HEAD_MODE_CUSTOM_GROUPS:
         effective["strict"] = _bool_from_config(head_cfg.get("strict"), default=True)
         if "groups" in head_cfg or "custom_groups" in head_cfg:
@@ -372,6 +387,7 @@ def build_role_grouped_conv2d_head(
 
 
 __all__ = [
+    "OUTPUT_HEAD_MODE_CAUSAL_EM",
     "OUTPUT_HEAD_MODE_ROLE_GROUPED",
     "OUTPUT_HEAD_MODE_CUSTOM_GROUPS",
     "OUTPUT_HEAD_MODE_SHARED",

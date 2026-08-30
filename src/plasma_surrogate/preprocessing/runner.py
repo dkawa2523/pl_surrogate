@@ -53,6 +53,7 @@ from plasma_surrogate.preprocessing.spatial_features import (
     ICP_STRUCT_STATIC_CHANNELS,
     PART_SDF_SUMMARY_CHANNELS,
     PART_SOURCE_CHANNELS,
+    PART_SOURCE_MEAN_CHANNELS,
     apply_distance_transform,
     derive_geom_feature_maps,
     part_sdf_summary_maps_from_stack,
@@ -118,6 +119,30 @@ SMOOTH_STRUCTURE_STATIC_CHANNELS: tuple[str, ...] = (
 SMOOTH_STRUCTURE_CASE_CHANNELS: tuple[str, ...] = ("solid_proximity",)
 PART_SOURCE_STATIC_CHANNELS: tuple[str, ...] = ("x", "y", "distance_signed")
 PART_SOURCE_CASE_CHANNELS: tuple[str, ...] = PART_SOURCE_CHANNELS
+ICP_COIL_SOURCE_STATIC_CHANNELS: tuple[str, ...] = ICP_STRUCT_STATIC_CHANNELS
+ICP_COIL_SOURCE_CASE_CHANNELS: tuple[str, ...] = ("mask_coil",)
+ICP_COIL_UNION_SDF_STATIC_CHANNELS: tuple[str, ...] = ICP_STRUCT_STATIC_CHANNELS
+ICP_COIL_UNION_SDF_CASE_CHANNELS: tuple[str, ...] = ("part_sdf_union",)
+ICP_COIL_SDF_SOURCE_STATIC_CHANNELS: tuple[str, ...] = ICP_STRUCT_STATIC_CHANNELS
+ICP_COIL_SDF_SOURCE_CASE_CHANNELS: tuple[str, ...] = ("part_sdf_union", "part_source_sum")
+ICP_COIL_SDF_SOURCE_MEAN_CASE_CHANNELS: tuple[str, ...] = PART_SOURCE_MEAN_CHANNELS
+ICP_VACUUM_FIELD_STATIC_CHANNELS: tuple[str, ...] = ICP_STRUCT_STATIC_CHANNELS
+ICP_VACUUM_FIELD_CASE_CHANNELS: tuple[str, ...] = (
+    "vacuum_aphi_unit",
+    "vacuum_br_unit",
+    "vacuum_bz_unit",
+    "vacuum_bmag_unit",
+)
+ICP_SDF_MEAN_VACUUM_CASE_CHANNELS: tuple[str, ...] = (
+    *PART_SOURCE_MEAN_CHANNELS,
+    *ICP_VACUUM_FIELD_CASE_CHANNELS,
+)
+ICP_SDF_MEAN_VACUUM_STRUCTURE_CASE_CHANNELS: tuple[str, ...] = (
+    *ICP_SDF_MEAN_VACUUM_CASE_CHANNELS,
+    "part_second_proximity",
+    "part_competition",
+    "solid_proximity",
+)
 
 
 def _is_mask_like_channel(name: str) -> bool:
@@ -125,6 +150,13 @@ def _is_mask_like_channel(name: str) -> bool:
         "valid_field_mask",
         "outside_mask",
         "coil_proximity",
+        # Mean-reduced equal-strength source is bounded in [0, 1].  Keeping
+        # that physical range avoids the very large z-scores produced when a
+        # sparse coil field is fitted only on plasma/boundary pixels.
+        "part_source_mean",
+        "part_second_proximity",
+        "part_competition",
+        "solid_proximity",
     }
 
 
@@ -185,6 +217,18 @@ def _load_case_structure_npz(
             if not np.all(np.isfinite(arr)):
                 raise ValueError(f"structure npz contains non-finite values for case={case.get('case_id')} key={key}")
             out[key] = arr.astype(np.float32)
+        for key in ICP_VACUUM_FIELD_CASE_CHANNELS:
+            if key not in data.files:
+                continue
+            arr = np.asarray(data[key], dtype=np.float32)
+            if arr.shape != shape:
+                raise ValueError(
+                    f"structure npz shape mismatch for case={case.get('case_id')} key={key}: "
+                    f"expected={shape}, got={arr.shape}"
+                )
+            if not np.all(np.isfinite(arr)):
+                raise ValueError(f"structure npz contains non-finite values for case={case.get('case_id')} key={key}")
+            out[key] = arr
     return out
 
 
@@ -273,6 +317,22 @@ def _build_split_spatial_feature_packs(
     part_lite_channels = [*PART_LITE_STATIC_CHANNELS, *PART_LITE_CASE_CHANNELS]
     smooth_structure_channels = [*SMOOTH_STRUCTURE_STATIC_CHANNELS, *SMOOTH_STRUCTURE_CASE_CHANNELS]
     part_source_channels = [*PART_SOURCE_STATIC_CHANNELS, *PART_SOURCE_CASE_CHANNELS]
+    coil_source_channels = [*ICP_COIL_SOURCE_STATIC_CHANNELS, *ICP_COIL_SOURCE_CASE_CHANNELS]
+    coil_union_sdf_channels = [*ICP_COIL_UNION_SDF_STATIC_CHANNELS, *ICP_COIL_UNION_SDF_CASE_CHANNELS]
+    coil_sdf_source_channels = [*ICP_COIL_SDF_SOURCE_STATIC_CHANNELS, *ICP_COIL_SDF_SOURCE_CASE_CHANNELS]
+    coil_sdf_source_mean_channels = [
+        *ICP_COIL_SDF_SOURCE_STATIC_CHANNELS,
+        *ICP_COIL_SDF_SOURCE_MEAN_CASE_CHANNELS,
+    ]
+    vacuum_field_channels = [*ICP_VACUUM_FIELD_STATIC_CHANNELS, *ICP_VACUUM_FIELD_CASE_CHANNELS]
+    sdf_mean_vacuum_channels = [
+        *ICP_COIL_SDF_SOURCE_STATIC_CHANNELS,
+        *ICP_SDF_MEAN_VACUUM_CASE_CHANNELS,
+    ]
+    sdf_mean_vacuum_structure_channels = [
+        *ICP_COIL_SDF_SOURCE_STATIC_CHANNELS,
+        *ICP_SDF_MEAN_VACUUM_STRUCTURE_CASE_CHANNELS,
+    ]
     if list(channels) == struct_channels:
         static_channels = ICP_STRUCT_STATIC_CHANNELS
         case_channels = ICP_STRUCT_CASE_CHANNELS
@@ -293,11 +353,43 @@ def _build_split_spatial_feature_packs(
         static_channels = PART_SOURCE_STATIC_CHANNELS
         case_channels = PART_SOURCE_CASE_CHANNELS
         feature_profile = "part_source_v1"
+    elif list(channels) == coil_source_channels:
+        static_channels = ICP_COIL_SOURCE_STATIC_CHANNELS
+        case_channels = ICP_COIL_SOURCE_CASE_CHANNELS
+        feature_profile = "icp_coil_source_v1"
+    elif list(channels) == coil_union_sdf_channels:
+        static_channels = ICP_COIL_UNION_SDF_STATIC_CHANNELS
+        case_channels = ICP_COIL_UNION_SDF_CASE_CHANNELS
+        feature_profile = "icp_coil_union_sdf_v1"
+    elif list(channels) == coil_sdf_source_channels:
+        static_channels = ICP_COIL_SDF_SOURCE_STATIC_CHANNELS
+        case_channels = ICP_COIL_SDF_SOURCE_CASE_CHANNELS
+        feature_profile = "icp_coil_sdf_source_v2"
+    elif list(channels) == coil_sdf_source_mean_channels:
+        static_channels = ICP_COIL_SDF_SOURCE_STATIC_CHANNELS
+        case_channels = ICP_COIL_SDF_SOURCE_MEAN_CASE_CHANNELS
+        feature_profile = "icp_coil_sdf_source_mean_v3"
+    elif list(channels) == vacuum_field_channels:
+        static_channels = ICP_VACUUM_FIELD_STATIC_CHANNELS
+        case_channels = ICP_VACUUM_FIELD_CASE_CHANNELS
+        feature_profile = "icp_vacuum_field_v1"
+    elif list(channels) == sdf_mean_vacuum_channels:
+        static_channels = ICP_COIL_SDF_SOURCE_STATIC_CHANNELS
+        case_channels = ICP_SDF_MEAN_VACUUM_CASE_CHANNELS
+        feature_profile = "icp_coil_sdf_source_mean_vacuum_v1"
+    elif list(channels) == sdf_mean_vacuum_structure_channels:
+        static_channels = ICP_COIL_SDF_SOURCE_STATIC_CHANNELS
+        case_channels = ICP_SDF_MEAN_VACUUM_STRUCTURE_CASE_CHANNELS
+        feature_profile = "icp_coil_sdf_source_mean_vacuum_structure_v1"
     else:
         raise ValueError(
             "compact structure packs expect channels="
             f"{struct_channels}, {part_sdf_channels}, {part_lite_channels}, "
-            f"{smooth_structure_channels}, or {part_source_channels}; got={list(channels)}"
+            f"{smooth_structure_channels}, {part_source_channels}, {coil_source_channels}, "
+            f"{coil_union_sdf_channels}, {coil_sdf_source_channels}, "
+            f"{coil_sdf_source_mean_channels}, {vacuum_field_channels}, "
+            f"{sdf_mean_vacuum_channels}, or {sdf_mean_vacuum_structure_channels}; "
+            f"got={list(channels)}"
         )
 
     static_map: dict[str, np.ndarray] | None = None
@@ -353,6 +445,14 @@ def _build_split_spatial_feature_packs(
                         f"for case={case.get('case_id')}"
                     )
                 fmap[name] = structure[name]
+        for name in ICP_VACUUM_FIELD_CASE_CHANNELS:
+            if name in case_channels:
+                if name not in structure:
+                    raise ValueError(
+                        f"{feature_profile} requires structure npz key={name!r} "
+                        f"for case={case.get('case_id')}"
+                    )
+                fmap[name] = structure[name]
         if feature_profile in {"part_lite_v1", "smooth_structure_v1"}:
             if "part_mask_stack" not in structure:
                 raise ValueError(
@@ -361,14 +461,24 @@ def _build_split_spatial_feature_packs(
                 )
             summaries = part_sdf_summary_maps_from_stack(structure["part_mask_stack"])
             fmap.update({name: summaries[name] for name in case_channels})
-        if feature_profile == "part_source_v1":
+        if feature_profile in {
+            "part_source_v1",
+            "icp_coil_union_sdf_v1",
+            "icp_coil_sdf_source_v2",
+            "icp_coil_sdf_source_mean_v3",
+            "icp_coil_sdf_source_mean_vacuum_v1",
+            "icp_coil_sdf_source_mean_vacuum_structure_v1",
+        }:
             if "part_mask_stack" not in structure:
                 raise ValueError(
                     f"{feature_profile} requires structure npz key='part_mask_stack' "
                     f"for case={case.get('case_id')}"
                 )
             source_maps = part_source_maps_from_stack(structure["part_mask_stack"])
-            fmap.update({name: source_maps[name] for name in case_channels})
+            fmap.update({name: source_maps[name] for name in case_channels if name in source_maps})
+        if feature_profile == "icp_coil_sdf_source_mean_vacuum_structure_v1":
+            summaries = part_sdf_summary_maps_from_stack(structure["part_mask_stack"])
+            fmap.update({name: summaries[name] for name in case_channels if name in summaries})
         case_maps.append(fmap)
         if uses_coil_channels and idx in train_set:
             sel = mask_plasma > 0.5
@@ -1283,7 +1393,17 @@ class PreprocessRunner:
                 or coord_feature_usage == "supervision_only"
             )
             and (
-                case_feature_profile in {"icp_struct_spatial_v1", "icp_part_sdf_lite_v1"}
+                case_feature_profile in {
+                    "icp_struct_spatial_v1",
+                    "icp_part_sdf_lite_v1",
+                    "icp_coil_source_v1",
+                    "icp_coil_union_sdf_v1",
+                    "icp_coil_sdf_source_v2",
+                    "icp_coil_sdf_source_mean_v3",
+                    "icp_vacuum_field_v1",
+                    "icp_coil_sdf_source_mean_vacuum_v1",
+                    "icp_coil_sdf_source_mean_vacuum_structure_v1",
+                }
                 or (
                     case_feature_profile in {"part_lite_v1", "smooth_structure_v1", "part_source_v1"}
                     and case_structure_available

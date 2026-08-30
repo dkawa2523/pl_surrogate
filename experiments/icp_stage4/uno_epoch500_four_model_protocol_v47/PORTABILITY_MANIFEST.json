@@ -3,6 +3,16 @@
   "study_id": "icp_uno_epoch500_four_model_v47",
   "status": "protocol_frozen_implementation_not_started",
   "created": "2026-08-31",
+  "delivery": {
+    "branch": "docs/icp-uno-epoch500-portable-v47",
+    "dataset_lfs": true,
+    "initial_weights_lfs": true,
+    "formal_reference_checkpoints_lfs": true,
+    "python_source_snapshot_committed": true,
+    "v47_launcher_implemented": false,
+    "abc_dimension_p_implemented": false,
+    "epoch500_results_present": false
+  },
   "isolation": {
     "source_root": "experiments/icp_stage4/uno_epoch500_four_model_protocol_v47",
     "run_root": "runs/icp_uno_epoch500_four_model_v47",

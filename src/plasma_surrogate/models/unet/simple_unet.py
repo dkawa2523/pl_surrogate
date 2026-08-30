@@ -9,6 +9,7 @@ import numpy as np
 from plasma_surrogate.models._torch_spatial_common import _build_unit_coord_grid
 from plasma_surrogate.models.heads.role_grouped import (
     GROUPED_OUTPUT_HEAD_MODES,
+    OUTPUT_HEAD_MODE_CAUSAL_EM,
     build_role_grouped_conv2d_head,
     configure_output_head_metadata,
     is_grouped_output_head_mode,
@@ -116,6 +117,18 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         torch = require_torch()
         nn = torch.nn
         cfg = dict(conv_cfg or {})
+        architecture = str(cfg.get("architecture", "unet")).strip().lower()
+        if architecture not in {"unet", "response_scale"}:
+            raise ValueError("train.unet.model_cfg.conv_cfg.architecture must be one of: response_scale, unet")
+        response_scale_cfg = dict(cfg.get("response_scale_cfg", {}) or {})
+        radial_padding_mode = str(
+            response_scale_cfg.get("radial_padding_mode", "zero")
+        ).strip().lower()
+        if radial_padding_mode not in {"zero", "axisymmetric_neumann"}:
+            raise ValueError(
+                "train.unet.model_cfg.conv_cfg.response_scale_cfg.radial_padding_mode "
+                "must be one of: axisymmetric_neumann, zero"
+            )
         base_channels = int(cfg.get("base_channels", 32))
         if base_channels <= 0:
             raise ValueError("train.unet.model_cfg.base_channels must be > 0")
@@ -130,11 +143,51 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         in_channels = int(self.input_dim + self.spatial_feature_dim)
         head_cfg = dict(output_heads or {})
         output_heads_mode = str(head_cfg.get("mode", "shared")).strip().lower()
-        if output_heads_mode not in {"shared", *GROUPED_OUTPUT_HEAD_MODES}:
+        if output_heads_mode not in {"shared", OUTPUT_HEAD_MODE_CAUSAL_EM, *GROUPED_OUTPUT_HEAD_MODES}:
             raise ValueError(
                 "train.unet.model_cfg.output_heads.mode must be one of: "
-                "custom_groups, role_grouped, shared"
+                "causal_em, custom_groups, role_grouped, shared"
             )
+        if architecture == "response_scale":
+            if output_heads_mode != "shared":
+                raise ValueError("response_scale architecture requires output_heads.mode=shared")
+            if self.with_rho_eff_head:
+                raise ValueError("response_scale architecture does not support rho_eff head")
+            required_targets = {"ne", "ni", "Te", "phi"}
+            if set(self.output_keys) != required_targets or len(self.output_keys) != len(required_targets):
+                raise ValueError(
+                    "response_scale architecture requires output_keys to contain exactly ne, ni, Te, phi"
+                )
+
+        driver_indices: list[int] = []
+        response_indices: list[int] = []
+        causal_hidden_channels = int(head_cfg.get("hidden_channels", base_channels))
+        causal_detach_driver = bool(head_cfg.get("detach_driver", False))
+        if output_heads_mode == OUTPUT_HEAD_MODE_CAUSAL_EM:
+            if self.with_rho_eff_head:
+                raise ValueError("train.unet.model_cfg.output_heads.mode=causal_em does not support rho_eff head")
+            driver_targets = [str(v) for v in list(head_cfg.get("driver_targets", []))]
+            response_targets = [str(v) for v in list(head_cfg.get("response_targets", []))]
+            if not driver_targets:
+                raise ValueError("train.unet.model_cfg.output_heads.driver_targets must be non-empty")
+            if not response_targets:
+                response_targets = [key for key in self.output_keys if key not in set(driver_targets)]
+            if len(set(driver_targets)) != len(driver_targets) or len(set(response_targets)) != len(response_targets):
+                raise ValueError("train.unet.model_cfg.output_heads causal target lists must not contain duplicates")
+            overlap = sorted(set(driver_targets) & set(response_targets))
+            if overlap:
+                raise ValueError(f"causal_em driver_targets and response_targets overlap: {overlap}")
+            unknown = sorted((set(driver_targets) | set(response_targets)) - set(self.output_keys))
+            missing = [key for key in self.output_keys if key not in set(driver_targets + response_targets)]
+            if unknown or missing:
+                raise ValueError(
+                    "causal_em targets must cover output_keys exactly; "
+                    f"unknown={unknown}, missing={missing}"
+                )
+            if causal_hidden_channels <= 0:
+                raise ValueError("train.unet.model_cfg.output_heads.hidden_channels must be > 0")
+            driver_indices = [self.output_keys.index(key) for key in driver_targets]
+            response_indices = [self.output_keys.index(key) for key in response_targets]
 
         class _ConvUNetDepth1Backbone(nn.Module):
             def __init__(self, in_ch: int, base_ch: int, mid_ch: int, upsample_mode: str):
@@ -243,19 +296,51 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                 return self.dec1(torch.cat([u1, e1], dim=1))
 
         class _ConvUNetHead(nn.Module):
-            def __init__(self, base_ch: int, out_ch: int, mode: str, with_rho_eff_head: bool):
+            def __init__(
+                self,
+                base_ch: int,
+                out_ch: int,
+                mode: str,
+                with_rho_eff_head: bool,
+                *,
+                driver_indices: list[int],
+                response_indices: list[int],
+                causal_hidden_channels: int,
+                causal_detach_driver: bool,
+            ):
                 super().__init__()
                 self.mode = mode
                 self.with_rho_eff_head = bool(with_rho_eff_head)
+                self.driver_indices = list(driver_indices)
+                self.response_indices = list(response_indices)
+                self.causal_detach_driver = bool(causal_detach_driver)
                 if self.mode == "shared":
                     self.out = nn.Conv2d(base_ch, out_ch + (1 if self.with_rho_eff_head else 0), kernel_size=1)
                     self.role_grouped = None
+                    self.driver_head = None
+                    self.response_head = None
+                elif self.mode == OUTPUT_HEAD_MODE_CAUSAL_EM:
+                    self.out = None
+                    self.role_grouped = None
+                    self.driver_head = nn.Conv2d(base_ch, len(self.driver_indices), kernel_size=1)
+                    self.response_head = nn.Sequential(
+                        nn.Conv2d(
+                            base_ch + len(self.driver_indices),
+                            int(causal_hidden_channels),
+                            kernel_size=3,
+                            padding=1,
+                        ),
+                        nn.GELU(),
+                        nn.Conv2d(int(causal_hidden_channels), len(self.response_indices), kernel_size=1),
+                    )
                 else:
                     self.out = None
+                    self.driver_head = None
+                    self.response_head = None
                     if not is_grouped_output_head_mode(self.mode):
                         raise ValueError(
                             "train.unet.model_cfg.output_heads.mode must be one of: "
-                            "custom_groups, role_grouped, shared"
+                            "causal_em, custom_groups, role_grouped, shared"
                         )
                     self.role_grouped = build_role_grouped_conv2d_head(
                         torch=torch,
@@ -270,11 +355,25 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                 del output_keys
                 if self.mode == "shared":
                     return self.out(feat)
+                if self.mode == OUTPUT_HEAD_MODE_CAUSAL_EM:
+                    driver = self.driver_head(feat)
+                    response_driver = driver.detach() if self.causal_detach_driver else driver
+                    response = self.response_head(torch.cat([feat, response_driver], dim=1))
+                    out = feat.new_empty(
+                        (feat.shape[0], len(self.driver_indices) + len(self.response_indices), *feat.shape[-2:])
+                    )
+                    for source_index, target_index in enumerate(self.driver_indices):
+                        out[:, target_index : target_index + 1] = driver[:, source_index : source_index + 1]
+                    for source_index, target_index in enumerate(self.response_indices):
+                        out[:, target_index : target_index + 1] = response[:, source_index : source_index + 1]
+                    return out
                 return self.role_grouped(feat)
 
             def step_reference(self):
                 if self.out is not None:
                     return self.out.weight
+                if self.driver_head is not None:
+                    return self.driver_head.weight
                 if self.role_grouped is not None:
                     return self.role_grouped.step_reference()
                 return None
@@ -292,18 +391,217 @@ class UNetBaseline(_TorchSpatialFieldMixin):
                 head_mode: str,
                 with_rho_eff_head: bool,
                 upsample_mode: str,
+                driver_indices: list[int],
+                response_indices: list[int],
+                causal_hidden_channels: int,
+                causal_detach_driver: bool,
             ):
                 super().__init__()
                 if depth == 1:
                     self.backbone = _ConvUNetDepth1Backbone(in_ch, base_ch, mid_ch, upsample_mode)
                 else:
                     self.backbone = _ConvUNetDepth2Backbone(in_ch, base_ch, mid_ch, bot_ch, upsample_mode)
-                self.head = _ConvUNetHead(base_ch, out_ch, head_mode, with_rho_eff_head)
+                self.head = _ConvUNetHead(
+                    base_ch,
+                    out_ch,
+                    head_mode,
+                    with_rho_eff_head,
+                    driver_indices=driver_indices,
+                    response_indices=response_indices,
+                    causal_hidden_channels=causal_hidden_channels,
+                    causal_detach_driver=causal_detach_driver,
+                )
                 self.head_mode = head_mode
 
             def forward(self, x, *, output_keys: list[str]):
                 feat = self.backbone(x)
                 return self.head(feat, output_keys=output_keys)
+
+        class _ResponseScaleModel(nn.Module):
+            """Skip-free coarse decoder with a positive quasi-neutral density head."""
+
+            def __init__(
+                self,
+                *,
+                in_ch: int,
+                base_ch: int,
+                output_keys: list[str],
+                mask_channel_index: int,
+                target_affine: dict[str, dict[str, float]],
+                density_imbalance_fraction: float,
+                radial_padding_mode: str,
+            ):
+                super().__init__()
+                self.output_keys = list(output_keys)
+                self.mask_channel_index = int(mask_channel_index)
+                self.density_imbalance_fraction = float(density_imbalance_fraction)
+                self.radial_padding_mode = str(radial_padding_mode)
+                channels = [base_ch, base_ch * 2, base_ch * 4, base_ch * 4]
+
+                class _AxisymmetricNeumannConv2d(nn.Module):
+                    """3x3 convolution with cell-centered reflection at r=0.
+
+                    ICP stores the first radial cell at positive r.  Its ghost
+                    cell across the symmetry axis must therefore copy the
+                    first interior cell.  The outer-r and both axial sides
+                    retain the existing zero-padding contract.
+                    """
+
+                    def __init__(
+                        self,
+                        in_channels: int,
+                        out_channels: int,
+                        *,
+                        stride: int = 1,
+                        dilation: int = 1,
+                    ) -> None:
+                        super().__init__()
+                        self.radial_pad = int(dilation)
+                        self.axial_pad = int(dilation)
+                        self.conv = nn.Conv2d(
+                            in_channels,
+                            out_channels,
+                            kernel_size=3,
+                            stride=int(stride),
+                            padding=0,
+                            dilation=int(dilation),
+                        )
+
+                    @property
+                    def weight(self):
+                        return self.conv.weight
+
+                    @property
+                    def bias(self):
+                        return self.conv.bias
+
+                    def forward(self, value):
+                        if value.shape[-1] < self.radial_pad:
+                            raise ValueError("radial grid is too narrow for axisymmetric padding")
+                        reflected = value[..., : self.radial_pad].flip(-1)
+                        padded = torch.cat((reflected, value), dim=-1)
+                        padded = nn.functional.pad(
+                            padded,
+                            (0, self.radial_pad, self.axial_pad, self.axial_pad),
+                            mode="constant",
+                            value=0.0,
+                        )
+                        return self.conv(padded)
+
+                def conv3(
+                    in_channels: int,
+                    out_channels: int,
+                    *,
+                    stride: int = 1,
+                    dilation: int = 1,
+                ):
+                    if self.radial_padding_mode == "axisymmetric_neumann":
+                        return _AxisymmetricNeumannConv2d(
+                            in_channels,
+                            out_channels,
+                            stride=stride,
+                            dilation=dilation,
+                        )
+                    return nn.Conv2d(
+                        in_channels,
+                        out_channels,
+                        kernel_size=3,
+                        stride=stride,
+                        padding=dilation,
+                        dilation=dilation,
+                    )
+
+                blocks = []
+                previous = int(in_ch)
+                for channel in channels:
+                    blocks.append(
+                        nn.Sequential(
+                            conv3(previous, channel, stride=2),
+                            nn.GELU(),
+                            conv3(channel, channel),
+                            nn.GELU(),
+                        )
+                    )
+                    previous = channel
+                self.encoder = nn.ModuleList(blocks)
+                self.bottleneck = nn.Sequential(
+                    conv3(previous, previous, dilation=2),
+                    nn.GELU(),
+                    conv3(previous, previous),
+                    nn.GELU(),
+                )
+                self.decode_1 = nn.Sequential(
+                    conv3(previous, base_ch * 2),
+                    nn.GELU(),
+                )
+                self.decode_2 = nn.Sequential(
+                    conv3(base_ch * 2, base_ch),
+                    nn.GELU(),
+                )
+                self.density_shape = nn.Conv2d(base_ch, 1, kernel_size=1)
+                self.density_imbalance = nn.Conv2d(base_ch, 1, kernel_size=1)
+                self.density_amplitude = nn.Sequential(
+                    nn.AdaptiveAvgPool2d(1),
+                    nn.Conv2d(previous, 1, kernel_size=1),
+                )
+                self.other_head = nn.Conv2d(base_ch, 2, kernel_size=1)
+
+                means = []
+                scales = []
+                for name in ("ne", "ni"):
+                    affine = dict(target_affine.get(name, {}) or {})
+                    mean = float(affine.get("mean", float("nan")))
+                    scale = float(affine.get("scale", float("nan")))
+                    if not np.isfinite(mean) or not np.isfinite(scale) or scale <= 0.0:
+                        raise ValueError(f"response_scale requires finite positive target affine for {name}")
+                    means.append(mean)
+                    scales.append(scale)
+                self.register_buffer("density_means", torch.tensor(means, dtype=torch.float32).reshape(1, 2, 1, 1))
+                self.register_buffer("density_scales", torch.tensor(scales, dtype=torch.float32).reshape(1, 2, 1, 1))
+                self.register_buffer(
+                    "density_reference_scale",
+                    torch.tensor(float(np.mean(scales)), dtype=torch.float32),
+                )
+
+            def forward(self, x, *, output_keys: list[str]):
+                full_size = x.shape[-2:]
+                encoded = x
+                for block in self.encoder:
+                    encoded = block(encoded)
+                encoded = self.bottleneck(encoded)
+                amplitude = nn.functional.softplus(self.density_amplitude(encoded)) + 1.0e-6
+
+                decoded = nn.functional.interpolate(encoded, scale_factor=2.0, mode="bilinear", align_corners=False)
+                decoded = self.decode_1(decoded)
+                decoded = nn.functional.interpolate(decoded, scale_factor=2.0, mode="bilinear", align_corners=False)
+                decoded = self.decode_2(decoded)
+                mask = nn.functional.interpolate(
+                    x[:, self.mask_channel_index : self.mask_channel_index + 1],
+                    size=decoded.shape[-2:],
+                    mode="area",
+                ).clamp(0.0, 1.0)
+                positive_shape = nn.functional.softplus(self.density_shape(decoded)) + 1.0e-6
+                normalizer = torch.sum(positive_shape * mask, dim=(2, 3), keepdim=True) / torch.clamp(
+                    torch.sum(mask, dim=(2, 3), keepdim=True), min=1.0
+                )
+                density_shape = positive_shape / torch.clamp(normalizer, min=1.0e-6)
+                common_density = self.density_reference_scale * amplitude * density_shape
+                imbalance = self.density_imbalance_fraction * torch.tanh(self.density_imbalance(decoded))
+                density_physical = torch.cat(
+                    [common_density * (1.0 - imbalance), common_density * (1.0 + imbalance)],
+                    dim=1,
+                )
+                density_standard = (density_physical - self.density_means) / self.density_scales
+                other = self.other_head(decoded)
+                low = decoded.new_empty((decoded.shape[0], len(output_keys), *decoded.shape[-2:]))
+                low[:, output_keys.index("ne") : output_keys.index("ne") + 1] = density_standard[:, 0:1]
+                low[:, output_keys.index("ni") : output_keys.index("ni") + 1] = density_standard[:, 1:2]
+                low[:, output_keys.index("Te") : output_keys.index("Te") + 1] = other[:, 0:1]
+                low[:, output_keys.index("phi") : output_keys.index("phi") + 1] = other[:, 1:2]
+                return nn.functional.interpolate(low, size=full_size, mode="bilinear", align_corners=False)
+
+            def step_reference(self):
+                return self.encoder[0][0].weight, self.other_head.weight
 
         self.torch = torch
         self._init_torch_device()
@@ -311,23 +609,46 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         self_output_keys = list(self.output_keys)
         self_target_groups = dict(getattr(self, "target_groups", {}) or {})
         self_output_head_group_options = dict(getattr(self, "output_head_group_options", {}) or {})
-        self.net = _ConvUNetModel(
-            in_ch=in_channels,
-            base_ch=base_channels,
-            mid_ch=mid_channels,
-            bot_ch=bot_channels,
-            depth=depth,
-            out_ch=self.out_channels,
-            head_mode=output_heads_mode,
-            with_rho_eff_head=self.with_rho_eff_head,
-            upsample_mode=upsample_mode,
-        )
+        if architecture == "response_scale":
+            if "mask_plasma" not in self.input_feature_channels:
+                raise ValueError("response_scale architecture requires mask_plasma input feature")
+            target_affine = dict(response_scale_cfg.get("target_affine", {}) or {})
+            imbalance_fraction = float(response_scale_cfg.get("density_imbalance_fraction", 0.05))
+            if not np.isfinite(imbalance_fraction) or not (0.0 <= imbalance_fraction < 1.0):
+                raise ValueError("response_scale density_imbalance_fraction must be in [0,1)")
+            self.net = _ResponseScaleModel(
+                in_ch=in_channels,
+                base_ch=base_channels,
+                output_keys=self_output_keys,
+                mask_channel_index=self.input_dim + self.input_feature_channels.index("mask_plasma"),
+                target_affine=target_affine,
+                density_imbalance_fraction=imbalance_fraction,
+                radial_padding_mode=radial_padding_mode,
+            )
+        else:
+            self.net = _ConvUNetModel(
+                in_ch=in_channels,
+                base_ch=base_channels,
+                mid_ch=mid_channels,
+                bot_ch=bot_channels,
+                depth=depth,
+                out_ch=self.out_channels,
+                head_mode=output_heads_mode,
+                with_rho_eff_head=self.with_rho_eff_head,
+                upsample_mode=upsample_mode,
+                driver_indices=driver_indices,
+                response_indices=response_indices,
+                causal_hidden_channels=causal_hidden_channels,
+                causal_detach_driver=causal_detach_driver,
+            )
         self._ensure_net_device()
         self.net.train()
         self._torch_seed = int(seed)
         self._torch_base_channels = int(base_channels)
         self._torch_depth = int(depth)
         self._torch_upsample_mode = str(upsample_mode)
+        self._torch_architecture = str(architecture)
+        self._torch_response_scale_cfg = dict(response_scale_cfg)
         self._torch_output_heads_mode = str(output_heads_mode)
         self._torch_last_out = None
         self._torch_last_in = None
@@ -335,7 +656,15 @@ class UNetBaseline(_TorchSpatialFieldMixin):
         self.head_hidden = []
         self.head_activation = "relu"
         self.head_dropout = 0.0
-        self.head_arch_version = "conv_unet_v1"
+        self.head_arch_version = (
+            "response_scale_quasineutral_v1"
+            if architecture == "response_scale"
+            else (
+                "conv_unet_causal_em_v1"
+                if output_heads_mode == OUTPUT_HEAD_MODE_CAUSAL_EM
+                else "conv_unet_v1"
+            )
+        )
 
     def set_static_spatial_features(self, spatial_features: np.ndarray | None) -> None:
         return _TorchSpatialFieldMixin.set_static_spatial_features(self, spatial_features)
@@ -452,6 +781,8 @@ class UNetBaseline(_TorchSpatialFieldMixin):
     def _torch_step_reference(self):
         if self.backend != "torch":
             return None, None
+        if str(getattr(self, "_torch_architecture", "unet")) == "response_scale":
+            return self.net.step_reference()
         hidden = self.net.backbone.enc1[0].weight
         out = self.net.head.step_reference()
         return hidden, out

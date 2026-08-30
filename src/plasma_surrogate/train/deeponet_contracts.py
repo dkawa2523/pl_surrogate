@@ -167,6 +167,9 @@ def validate_pod_deeponet_experimental_contract(
         resolve_spatial_selection_config(selection_cfg)
     return {
         "rank": int(rank),
+        "min_rank": int(basis_cfg.get("min_rank", 1)),
+        "energy_threshold": basis_cfg.get("energy_threshold"),
+        "coeff_std_floor_rel": float(basis_cfg.get("coeff_std_floor_rel", 0.0)),
         "fit_scope": fit_scope,
         "per_var": per_var,
         "center": center,

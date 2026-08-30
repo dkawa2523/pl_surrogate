@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from pathlib import Path
 from typing import Any
 
 from plasma_surrogate.preprocessing.split import (
@@ -37,6 +39,66 @@ class SplitPlanBuilder:
         if key in cond:
             return cond[key]
         raise KeyError(key)
+
+    def _fixed_interp(self, *, case_ids: list[str]) -> dict[str, list[str]] | None:
+        """Load an explicitly frozen interpolation membership when configured.
+
+        This is intended for controlled training-size ablations where validation and
+        test memberships must remain unchanged while some original training cases are
+        deliberately left unused.
+        """
+
+        raw_cfg = self.cfg.get("fixed_interp")
+        if raw_cfg is None:
+            return None
+        if not isinstance(raw_cfg, dict):
+            raise TypeError("split.fixed_interp must be a mapping")
+        cfg = dict(raw_cfg)
+        path_raw = str(cfg.get("path", "")).strip()
+        inline = cfg.get("membership")
+        if bool(path_raw) == bool(inline is not None):
+            raise ValueError("split.fixed_interp requires exactly one of path or membership")
+        if path_raw:
+            path = Path(path_raw)
+            if not path.exists():
+                raise FileNotFoundError(f"split.fixed_interp.path does not exist: {path}")
+            with path.open("r", encoding="utf-8") as stream:
+                payload = json.load(stream)
+        else:
+            payload = inline
+        if not isinstance(payload, dict):
+            raise TypeError("split.fixed_interp membership payload must be a mapping")
+
+        membership = {
+            name: [str(value) for value in list(payload.get(name, []) or [])]
+            for name in ("train", "val", "test")
+        }
+        empty = [name for name, values in membership.items() if not values]
+        if empty:
+            raise ValueError(f"split.fixed_interp contains empty partitions: {empty}")
+        for name, values in membership.items():
+            if len(values) != len(set(values)):
+                raise ValueError(f"split.fixed_interp.{name} contains duplicate case IDs")
+        sets = {name: set(values) for name, values in membership.items()}
+        overlaps = {
+            f"{left}/{right}": sorted(sets[left] & sets[right])
+            for left, right in (("train", "val"), ("train", "test"), ("val", "test"))
+            if sets[left] & sets[right]
+        }
+        if overlaps:
+            raise ValueError(f"split.fixed_interp partitions overlap: {overlaps}")
+        known = set(case_ids)
+        used = set().union(*sets.values())
+        unknown = sorted(used - known)
+        if unknown:
+            raise ValueError(f"split.fixed_interp references unknown case IDs: {unknown}")
+        unassigned = sorted(known - used)
+        if unassigned and not bool(cfg.get("allow_unassigned", False)):
+            raise ValueError(
+                "split.fixed_interp leaves dataset cases unassigned; set allow_unassigned=true "
+                f"for a deliberate training-size ablation. unassigned={unassigned}"
+            )
+        return membership
 
     def _structure_holdout(
         self,
@@ -203,6 +265,9 @@ class SplitPlanBuilder:
             mode="marginal",
             split_groups=split_groups,
         )
+        fixed_interp = self._fixed_interp(case_ids=case_ids)
+        if fixed_interp is not None:
+            interp_marginal = fixed_interp
         overlap_status = build_interpolation_overlap_split_with_status(
             case_ids,
             cond_values=cond_by_case,
@@ -225,7 +290,11 @@ class SplitPlanBuilder:
             random=random_split,
             interp_marginal=interp_marginal,
             interp_overlap=interp_overlap,
-            interp=interp_overlap if interp_mode == "overlap" else interp_marginal,
+            interp=(
+                fixed_interp
+                if fixed_interp is not None
+                else (interp_overlap if interp_mode == "overlap" else interp_marginal)
+            ),
             extrap=extrap_split,
             structure_holdout=structure_holdout,
             structure_holdout_meta=structure_holdout_meta,

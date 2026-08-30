@@ -1,9 +1,10 @@
 {
   "study_id": "icp_uno_epoch500_four_model_v47",
   "inventory_date": "2026-08-31",
-  "git_head": "ad5ca0854c2e754b1193b67ef921ad791f3e4bfa",
-  "git_head_is_sufficient": false,
-  "warning": "The working tree contains material uncommitted and untracked ICP implementation files. Transfer the complete frozen working-tree source.",
+  "source_basis_git_head": "ad5ca0854c2e754b1193b67ef921ad791f3e4bfa",
+  "portable_branch": "docs/icp-uno-epoch500-portable-v47",
+  "git_head_is_sufficient": true,
+  "warning": "Git LFS objects must be materialized before verification; a pointer-only checkout is insufficient.",
   "files": [
     {
       "path": "requirements-cuda-cu128-py310.txt",
@@ -12,28 +13,28 @@
     },
     {
       "path": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/index.csv",
-      "bytes": 218750,
-      "sha256": "AECE11604552AA861A5250370901DA7FEC441B0AF88687F3037593372A05B691"
+      "bytes": 217792,
+      "sha256": "FCEEDA0885F7EBE374144A1C403D690E12092706D581571345C586A02638EDA7"
     },
     {
       "path": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/split_membership.json",
-      "bytes": 30456,
-      "sha256": "69F6D3A47FCBC8701B758F7685A664DA95AC0FE27D3E081A06751CF69D16315F"
+      "bytes": 29492,
+      "sha256": "9E344E9569CEF208ADDEC3E3C92DED2BE31AC7C7D9E81D643F62352C2167FA44"
     },
     {
       "path": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/design_metadata_v43.csv",
-      "bytes": 106175,
-      "sha256": "FDAF26EE9D8BDFF47D2B0EFFB2064194FC8AFA05A45350413F0542C7BD5DBAC7"
+      "bytes": 105574,
+      "sha256": "65944113FAA0E247ACE2CCF45BC933EEC0D7528716613535B6F344DECF36982D"
     },
     {
       "path": "configs/experimental/icp_stage4/conference_continuity_v45/final/conference_sdf/seed_1237.yaml",
-      "bytes": 10882,
-      "sha256": "BC844341307BB66F34120B737058A984B6897A9AFA6341D3C4C692319A16ABA3"
+      "bytes": 10501,
+      "sha256": "EA0E4CEC7A0C336559EBB4C716B16C7BE69DF28BE531ACBC2E13BFEF4B217231"
     },
     {
       "path": "configs/experimental/icp_stage4/conference_continuity_v45/final/conference_dimension/seed_1237.yaml",
-      "bytes": 10573,
-      "sha256": "317AED3E254962EF184CA45ACCAC22D5B8056ECE920A9B8178FB1B861E23153F"
+      "bytes": 10194,
+      "sha256": "3E57DA5C96FB33282558901143B1A674CA6CE8BCA29E3D90A862B0D48DD89DA5"
     },
     {
       "path": "configs/experimental/icp_stage4/conference_continuity_v45/initial_weights/conference_sdf_seed1237.npz",
@@ -57,25 +58,89 @@
     },
     {
       "path": "experiments/icp_stage4/uno_structure_em_v46/configs/final/ABC_adaptive_mix/seed_1237.yaml",
-      "bytes": 12437,
-      "sha256": "060D95211E6346135BCF307BF162FD59AD187EE68E520D07E8F146093C444267"
+      "bytes": 12010,
+      "sha256": "97D464C00A9AE453A6344A980D15F29D79604446E3F6E3E091FD4F3383104256"
     },
     {
       "path": "experiments/icp_stage4/uno_structure_em_v46/configs/initial_weights/ABC_adaptive_mix_seed1237.npz",
       "bytes": 111299875,
       "sha256": "EF61DA02F913E2D30A558527967E9517DD80A8412C67FD1C604C62322F8265F3"
+    },
+    {
+      "path": "src/plasma_surrogate/models/operator_response.py",
+      "bytes": 6808,
+      "sha256": "B5B907C3FE42A3F80178D5BDE53D0B8EF9802D23B3D2269C893D2078456A0171"
+    },
+    {
+      "path": "src/plasma_surrogate/models/uno/simple_uno.py",
+      "bytes": 10049,
+      "sha256": "9DC89199375D0776D7F1A6D09AD2A806607A4BBBFC29EAF353EA53C2B10870B0"
+    },
+    {
+      "path": "src/plasma_surrogate/preprocessing/runner.py",
+      "bytes": 97494,
+      "sha256": "83947A1BD8343A6ABA5886EE569BF233EF96BD4843F06B4572AA2A426B2197FF"
+    },
+    {
+      "path": "src/plasma_surrogate/features/structure_feature_registry.py",
+      "bytes": 10707,
+      "sha256": "BD88244B670C713B02813600909A2D221F7947D1E6578CED7FADEC6AF43A0606"
+    },
+    {
+      "path": "src/plasma_surrogate/features/axisymmetric_vacuum_field.py",
+      "bytes": 5430,
+      "sha256": "54568D9CD9087E4B2099590129A425AB68D78110E8E3E7A8D91F7762F0A19D0A"
+    },
+    {
+      "path": "src/plasma_surrogate/train/grid_training.py",
+      "bytes": 31052,
+      "sha256": "2E9774804CD34985B7A48C2F9AF0109E77F2A1A4F25B104A795E5D3B8FFFF10D"
+    },
+    {
+      "path": "src/plasma_surrogate/train/trainer.py",
+      "bytes": 85002,
+      "sha256": "4B5F16328500E5FF18EF33385BD546EBCD535B4B34052A52EFCA9D6324C1CFA9"
+    },
+    {
+      "path": "src/plasma_surrogate/train/loss_composer.py",
+      "bytes": 76069,
+      "sha256": "FF1B9CF086DCBBCB1268D8A01290C3D5125669F9933CD2165E6ADA8354F5D084"
+    },
+    {
+      "path": "src/plasma_surrogate/benchmark/runner.py",
+      "bytes": 91620,
+      "sha256": "919DE5953BA0FA93D560AFDD66C23AEA4DE975E9E66FA4FE2D24DE834B4F59DC"
+    },
+    {
+      "path": "experiments/icp_stage4/conference_continuity_v45/run_retraining.py",
+      "bytes": 14088,
+      "sha256": "C5A95FF530F6ECFB4FC15EBABFE20FAD27C8440062169E088F29D5D2B8193B5A"
+    },
+    {
+      "path": "experiments/icp_stage4/conference_continuity_v45/evaluate_unknown_structures.py",
+      "bytes": 22722,
+      "sha256": "93C967C2DF6A98AB3B6555C1017BF0B6EF83C1B3A7F1C43D6EA96146DFEB4147"
+    },
+    {
+      "path": "experiments/icp_stage4/uno_structure_em_v46/smoke_model_contract.py",
+      "bytes": 2649,
+      "sha256": "84C64D0716843F3BD4D3416CBD55EAC724A55AACB2397C9B4CA511D2666E05B7"
     }
   ],
   "formal_reference_checkpoints": [
     {
       "model": "formal_sdf",
       "path": "runs/icp_conference_continuity_v45/final/conference_sdf/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz",
-      "sha256": "DB8568A958D7D1A2208C036F27B9B22EB93615008012D0C72E4FF642946FAAC1"
+      "sha256": "DB8568A958D7D1A2208C036F27B9B22EB93615008012D0C72E4FF642946FAAC1",
+      "meta_path": "runs/icp_conference_continuity_v45/final/conference_sdf/seed_1237/models/u_no/eval_protocol/interp/checkpoints/meta.json",
+      "meta_sha256": "6892609AD7CB3DC6EE52C928BB0DAD1249527F935FAD77319AD1798BDA7AD487"
     },
     {
       "model": "formal_dimension",
       "path": "runs/icp_conference_continuity_v45/final/conference_dimension/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz",
-      "sha256": "A87AADB88C3FE383BC2B2BB27F306DCC8BBA5735E5C4F1BA2796559C856B04FF"
+      "sha256": "A87AADB88C3FE383BC2B2BB27F306DCC8BBA5735E5C4F1BA2796559C856B04FF",
+      "meta_path": "runs/icp_conference_continuity_v45/final/conference_dimension/seed_1237/models/u_no/eval_protocol/interp/checkpoints/meta.json",
+      "meta_sha256": "95C390C1BB102B9EEE08213B84D8C61DD83A4BF2012A9A4B97D4DFE39D141843"
     }
   ]
 }

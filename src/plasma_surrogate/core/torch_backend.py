@@ -49,7 +49,8 @@ def torch_runtime_available(*, refresh: bool = False) -> bool:
 def require_torch() -> Any:
     if not torch_backend_enabled():
         raise RuntimeError(
-            "Torch backend is disabled. Set PLASMA_SURROGATE_ENABLE_TORCH=1 to enable deeponet_plasma."
+            "Torch backend is disabled. Set PLASMA_SURROGATE_ENABLE_TORCH=1 "
+            "to enable Torch-backed models."
         )
     if not torch_runtime_available():
         raise RuntimeError(

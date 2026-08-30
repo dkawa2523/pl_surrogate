@@ -18,6 +18,7 @@ PORTABILITY = HERE / "PORTABILITY_MANIFEST.json"
 REQUIRED_DOCS = (
     "README.md",
     "README_JA.md",
+    "REMOTE_TRAINING_START_HERE_JA.md",
     "RUN_CHECKLIST.md",
     "docs/01_MODEL_COMPARISON_CONTRACT.md",
     "docs/02_ENVIRONMENT_AND_TRANSFER.md",
@@ -28,12 +29,27 @@ REQUIRED_DOCS = (
 )
 
 
-def _sha256(path: Path) -> str:
+TEXT_SUFFIXES = {".csv", ".json", ".md", ".py", ".txt", ".yaml", ".yml"}
+
+
+def _payload(path: Path) -> bytes:
+    payload = path.read_bytes()
+    if path.suffix.lower() in TEXT_SUFFIXES:
+        # Git is allowed to materialize text as LF or CRLF.  Inventory hashes
+        # describe canonical LF content so a Windows checkout verifies exactly
+        # like a Linux checkout without weakening binary/weight verification.
+        payload = payload.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return payload
+
+
+def _sha256_payload(payload: bytes) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(8 * 1024 * 1024), b""):
-            digest.update(chunk)
+    digest.update(payload)
     return digest.hexdigest().upper()
+
+
+def _sha256(path: Path) -> str:
+    return _sha256_payload(_payload(path))
 
 
 def _json(path: Path) -> Any:
@@ -79,8 +95,9 @@ def main() -> int:
         if not path.is_file():
             failures.append(f"missing required file: {relative}")
             continue
-        actual_size = int(path.stat().st_size)
-        actual_hash = _sha256(path)
+        payload = _payload(path)
+        actual_size = len(payload)
+        actual_hash = _sha256_payload(payload)
         expected_size = int(item["bytes"])
         expected_hash = str(item["sha256"]).upper()
         if actual_size != expected_size:
@@ -106,6 +123,20 @@ def main() -> int:
             failures.append(
                 f"formal checkpoint changed: {relative}: expected={expected_hash}, actual={actual_hash}"
             )
+        meta_relative = str(item.get("meta_path", "")).strip()
+        if meta_relative:
+            meta_path = ROOT / meta_relative
+            if not meta_path.is_file():
+                message = f"formal reference metadata not present: {meta_relative}"
+                (failures if args.require_formal_references else warnings).append(message)
+            else:
+                actual_meta_hash = _sha256(meta_path)
+                expected_meta_hash = str(item["meta_sha256"]).upper()
+                if actual_meta_hash != expected_meta_hash:
+                    failures.append(
+                        "formal checkpoint metadata changed: "
+                        f"{meta_relative}: expected={expected_meta_hash}, actual={actual_meta_hash}"
+                    )
 
     dataset_root = ROOT / str(protocol["dataset"]["root"])
     index_ids = _csv_ids(dataset_root / "index.csv")

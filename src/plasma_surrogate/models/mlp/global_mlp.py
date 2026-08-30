@@ -39,6 +39,11 @@ class GlobalMLP:
 
         dims = [self.input_dim, *self.hidden, self.output_dim]
         rng = np.random.default_rng(seed)
+        # Dropout must share the model-owned seeded generator. Using the
+        # process-global np.random state makes identical benchmark runs differ
+        # across fresh processes and invalidates reproducible validation-only
+        # configuration selection.
+        self._rng = rng
         self.weights: list[np.ndarray] = []
         self.biases: list[np.ndarray] = []
         for fan_in, fan_out in zip(dims[:-1], dims[1:]):
@@ -63,7 +68,7 @@ class GlobalMLP:
                 a = np.tanh(z).astype(np.float32)
                 if training and self.dropout > 0.0:
                     keep = 1.0 - self.dropout
-                    dm = (np.random.rand(*a.shape) < keep).astype(np.float32) / max(keep, 1e-6)
+                    dm = (self._rng.random(a.shape) < keep).astype(np.float32) / max(keep, 1e-6)
                     a = a * dm
                 else:
                     dm = np.ones_like(a, dtype=np.float32)

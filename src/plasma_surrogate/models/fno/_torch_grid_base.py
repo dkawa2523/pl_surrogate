@@ -204,6 +204,10 @@ class _TorchGridFieldBaseline:
         return self.forward_features(cond, spatial_features=spatial_features)
 
     def _torch_step_reference(self):
+        if hasattr(self.net, "step_reference"):
+            reference = self.net.step_reference()
+            if isinstance(reference, tuple):
+                return reference
         if getattr(self.net, "head", None) is not None:
             return self.net.in_proj.weight, self.net.head.step_reference()
         return self.net.in_proj.weight, self.net.post[-1].weight

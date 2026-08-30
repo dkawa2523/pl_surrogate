@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from importlib import import_module
 
-__all__ = ["CoordMLPPODResidual", "CoordMLPTorch", "GlobalMLP"]
+__all__ = ["CoordMLPPODResidual", "CoordMLPTorch", "GlobalMLP", "GlobalVectorMLP"]
 
 _EXPORT_MAP = {
     "CoordMLPPODResidual": "plasma_surrogate.models.mlp.coord_mlp_pod_residual",
     "CoordMLPTorch": "plasma_surrogate.models.mlp.coord_mlp_torch",
     "GlobalMLP": "plasma_surrogate.models.mlp.global_mlp",
+    "GlobalVectorMLP": "plasma_surrogate.models.mlp.global_vector_mlp",
 }
 
 

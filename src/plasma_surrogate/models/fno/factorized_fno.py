@@ -12,6 +12,7 @@ from plasma_surrogate.models.heads.role_grouped import (
     build_role_grouped_conv2d_head,
     is_grouped_output_head_mode,
 )
+from plasma_surrogate.models.operator_response import apply_operator_response_adapter
 
 
 class FFNOBaseline(_TorchGridFieldBaseline):
@@ -32,6 +33,7 @@ class FFNOBaseline(_TorchGridFieldBaseline):
         backend: str = "torch",
         output_heads: dict[str, Any] | None = None,
         target_role_schema: dict[str, Any] | None = None,
+        operator_response_cfg: dict[str, Any] | None = None,
     ):
         normalized_spectral_cfg, spectral_common = normalize_common_spectral_cfg(
             spectral_cfg,
@@ -259,7 +261,8 @@ class FFNOBaseline(_TorchGridFieldBaseline):
 
             def forward(self, x):
                 spec_h, spec_w = self.spec.forward_components(x)
-                skip_out = self.skip(x)
+                raw_skip = self.skip(x)
+                skip_out = raw_skip
                 if self.skip_filter == "match_spectral":
                     skip_out = self.spec.apply_filter_map(skip_out)
                 spec_out = spec_h + spec_w
@@ -267,7 +270,11 @@ class FFNOBaseline(_TorchGridFieldBaseline):
                     spec_out = (self.beta_h * spec_h) + (self.beta_w * spec_w)
                 out = spec_out + skip_out
                 if self.local_skip_enabled and self.local_skip is not None and self.local_skip_alpha is not None:
-                    out = out + self.local_skip_alpha * self.local_skip(skip_out)
+                    # Keep the local path independent of the low-pass spectral
+                    # path.  Filtering this input as well makes every branch
+                    # blind to geometry-scale variation and defeats the purpose
+                    # of the 3x3 residual.
+                    out = out + self.local_skip_alpha * self.local_skip(raw_skip)
                 return torch.nn.functional.gelu(out)
 
         class _FactorizedFNONet(nn.Module):
@@ -368,6 +375,7 @@ class FFNOBaseline(_TorchGridFieldBaseline):
         )
         self._torch_width = int(width)
         self._torch_layers = int(n_layers)
+        apply_operator_response_adapter(self, operator_response_cfg)
 
     def load_state_dict_numpy(self, state: dict[str, np.ndarray]) -> None:
         torch = self.torch

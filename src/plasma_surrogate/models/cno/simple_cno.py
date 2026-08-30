@@ -11,6 +11,7 @@ from plasma_surrogate.models.heads.role_grouped import (
     build_role_grouped_conv2d_head,
     is_grouped_output_head_mode,
 )
+from plasma_surrogate.models.operator_response import apply_operator_response_adapter
 
 
 def normalize_cno_cfg(raw_cfg: dict[str, Any] | None) -> dict[str, Any]:
@@ -19,6 +20,8 @@ def normalize_cno_cfg(raw_cfg: dict[str, Any] | None) -> dict[str, Any]:
     n_layers = int(cfg.get("n_layers", 4))
     dropout = float(cfg.get("dropout", 0.0))
     kernel_size = int(cfg.get("kernel_size", 3))
+    dilation_cycle = [int(v) for v in list(cfg.get("dilation_cycle", [1]))]
+    multiresolution = bool(cfg.get("multiresolution", False))
     if width < 1:
         raise ValueError("train.cno.model_cfg.cno_cfg.width must be >= 1")
     if n_layers < 1:
@@ -29,11 +32,15 @@ def normalize_cno_cfg(raw_cfg: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("train.cno.model_cfg.cno_cfg.kernel_size must be >= 1")
     if kernel_size % 2 == 0:
         raise ValueError("train.cno.model_cfg.cno_cfg.kernel_size must be odd")
+    if not dilation_cycle or any(v < 1 for v in dilation_cycle):
+        raise ValueError("train.cno.model_cfg.cno_cfg.dilation_cycle must contain positive integers")
     return {
         "width": int(width),
         "n_layers": int(n_layers),
         "dropout": float(dropout),
         "kernel_size": int(kernel_size),
+        "dilation_cycle": dilation_cycle,
+        "multiresolution": multiresolution,
     }
 
 
@@ -54,6 +61,7 @@ class CNOBaseline(_TorchGridFieldBaseline):
         backend: str = "torch",
         output_heads: dict[str, Any] | None = None,
         target_role_schema: dict[str, Any] | None = None,
+        operator_response_cfg: dict[str, Any] | None = None,
     ):
         super().__init__(
             input_dim=input_dim,
@@ -77,24 +85,32 @@ class CNOBaseline(_TorchGridFieldBaseline):
         n_layers = int(self.cno_cfg["n_layers"])
         dropout = float(self.cno_cfg["dropout"])
         kernel_size = int(self.cno_cfg["kernel_size"])
-        padding = int(kernel_size // 2)
+        dilation_cycle = list(self.cno_cfg["dilation_cycle"])
+        multiresolution = bool(self.cno_cfg["multiresolution"])
 
         torch = self.torch
         nn = torch.nn
         output_head_group_options = dict(getattr(self, "output_head_group_options", {}) or {})
 
         class _CNOBlock(nn.Module):
-            def __init__(self, width: int, kernel_size: int, padding: int, dropout: float) -> None:
+            def __init__(self, width: int, kernel_size: int, dilation: int, dropout: float, multiresolution: bool) -> None:
                 super().__init__()
-                self.conv1 = nn.Conv2d(width, width, kernel_size=kernel_size, padding=padding)
-                self.conv2 = nn.Conv2d(width, width, kernel_size=kernel_size, padding=padding)
+                padding = int((kernel_size // 2) * dilation)
+                self.conv1 = nn.Conv2d(width, width, kernel_size=kernel_size, padding=padding, dilation=dilation)
+                self.conv2 = nn.Conv2d(width, width, kernel_size=kernel_size, padding=padding, dilation=dilation)
                 self.skip = nn.Conv2d(width, width, kernel_size=1)
+                self.multiresolution = bool(multiresolution)
+                self.coarse = nn.Conv2d(width, width, kernel_size=3, padding=1) if self.multiresolution else None
                 self.norm = nn.GroupNorm(num_groups=1, num_channels=width)
                 self.drop = nn.Dropout(float(max(dropout, 0.0)))
 
             def forward(self, x):
                 y = torch.nn.functional.gelu(self.conv1(x))
                 y = self.conv2(y)
+                if self.coarse is not None and min(x.shape[-2:]) >= 2:
+                    coarse = torch.nn.functional.avg_pool2d(x, kernel_size=2, stride=2)
+                    coarse = self.coarse(coarse)
+                    y = y + torch.nn.functional.interpolate(coarse, size=x.shape[-2:], mode="bilinear", align_corners=False)
                 y = self.norm(y)
                 y = self.drop(y)
                 return torch.nn.functional.gelu(y + self.skip(x))
@@ -107,7 +123,8 @@ class CNOBaseline(_TorchGridFieldBaseline):
                 width: int,
                 n_layers: int,
                 kernel_size: int,
-                padding: int,
+                dilation_cycle: list[int],
+                multiresolution: bool,
                 dropout: float,
                 head_mode: str,
                 output_keys: list[str],
@@ -121,10 +138,11 @@ class CNOBaseline(_TorchGridFieldBaseline):
                         _CNOBlock(
                             width=width,
                             kernel_size=kernel_size,
-                            padding=padding,
+                            dilation=int(dilation_cycle[index % len(dilation_cycle)]),
                             dropout=dropout,
+                            multiresolution=multiresolution,
                         )
-                        for _ in range(max(int(n_layers), 1))
+                        for index in range(max(int(n_layers), 1))
                     ]
                 )
                 if is_grouped_output_head_mode(head_mode):
@@ -165,7 +183,8 @@ class CNOBaseline(_TorchGridFieldBaseline):
             width=width,
             n_layers=n_layers,
             kernel_size=kernel_size,
-            padding=padding,
+            dilation_cycle=dilation_cycle,
+            multiresolution=multiresolution,
             dropout=dropout,
             head_mode=str(self.output_heads_mode),
             output_keys=list(self.output_keys),
@@ -175,3 +194,4 @@ class CNOBaseline(_TorchGridFieldBaseline):
         self._torch_width = int(width)
         self._torch_layers = int(n_layers)
         self._torch_kernel_size = int(kernel_size)
+        apply_operator_response_adapter(self, operator_response_cfg)

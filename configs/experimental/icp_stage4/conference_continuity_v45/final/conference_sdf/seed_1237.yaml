@@ -1,0 +1,381 @@
+benchmark:
+  boundary_operator:
+    primary_qoi_key: Gamma_i
+  dataset:
+    axis_column: axis
+    base_case_id_column: base_case_id
+    case_id_column: case_id
+    cond_columns:
+    - pp
+    - pp0
+    fields_npz_column: fields_npz
+    geometry_root: geometry
+    index_csv: index.csv
+    root: data/outputs_icp_stage4_plus_v43_vacuum_q3_v45
+    split_group_column: split_group
+    structure_npz_column: structure_npz
+    targets:
+    - dtype: float32
+      id: ne
+      source_key: ne
+      units: m^-3
+      value_transform: identity
+    - dtype: float32
+      id: ni
+      source_key: ni
+      units: m^-3
+      value_transform: identity
+    - dtype: float32
+      id: Te
+      source_key: Te
+      units: eV
+      value_transform: identity
+    - dtype: float32
+      id: phi
+      source_key: phi
+      units: V
+      value_transform: identity
+    type: csv_npz
+    validation:
+      reject_same_input_different_output: false
+  eval:
+    interp_mode: marginal
+    mask_metrics: plasma_only
+    objective_mode: min
+    primary_metric: surrogate_quality_score
+    protocol_variant: icp_conference_continuity_v45_conference_sdf_seed1237
+    quality_score:
+      avgpool_lambda: 0.05
+      boundary_alpha: 0.0
+      delta: 1.0
+      gradient_lambda: 0.1
+      mode: spatial_huber
+      multiscale_scales:
+      - 2
+      - 4
+      p90_weight: 0.25
+      target_aggregation: uniform_by_target
+      worst_weight: 0.1
+    region_bands:
+      boundary_in_px: 2.0
+      deep_plasma_px: 10.0
+      mode: fixed_px
+    spatial_distribution_audit:
+      enabled: true
+      plot_representative_cases: true
+      plot_worst_cases: 3
+      top_fraction: 0.1
+      vars: all
+    target_family_for_score: allvars
+    target_vars_for_score:
+    - ne
+    - ni
+    - Te
+    - phi
+  eval_protocol:
+    extrap_weight: 0.5
+    frozen_ref_tag: periodic_global_frozen_v2
+    interp_mode: marginal
+    interp_weight: 0.5
+    min_primary_test_cases: 100
+    min_primary_test_groups: 20
+    mode: primary_axis
+    primary_split: interp
+    scope: u_no_isolated
+  inference:
+    axis:
+      mode: steady
+      value: 0.0
+    ood:
+      physics:
+        enabled: true
+        symbols:
+          density: ne
+          potential: phi
+          temperature: Te
+    optimize:
+      backend: two_stage
+      backend_cfg:
+        local_radius_frac: 0.25
+        local_trials_per_seed: 16
+        n_initial: 256
+        top_k: 16
+      enabled: false
+      n_trials: 512
+      objective:
+        mode: weighted_sum
+        terms:
+        - direction: min
+          key: uniformity
+          weight: 1.0
+        - direction: min
+          key: poisson_residual_norm
+          scale: 1.0
+          transform: log1p_abs
+          weight: 0.05
+        - direction: min
+          key: boundary_gamma_uniformity
+          weight: 0.1
+    postprocess:
+      positive_floor: 1.0e-30
+      positive_vars:
+      - ne
+      - ni
+      - Te
+    qoi:
+      uniformity:
+        mid_height_band_px: 2
+        preferred_targets:
+        - ne
+        - ni
+        - Te
+        region: plasma_mid_height
+        target: ne
+  metadata:
+    architecture: skip_free_coarse_response_encoder_decoder
+    axial_boundary: zero_padding_unchanged
+    candidate: 2
+    case_name: icp_stage4_axisymmetric_neumann_v4
+    comparison_baseline: icp_stage4_count_neutral_sdf_v3
+    comparison_change: r0_padding_and_epoch_budget_only
+    comparison_control: same_current_dataset_split_seed_architecture_loss_batch; radial_padding_and_epoch_budget_changed
+    comparison_role: adopted union-SDF continuity baseline
+    count_input_contract: implicit_geometry_only_no_nncoil_condition
+    density_head: positive_common_amplitude_shape_plus_bounded_charge_imbalance
+    density_imbalance_fraction: 0.05
+    density_inventory_error: bounded_symmetric_relative_huber
+    density_objective: physical_linear_shape_plus_case_inventory
+    density_shape_normalization: detached_plasma_mean
+    formal_model_name: ICP Axisymmetric Response-Scale U-Net v4
+    formal_specification: README_ICP.md
+    formal_status: adopted_current_icp_unet
+    model: u_no
+    native_response_resolution: quarter_grid_then_fixed_bilinear
+    off_state_policy: train_ignited_359_and_report_case_g012_op01_separately
+    outer_radial_boundary: zero_padding_unchanged
+    radial_boundary_r0: cell_centered_axisymmetric_neumann_reflection
+    representation: union_sdf_plus_count_mean_coil_source
+    seed: 1237
+    source_reduction: mean_over_active_equal_strength_coils
+    source_scaling: none_bounded_channel_contract
+    spatial_loss: false
+    speed_change: batch_size_cases_16_from_previous_8
+    structure_holdout_seed: 51
+    structure_holdout_seed_contract: count_2_to_6_coverage_in_val_and_test
+    structure_signal: coil_occupancy_without_raw_vacuum_field
+    study: icp_conference_continuity_v45
+    supervised_spatial_loss_effective: false
+    supervised_spatial_loss_requested: true
+    target_space: physical_linear_zscore_no_clip
+    training_epochs: 120
+    variant: conference_sdf
+    formal_axis_seed: 1237
+    current_dataset_case_count: 957
+    frozen_test_contract: v43_G4_plus_legacy_source_test
+    magnetic_input_policy: deterministic_unit_current_vacuum_only
+    response_field_leakage: false
+    epochs: 50
+  output_dir: runs/icp_conference_continuity_v45/final/conference_sdf/seed_1237
+  phi_mode: direct
+  physics:
+    enabled: false
+  preprocessing:
+    coord_features:
+      case_structure_output: features/case_structure_feature_pack.npz
+      channels_from_profile: icp_coil_sdf_source_mean_v3
+      distance_transform_stats:
+        chamber_band_px: 2.0
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        proximity_quantile: 0.25
+        signed_quantile: 0.45
+      enabled: true
+      output: features/coord_feature_pack.npz
+      require_case_variation: true
+      scaling:
+        enabled: true
+        fit_scope: train_split
+        mask_scope: plasma_plus_band
+        mode: zscore
+      static_output: features/static_spatial_feature_pack.npz
+    coord_grid_contract:
+      require_requested_source: error
+    coord_grid_source: rz_linear
+    distance_contract:
+      require_negative_outside: error
+    scalers:
+      cond: robust
+      enforce_target_transforms: true
+      fit_split: interp
+      target_transforms:
+        Te:
+          clip:
+            mode: none
+          fit_scope: plasma_only
+          scaler: zscore
+          value_transform: identity
+        ne:
+          clip:
+            mode: none
+          fit_scope: plasma_only
+          scaler: zscore
+          value_transform: identity
+        ni:
+          clip:
+            mode: none
+          fit_scope: plasma_only
+          scaler: zscore
+          value_transform: identity
+        phi:
+          clip:
+            mode: none
+          fit_scope: plasma_only
+          scaler: zscore
+          value_transform: identity
+      y_fit_policy: plasma_only
+  profile: m7_u_no_experimental
+  runtime:
+    input_mode: table_plus_structure
+    strict_input_mode: error
+    structure:
+      adapter_mode: auto
+      descriptor_profile: none
+      feature_profile: icp_coil_sdf_source_mean_v3
+      latent_profile: none
+      provider_mode: parametric_parts
+  seed: 1237
+  split:
+    ratios:
+    - 0.8
+    - 0.1
+    - 0.1
+    seed: 7
+    structure_holdout:
+      enabled: false
+      required: false
+    interp_mode: marginal
+    fixed_interp:
+      path: data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/split_membership.json
+      allow_unassigned: false
+    extrapolation:
+      key: pp
+      direction: high
+      holdout_ratio: 0.2
+      val_ratio: 0.2
+  task:
+    spec_path: task_spec.yaml
+  train:
+    loss:
+      multitask:
+        fixed_weights_by_var:
+          Te: 1.0
+          ne: 1.0
+          ni: 1.0
+          phi: 1.0
+        weighting: fixed
+      supervised:
+        density_decomposition:
+          enabled: true
+          epsilon_fraction: 1.0e-06
+          inventory_weight: 1.0
+          shape_weight: 1.0
+          targets:
+          - ne
+          - ni
+        huber_delta: 1.0
+        mask: plasma_only
+        nan_region_policy: mask_only
+        normalization: sample_mean
+        spatial:
+          gradient_epsilon: 0.05
+          gradient_normalization: target_rms
+          gradient_weight: 0.0
+          multiscale_scales:
+          - 2
+          - 4
+          multiscale_weight: 0.0
+        target_weights:
+          Te: 1.0
+          ne: 1.0
+          ni: 1.0
+          phi: 1.0
+        type: huber
+    u_no:
+      batch_size_cases: 16
+      epochs: 50
+      input_features:
+        distance_transform:
+          mode: bounded_auto
+          proximity_tau: 6.0
+          replace_distance_any: true
+          signed_tanh_tau: 8.0
+        features:
+        - x
+        - y
+        - mask_plasma
+        - distance_signed
+        - distance_any
+        - part_sdf_union
+        - part_source_mean
+        mode: geom_feature_pack
+        require_pack: error
+      lr: 0.0003
+      model_cfg:
+        backend: torch
+        n_modes: 16
+        operator_response_cfg:
+          density_imbalance_fraction: 0.05
+          enabled: true
+          native_scale: 4
+          padding_cells: 2
+          radial_padding_mode: axisymmetric_neumann
+        output_heads:
+          mode: shared
+        uno_cfg:
+          dropout: 0.0
+          n_layers: 5
+          width: 64
+      optimizer:
+        betas:
+        - 0.9
+        - 0.999
+        eps: 1.0e-08
+        lr: 0.0003
+        schedule: cosine
+        type: adamw
+        warmup_epochs: 0
+        weight_decay: 0.0001
+      selection:
+        case_aggregation:
+          median_weight: 1.0
+          p90_weight: 0.25
+          worst_weight: 0.05
+        eval_every_n_epochs: 1
+        mode: best_val_spatial_objective
+        spatial:
+          boundary_weight: 0.0
+          gradient_epsilon: 0.05
+          gradient_normalization: target_rms
+          gradient_weight: 0.1
+          point_weight: 1.0
+        warmup_epochs: 5
+      target_family: allvars
+      target_vars:
+      - ne
+      - ni
+      - Te
+      - phi
+      initial_weights_path: configs/experimental/icp_stage4/conference_continuity_v45/initial_weights/conference_sdf_seed1237.npz
+    unet_like:
+      batch_size_cases: 16
+      shuffle_cases: true
+runtime:
+  input_mode: table_plus_structure
+  strict_input_mode: error
+  structure:
+    adapter_mode: auto
+    descriptor_profile: none
+    feature_profile: icp_coil_sdf_source_mean_v3
+    latent_profile: none
+    provider_mode: parametric_parts

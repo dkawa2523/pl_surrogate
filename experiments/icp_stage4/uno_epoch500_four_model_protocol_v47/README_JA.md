@@ -11,6 +11,11 @@
 `git lfs pull --include="data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**"`
 を実行し、配列実体を取得してから検証・学習してください。
 
+他環境での入口、取得対象、実装元の対応は
+[REMOTE_TRAINING_START_HERE_JA.md](REMOTE_TRAINING_START_HERE_JA.md)を最初に参照してください。
+本ブランチにはデータに加えて、現行Python source snapshot、正式設定・初期重み、
+ABC-SDF参照実装・初期重み、正式参照checkpointを含めます。
+
 1. 正式SDF
 2. 正式Dimension
 3. ABC-SDF：多重解像度、入力群別lifting、適応的局所・大域混合
@@ -219,10 +224,8 @@ Dimensionモデルは規則構造の最良値を基準として残します。Di
 
 ## 他環境で最初に行うこと
 
-Git commitだけでは再現できません。現在のICP実装には未commit・未追跡の
-重要ファイルがあるため、working tree全体の凍結snapshotを移送します。
-
-移送後に次を実行します。
+専用ブランチをcheckoutし、`git lfs pull`でデータ、初期重み、正式参照checkpointを
+実体化した後に次を実行します。
 
 ```powershell
 .\.venv-torch\Scripts\python.exe `
@@ -230,7 +233,7 @@ Git commitだけでは再現できません。現在のICP実装には未commit�
   --require-formal-references
 ```
 
-この環境では、重要12ファイルのSHA256、正式2checkpoint、dataset 957件、
+この環境では、凍結source・入力ファイルのSHA256、正式2checkpoint、dataset 957件、
 685/136/136 splitがすべて一致し、検証は`pass`しています。
 
 その後の実装・実行は[03_TRAINING_RUNBOOK.md](docs/03_TRAINING_RUNBOOK.md)と

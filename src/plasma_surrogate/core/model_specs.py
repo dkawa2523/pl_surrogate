@@ -36,6 +36,7 @@ PRODUCT_CATEGORY_BASELINE = "baseline"
 PRODUCT_CATEGORY_GRID_LOCAL = "grid_local"
 PRODUCT_CATEGORY_SPECTRAL_OPERATOR = "spectral_operator"
 PRODUCT_CATEGORY_COORDINATE_OPERATOR = "coordinate_operator"
+PRODUCT_CATEGORY_POD_OPERATOR = "pod_operator"
 PRODUCT_CATEGORY_EXPERIMENTAL_ARCHIVE = "experimental_archive"
 
 
@@ -107,6 +108,28 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         product_category=PRODUCT_CATEGORY_BASELINE,
         benchmark_scope="global_frozen",
     ),
+    "global_resmlp": _spec(
+        "global_resmlp",
+        family="global_mlp",
+        supported_input_modes=(TABLE_ONLY,),
+        allowed_adapter_modes=(ADAPTER_NONE, ADAPTER_AUTO),
+        auto_adapter_mode=ADAPTER_NONE,
+        cond_only_torch=True,
+        product_status=PRODUCT_STATUS_FIRST_CLASS,
+        product_category=PRODUCT_CATEGORY_BASELINE,
+        benchmark_scope="global_resmlp_isolated",
+    ),
+    "global_densemlp": _spec(
+        "global_densemlp",
+        family="global_mlp",
+        supported_input_modes=(TABLE_ONLY,),
+        allowed_adapter_modes=(ADAPTER_NONE, ADAPTER_AUTO),
+        auto_adapter_mode=ADAPTER_NONE,
+        cond_only_torch=True,
+        product_status=PRODUCT_STATUS_FIRST_CLASS,
+        product_category=PRODUCT_CATEGORY_BASELINE,
+        benchmark_scope="global_densemlp_isolated",
+    ),
     "deeponet_pod": _spec(
         "deeponet_pod",
         family="pod_deeponet",
@@ -119,6 +142,9 @@ MODEL_SPECS: dict[str, ModelSpec] = {
         ),
         auto_adapter_mode=ADAPTER_NONE,
         cond_only_torch=True,
+        product_status=PRODUCT_STATUS_FIRST_CLASS,
+        product_category=PRODUCT_CATEGORY_POD_OPERATOR,
+        benchmark_scope="deeponet_pod_isolated",
     ),
     "deeponet_plasma_pod": _spec(
         "deeponet_plasma_pod",
@@ -382,6 +408,7 @@ __all__ = [
     "PRODUCT_CATEGORY_COORDINATE_OPERATOR",
     "PRODUCT_CATEGORY_EXPERIMENTAL_ARCHIVE",
     "PRODUCT_CATEGORY_GRID_LOCAL",
+    "PRODUCT_CATEGORY_POD_OPERATOR",
     "PRODUCT_CATEGORY_SPECTRAL_OPERATOR",
     "PRODUCT_STATUS_EXPERIMENTAL",
     "PRODUCT_STATUS_FIRST_CLASS",

@@ -37,6 +37,7 @@ from plasma_surrogate.core.input_modes import (
     runtime_metadata_keys,
 )
 from plasma_surrogate.core.model_families import (
+    GLOBAL_MLP_FAMILY_MODELS,
     GRID_TORCH_MODELS,
     POD_DEEPONET_FAMILY_MODELS,
     SPECTRAL_FAMILY_MODELS,
@@ -1889,7 +1890,7 @@ class BenchmarkRunner:
                 "epochs": int(cfg.get("epochs", train_cfg.get("epochs", 20))),
                 "lr": float(cfg.get("lr", train_cfg.get("lr", 1e-3))),
             }
-            if model_name == "global_mlp":
+            if model_name in GLOBAL_MLP_FAMILY_MODELS:
                 grad_scale_cfg = dict(cfg.get("grad_scale", {}))
                 item["grad_scale_mode"] = self._to_mode(
                     grad_scale_cfg.get("mode", "off"),
@@ -1933,20 +1934,25 @@ class BenchmarkRunner:
         violations: list[str] = []
 
         if phase == "pre":
-            if bool(checks.get("global_disabled_boost", False)) and "global_mlp" in model_names:
-                gcfg = dict(train_cfg.get("global_mlp", {}))
-                grad_scale_mode = self._to_mode(
-                    dict(gcfg.get("grad_scale", {})).get("mode", "off"),
-                    default="off",
-                    true_mode="auto",
-                )
-                head_refresh = bool(dict(gcfg.get("output_head_refresh", {})).get("enabled", False))
-                out_mult = float(dict(gcfg.get("layer_lr_multiplier", {})).get("output", 1.0))
-                if grad_scale_mode == "off" and (not head_refresh) and out_mult <= 1.0:
-                    violations.append(
-                        "global_disabled_boost: global_mlp has grad_scale=off, output_head_refresh=false, "
-                        "layer_lr_multiplier.output<=1.0"
+            if bool(checks.get("global_disabled_boost", False)):
+                for global_model in sorted(set(model_names) & set(GLOBAL_MLP_FAMILY_MODELS)):
+                    gcfg = dict(train_cfg.get(global_model, {}))
+                    grad_scale_mode = self._to_mode(
+                        dict(gcfg.get("grad_scale", {})).get("mode", "off"),
+                        default="off",
+                        true_mode="auto",
                     )
+                    head_refresh = bool(
+                        dict(gcfg.get("output_head_refresh", {})).get("enabled", False)
+                    )
+                    out_mult = float(
+                        dict(gcfg.get("layer_lr_multiplier", {})).get("output", 1.0)
+                    )
+                    if grad_scale_mode == "off" and (not head_refresh) and out_mult <= 1.0:
+                        violations.append(
+                            f"global_disabled_boost: {global_model} has grad_scale=off, "
+                            "output_head_refresh=false, layer_lr_multiplier.output<=1.0"
+                        )
 
         if phase == "post" and bool(checks.get("effective_steps_floor", False)):
             floor_cfg = dict(self.benchmark_cfg.get("effective_steps_floor", {}))

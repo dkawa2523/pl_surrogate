@@ -10,7 +10,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from plasma_surrogate.core.model_families import GRID_TORCH_MODELS, POD_DEEPONET_FAMILY_MODELS
+from plasma_surrogate.core.model_families import (
+    GLOBAL_MLP_FAMILY_MODELS,
+    GRID_TORCH_MODELS,
+    POD_DEEPONET_FAMILY_MODELS,
+)
 from plasma_surrogate.core.model_specs import normalize_model_name
 
 
@@ -42,8 +46,8 @@ class ModelAdapter:
 MODEL_ADAPTERS: tuple[ModelAdapter, ...] = (
     ModelAdapter(
         name=TRAIN_ADAPTER_GLOBAL_MLP,
-        model_names=("global_mlp",),
-        config_key="global_mlp",
+        model_names=tuple(GLOBAL_MLP_FAMILY_MODELS),
+        config_key="model_name",
         runner_name="_run_global_mlp_train_predict",
     ),
     ModelAdapter(

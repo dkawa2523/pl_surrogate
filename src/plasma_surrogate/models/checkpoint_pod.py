@@ -93,16 +93,43 @@ def load_pod_deeponet_checkpoint_model(meta: dict[str, Any], weights: Any) -> PO
             if str(name) in coeff_std_by_var
         },
     )
+    model_cfg_raw = dict(meta.get("model_cfg", {}))
+    if "branch" not in model_cfg_raw:
+        # Checkpoints produced before the configurable branch used a GELU only
+        # between hidden Linear layers.  Improved configs can activate every
+        # hidden layer, but replaying an old checkpoint retains its exact function.
+        model_cfg_raw["branch"] = {
+            "activation": "gelu",
+            "activate_last_hidden": False,
+            "descriptor": {"mode": "raw", "dim": 0},
+        }
+    model_cfg_normalized = normalize_pod_deeponet_model_cfg(
+        model_cfg_raw,
+        model_type=model_type,
+    )
+    descriptor_cfg = dict(dict(model_cfg_normalized["branch"])["descriptor"])
+    descriptor_stats = None
+    if str(descriptor_cfg["normalization"]) == "train_zscore":
+        mean_key = "torch::_pod_descriptor_mean"
+        std_key = "torch::_pod_descriptor_std"
+        if mean_key not in weights or std_key not in weights:
+            raise ValueError(
+                "deeponet_pod checkpoint with descriptor normalization=train_zscore "
+                "is missing persisted mean/std buffers"
+            )
+        descriptor_stats = {
+            "mean": np.asarray(weights[mean_key], dtype=np.float32),
+            "std": np.asarray(weights[std_key], dtype=np.float32),
+        }
+
     return PODDeepONetTorch(
         input_dim=int(meta["input_dim"]),
         grid_shape=tuple(meta["grid_shape"]),
         out_channels=int(meta.get("out_channels", len(meta.get("output_keys", [])))),
         output_keys=list(meta.get("output_keys", [])),
         pod_basis_bundle=basis_bundle,
-        model_cfg=normalize_pod_deeponet_model_cfg(
-            dict(meta.get("model_cfg", {})),
-            model_type=model_type,
-        ),
+        model_cfg=model_cfg_normalized,
+        descriptor_normalization_stats=descriptor_stats,
         backend=str(meta.get("backend", "torch")),
         model_type=model_type,
     )

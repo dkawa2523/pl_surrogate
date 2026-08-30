@@ -1,0 +1,76 @@
+{
+  "model_type": "u_no",
+  "input_dim": 2,
+  "grid_shape": [
+    440,
+    600
+  ],
+  "out_channels": 4,
+  "output_keys": [
+    "ne",
+    "ni",
+    "Te",
+    "phi"
+  ],
+  "with_rho_eff_head": false,
+  "backend": "torch",
+  "n_modes": 16,
+  "input_feature_channels": [
+    "x",
+    "y",
+    "mask_plasma",
+    "distance_signed",
+    "distance_any",
+    "part_sdf_union",
+    "part_source_mean"
+  ],
+  "head_mlp": {},
+  "uno_cfg": {
+    "width": 64,
+    "n_layers": 5,
+    "dropout": 0.0,
+    "padding_fraction": 0.0,
+    "padding_mode": "reflect"
+  },
+  "operator_response_cfg": {
+    "enabled": true,
+    "density_imbalance_fraction": 0.05,
+    "radial_padding_mode": "axisymmetric_neumann",
+    "native_scale": 4,
+    "padding_cells": 2,
+    "target_affine": {
+      "ne": {
+        "mean": 2.579604046664491e+17,
+        "scale": 4.9677017041379366e+17
+      },
+      "ni": {
+        "mean": 2.5797007385686774e+17,
+        "scale": 4.9676550437153504e+17
+      }
+    }
+  },
+  "uno_impl_version": "uno_lite_v1",
+  "output_heads": {
+    "mode": "shared"
+  },
+  "output_heads_mode_effective": "shared",
+  "target_groups": [],
+  "head_arch_version": "operator_response_scale_quasineutral_v1",
+  "input_mode_effective": "table_plus_structure",
+  "structure_feature_profile_effective": "icp_coil_sdf_source_mean_v3",
+  "structure_adapter_mode_effective": "grid_pack",
+  "geometry_provider_mode_effective": "parametric_parts",
+  "target_schema_hash": "3ea9e64cb531c40df37df8d3fc58d23df06645f3983901e313d555a9087c73ef",
+  "feature_schema_hash": "7ceda970785074e11744407807edfda70f71c9c84d9f8bf6d9bf8c5b297ef186",
+  "loss_protocol_effective": "none",
+  "loss_protocol_version": 0,
+  "loss_protocol_definition_hash": "520aae3a98b01e9b03d965f0206c6e0a768435ac7ef73d1fdbde5ba9595d568a",
+  "loss_protocol_effective_config": "{\"multitask\":{\"fixed_weights_by_var\":{\"Te\":1.0,\"ne\":1.0,\"ni\":1.0,\"phi\":1.0},\"weighting\":\"fixed\"},\"protocol_effective\":\"none\",\"supervised\":{\"density_decomposition\":{\"enabled\":true,\"epsilon_fraction\":1e-06,\"inventory_weight\":1.0,\"shape_weight\":1.0,\"targets\":[\"ne\",\"ni\"]},\"huber_delta\":1.0,\"mask\":\"plasma_only\",\"nan_region_policy\":\"mask_only\",\"normalization\":\"sample_mean\",\"spatial\":{\"gradient_epsilon\":0.05,\"gradient_normalization\":\"target_rms\",\"gradient_weight\":0.0,\"multiscale_scales\":[2,4],\"multiscale_weight\":0.0},\"target_weights\":{\"Te\":1.0,\"ne\":1.0,\"ni\":1.0,\"phi\":1.0},\"type\":\"huber\"},\"target_role_schema\":{\"field_family_to_targets\":{},\"positive_targets\":[],\"role_to_targets\":{},\"targets\":[{\"dtype\":\"float32\",\"id\":\"ne\",\"source_key\":\"ne\",\"units\":\"m^-3\",\"value_transform\":\"identity\"},{\"dtype\":\"float32\",\"id\":\"ni\",\"source_key\":\"ni\",\"units\":\"m^-3\",\"value_transform\":\"identity\"},{\"dtype\":\"float32\",\"id\":\"Te\",\"source_key\":\"Te\",\"units\":\"eV\",\"value_transform\":\"identity\"},{\"dtype\":\"float32\",\"id\":\"phi\",\"source_key\":\"phi\",\"units\":\"V\",\"value_transform\":\"identity\"}],\"vars\":[\"ne\",\"ni\",\"Te\",\"phi\"],\"version\":1}}",
+  "case_supervision_pack_used": true,
+  "case_supervision_pack_storage": "compact_case_spatial_pack",
+  "case_supervision_channels": [
+    "mask_plasma"
+  ],
+  "scaler_fit_split": "interp",
+  "scaler_train_only": true
+}

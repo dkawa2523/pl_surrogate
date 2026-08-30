@@ -20,18 +20,14 @@ the qualified reference. CPU-only training is not a practical 500-epoch path.
 
 ## Source transfer rule
 
-Git HEAD alone is not a reproducible source snapshot because the current
-working tree contains material uncommitted and untracked ICP implementation
-files. Transfer one of the following:
+Use the dedicated branch `docs/icp-uno-epoch500-portable-v47`. It commits the
+frozen Python source and text reference implementations directly, while large
+datasets, initial weights and adopted reference checkpoints are stored with
+Git LFS. A successful checkout is not sufficient until `git lfs pull`,
+`git lfs fsck`, and the portability verifier have all succeeded.
 
-1. Preferred: create a dedicated private commit or archive from the complete
-   current working tree and record its archive SHA256.
-2. Acceptable: copy the complete source tree while excluding only `.git`,
-   virtual environments, `data`, `runs`, and unrelated reports; then transfer
-   the required dataset and weights separately.
-
-After transfer, regenerate `SOURCE_INVENTORY.json` and require all listed hashes
-to match. Do not treat a successful `git checkout` as sufficient verification.
+Do not replace a file in `SOURCE_INVENTORY.json` with a similarly named asset
+from another run. Size and SHA256 must both match.
 
 ## Python installation
 
@@ -74,8 +70,8 @@ git lfs pull --include="data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**"
 
 Do not train from LFS pointer text. `git lfs fsck` must pass, and the
 portability verifier must still report 957 cases with a 685/136/136 split.
-The adopted checkpoints and the complete working-tree source snapshot remain
-separate transfer requirements unless they are committed independently.
+The adopted checkpoints and source snapshot are committed on the portable
+branch; they still require Git LFS materialization and hash verification.
 
 Transfer at minimum:
 

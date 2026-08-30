@@ -66,8 +66,12 @@ def _continuity_ratios(
         return float("nan"), float("nan")
     pg_y, pg_x = np.gradient(p, axis=(1, 2), edge_order=1)
     tg_y, tg_x = np.gradient(t, axis=(1, 2), edge_order=1)
-    pg = np.sqrt(pg_x * pg_x + pg_y * pg_y).astype(np.float32)
-    tg = np.sqrt(tg_x * tg_x + tg_y * tg_y).astype(np.float32)
+    # Density gradients can be O(1e20). Squaring them in float32 overflows
+    # even though the gradient magnitude itself is representable. Evaluation
+    # must not turn a finite physical prediction into an infinite continuity
+    # diagnostic, so only this norm reduction is promoted to float64.
+    pg = np.hypot(pg_x.astype(np.float64), pg_y.astype(np.float64))
+    tg = np.hypot(tg_x.astype(np.float64), tg_y.astype(np.float64))
     active = m > 0.5
     if not np.any(active):
         return float("nan"), float("nan")

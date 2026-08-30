@@ -4,3 +4,9 @@ data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/*.npz filter=lfs diff=lfs merge=l
 data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**/*.npz filter=lfs diff=lfs merge=lfs -text
 data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/*.npy filter=lfs diff=lfs merge=lfs -text
 data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/**/*.npy filter=lfs diff=lfs merge=lfs -text
+
+# Portable ICP v47 initialization and frozen reference checkpoints.
+configs/experimental/icp_stage4/conference_continuity_v45/initial_weights/*.npz filter=lfs diff=lfs merge=lfs -text
+experiments/icp_stage4/uno_structure_em_v46/configs/initial_weights/*.npz filter=lfs diff=lfs merge=lfs -text
+runs/icp_conference_continuity_v45/final/conference_sdf/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz filter=lfs diff=lfs merge=lfs -text
+runs/icp_conference_continuity_v45/final/conference_dimension/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz filter=lfs diff=lfs merge=lfs -text

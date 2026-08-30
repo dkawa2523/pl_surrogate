@@ -113,6 +113,9 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         spatial_raw.get("gradient_epsilon", 0.05),
         key_name="supervised.spatial.gradient_epsilon",
     )
+    spatial_targets = tuple(str(name).strip() for name in spatial_raw.get("targets", []))
+    if any(not name for name in spatial_targets) or len(set(spatial_targets)) != len(spatial_targets):
+        raise ValueError("supervised.spatial.targets must contain unique names")
     physical_raw = _dict_or_empty(sup.get("physical_weighting"))
     axisymmetric_volume = bool(physical_raw.get("axisymmetric_volume", False))
     density_source = str(physical_raw.get("density_source", "ne")).strip()
@@ -123,6 +126,57 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError("supervised.physical_weighting.density_weighted_targets must contain names")
     if density_weighted_targets and not density_source:
         raise ValueError("supervised.physical_weighting.density_source must be non-empty")
+    density_decomposition_raw = _dict_or_empty(sup.get("density_decomposition"))
+    density_decomposition_enabled = bool(density_decomposition_raw.get("enabled", False))
+    density_decomposition_targets = tuple(
+        str(name).strip() for name in density_decomposition_raw.get("targets", ["ne", "ni"])
+    )
+    if any(not name for name in density_decomposition_targets) or len(set(density_decomposition_targets)) != len(
+        density_decomposition_targets
+    ):
+        raise ValueError("supervised.density_decomposition.targets must contain unique names")
+    density_shape_weight = float(density_decomposition_raw.get("shape_weight", 1.0))
+    density_inventory_weight = float(density_decomposition_raw.get("inventory_weight", 1.0))
+    density_epsilon_fraction = _positive_finite_float(
+        density_decomposition_raw.get("epsilon_fraction", 1.0e-6),
+        key_name="supervised.density_decomposition.epsilon_fraction",
+    )
+    if any(
+        not np.isfinite(value) or value < 0.0
+        for value in (density_shape_weight, density_inventory_weight)
+    ):
+        raise ValueError("supervised.density_decomposition weights must be finite and >= 0")
+    if density_decomposition_enabled and density_shape_weight + density_inventory_weight <= 0.0:
+        raise ValueError("enabled supervised.density_decomposition requires a positive weight")
+    if density_decomposition_enabled and any(
+        value > 0.0 for value in (gradient_weight, multiscale_weight, boundary_weight)
+    ) and (not spatial_targets or set(spatial_targets) & set(density_decomposition_targets)):
+        raise ValueError(
+            "density_decomposition does not combine with supervised spatial loss terms "
+            "for the same target"
+        )
+
+    derived_raw = _dict_or_empty(sup.get("derived_qoi"))
+    bohm_raw = _dict_or_empty(derived_raw.get("bohm_wafer_profile"))
+    bohm_enabled = bool(bohm_raw.get("enabled", False))
+    bohm_weight = float(bohm_raw.get("weight", 0.0 if not bohm_enabled else 1.0))
+    bohm_layers = int(bohm_raw.get("wafer_layers", 10))
+    bohm_delta = _positive_finite_float(
+        bohm_raw.get("huber_delta", 0.2),
+        key_name="supervised.derived_qoi.bohm_wafer_profile.huber_delta",
+    )
+    bohm_floor = _positive_finite_float(
+        bohm_raw.get("flux_floor", 1.0),
+        key_name="supervised.derived_qoi.bohm_wafer_profile.flux_floor",
+    )
+    bohm_density_key = str(bohm_raw.get("ion_density_key", "ni")).strip()
+    bohm_temperature_key = str(bohm_raw.get("temperature_key", "Te")).strip()
+    if not np.isfinite(bohm_weight) or bohm_weight < 0.0:
+        raise ValueError("supervised.derived_qoi.bohm_wafer_profile.weight must be finite and >= 0")
+    if isinstance(bohm_raw.get("wafer_layers", 10), bool) or bohm_layers < 1:
+        raise ValueError("supervised.derived_qoi.bohm_wafer_profile.wafer_layers must be >= 1")
+    if bohm_enabled and (bohm_weight <= 0.0 or not bohm_density_key or not bohm_temperature_key):
+        raise ValueError("enabled Bohm wafer-profile loss requires positive weight and target names")
 
     return {
         "type": supervised_type,
@@ -143,11 +197,30 @@ def _resolve_supervised_cfg(loss_cfg: dict[str, Any] | None) -> dict[str, Any]:
             "gradient_weight": gradient_weight,
             "multiscale_weight": multiscale_weight,
             "multiscale_scales": multiscale_scales,
+            "targets": spatial_targets,
         },
         "physical_weighting": {
             "axisymmetric_volume": axisymmetric_volume,
             "density_source": density_source,
             "density_weighted_targets": density_weighted_targets,
+        },
+        "density_decomposition": {
+            "enabled": density_decomposition_enabled,
+            "targets": density_decomposition_targets,
+            "shape_weight": density_shape_weight,
+            "inventory_weight": density_inventory_weight,
+            "epsilon_fraction": density_epsilon_fraction,
+        },
+        "derived_qoi": {
+            "bohm_wafer_profile": {
+                "enabled": bohm_enabled,
+                "weight": bohm_weight,
+                "wafer_layers": bohm_layers,
+                "huber_delta": bohm_delta,
+                "flux_floor": bohm_floor,
+                "ion_density_key": bohm_density_key,
+                "temperature_key": bohm_temperature_key,
+            }
         },
     }
 
@@ -351,6 +424,71 @@ def _sanitize_supervised_numpy(
     return pred_safe, target_safe, weights
 
 
+def _density_shape_inventory_numpy(
+    pred: np.ndarray,
+    target: np.ndarray,
+    sw: np.ndarray,
+    *,
+    loss_cfg: dict[str, Any],
+    density_cfg: dict[str, Any],
+    affine: dict[str, float],
+) -> tuple[float, np.ndarray, float, float]:
+    """Return scale-invariant shape/inventory loss and standardized gradient."""
+
+    mean = float(affine.get("mean", float("nan")))
+    scale = float(affine.get("scale", float("nan")))
+    if not np.isfinite(mean) or not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError("density_decomposition requires finite zscore target affine")
+    physical_pred = pred.astype(np.float64) * scale + mean
+    physical_target = target.astype(np.float64) * scale + mean
+    weights = sw.astype(np.float64)
+    denominator = np.maximum(np.sum(weights, axis=(1, 2)), 1.0e-12)
+    pred_mean = np.sum(physical_pred * weights, axis=(1, 2)) / denominator
+    target_mean = np.sum(physical_target * weights, axis=(1, 2)) / denominator
+    reference = max(abs(scale), 1.0)
+    mean_floor = float(density_cfg["epsilon_fraction"]) * reference
+    pred_safe = np.maximum(pred_mean, mean_floor)
+    target_safe = np.maximum(target_mean, mean_floor)
+
+    shape_error = physical_pred / pred_safe[:, None, None] - physical_target / target_safe[:, None, None]
+    shape_map, shape_grad_map = _loss_map_and_grad_numpy(shape_error.astype(np.float32), loss_cfg)
+    shape_loss, shape_grad = _weighted_reduce_numpy(
+        shape_map,
+        shape_grad_map,
+        sw,
+        normalization="sample_mean",
+        weight_denominator="weighted",
+    )
+    shape_grad = shape_grad.astype(np.float64) * scale / pred_safe[:, None, None]
+
+    symmetric_denominator = np.abs(pred_mean) + np.abs(target_mean) + mean_floor
+    inventory_error = 2.0 * (pred_mean - target_mean) / symmetric_denominator
+    inventory_map, inventory_grad_error = _loss_map_and_grad_numpy(
+        inventory_error.astype(np.float32), loss_cfg
+    )
+    inventory_loss = float(np.mean(inventory_map))
+    derivative_error_mean = (
+        2.0 * symmetric_denominator
+        - 2.0 * (pred_mean - target_mean) * np.sign(pred_mean)
+    ) / np.maximum(symmetric_denominator**2, 1.0e-24)
+    inventory_case_grad = (
+        inventory_grad_error.astype(np.float64)
+        * derivative_error_mean
+        / float(max(pred.shape[0], 1))
+    )
+    inventory_grad = (
+        inventory_case_grad[:, None, None]
+        * scale
+        * weights
+        / denominator[:, None, None]
+    )
+    shape_weight = float(density_cfg["shape_weight"])
+    inventory_weight = float(density_cfg["inventory_weight"])
+    total = shape_weight * float(shape_loss) + inventory_weight * inventory_loss
+    grad = shape_weight * shape_grad + inventory_weight * inventory_grad
+    return float(total), grad.astype(np.float32), float(shape_loss), float(inventory_loss)
+
+
 def _require_nonempty_case_weights_numpy(
     weights: np.ndarray,
     *,
@@ -534,6 +672,96 @@ def _multiscale_loss_numpy(
     return float(np.mean(losses)), (np.sum(grads, axis=0) / float(len(grads))).astype(np.float32)
 
 
+def _bohm_wafer_profile_numpy(
+    pred_fields: dict[str, Any],
+    target_fields: dict[str, Any],
+    *,
+    mask: np.ndarray | None,
+    cfg: dict[str, Any],
+    target_affine: dict[str, dict[str, float]] | None,
+) -> tuple[float, dict[str, np.ndarray]]:
+    """Log-Huber loss for the wafer-near radial Bohm-flux profile.
+
+    The profile definition intentionally matches the conference evaluation:
+    average the first ``wafer_layers`` active cells from the low-index wafer
+    side, then compare every radial column.  Using log flux makes the gradient
+    dimensionless and prevents the physical density scale from dominating the
+    ordinary field losses.
+    """
+
+    qoi = dict(cfg["derived_qoi"]["bohm_wafer_profile"])
+    density_key = str(qoi["ion_density_key"])
+    temperature_key = str(qoi["temperature_key"])
+    for name in (density_key, temperature_key):
+        if name not in pred_fields or name not in target_fields:
+            raise ValueError(f"Bohm wafer-profile loss requires target {name!r}")
+        affine = dict((target_affine or {}).get(name, {}))
+        if "mean" not in affine or "scale" not in affine:
+            raise ValueError(f"Bohm wafer-profile loss requires linear affine for {name!r}")
+
+    ni_z = _as_bhw(pred_fields[density_key], key=f"pred_{density_key}")
+    te_z = _as_bhw(pred_fields[temperature_key], key=f"pred_{temperature_key}")
+    ni_true_z = _as_bhw(target_fields[density_key], key=f"target_{density_key}")
+    te_true_z = _as_bhw(target_fields[temperature_key], key=f"target_{temperature_key}")
+    if ni_z.shape != te_z.shape or ni_z.shape != ni_true_z.shape or ni_z.shape != te_true_z.shape:
+        raise ValueError("Bohm wafer-profile inputs must share [B,H,W] shape")
+
+    active = np.ones_like(ni_z, dtype=np.float32) if mask is None else _as_bhw(mask, key="mask")
+    if active.shape[0] == 1 and ni_z.shape[0] > 1:
+        active = np.repeat(active, ni_z.shape[0], axis=0)
+    if active.shape != ni_z.shape:
+        raise ValueError(f"Bohm wafer-profile mask shape mismatch: {active.shape} != {ni_z.shape}")
+    active = (active > 0.5).astype(np.float32)
+    band = active * (np.cumsum(active, axis=1) <= int(qoi["wafer_layers"])).astype(np.float32)
+    counts = np.sum(band, axis=1)
+    valid = counts > 0.0
+    if not np.all(np.any(valid, axis=1)):
+        raise ValueError("Bohm wafer-profile loss has a case without active radial columns")
+    safe_counts = np.maximum(counts, 1.0)
+
+    ni_affine = dict((target_affine or {})[density_key])
+    te_affine = dict((target_affine or {})[temperature_key])
+    ni_raw = ni_z * float(ni_affine["scale"]) + float(ni_affine["mean"])
+    te_raw = te_z * float(te_affine["scale"]) + float(te_affine["mean"])
+    ni_true_raw = ni_true_z * float(ni_affine["scale"]) + float(ni_affine["mean"])
+    te_true_raw = te_true_z * float(te_affine["scale"]) + float(te_affine["mean"])
+    ni = np.maximum(ni_raw, 1.0e8)
+    te = np.maximum(te_raw, 0.05)
+    ni_true = np.maximum(ni_true_raw, 1.0e8)
+    te_true = np.maximum(te_true_raw, 0.05)
+    flux = ni * np.sqrt(te)
+    flux_true = ni_true * np.sqrt(te_true)
+    profile = np.sum(flux * band, axis=1) / safe_counts
+    profile_true = np.sum(flux_true * band, axis=1) / safe_counts
+
+    floor = float(qoi["flux_floor"])
+    error = np.log(profile + floor) - np.log(profile_true + floor)
+    delta = float(qoi["huber_delta"])
+    abs_error = np.abs(error)
+    loss_map = np.where(abs_error <= delta, 0.5 * error**2, delta * (abs_error - 0.5 * delta))
+    deriv = np.where(abs_error <= delta, error, delta * np.sign(error))
+    case_counts = np.maximum(np.sum(valid, axis=1, keepdims=True), 1.0)
+    reduce_weight = valid.astype(np.float32) / case_counts / float(max(ni_z.shape[0], 1))
+    loss = float(np.sum(loss_map * reduce_weight))
+    d_profile = deriv * reduce_weight / (profile + floor)
+    d_flux = d_profile[:, None, :] * band / safe_counts[:, None, :]
+
+    sqrt_te = np.sqrt(te)
+    grad_ni = d_flux * sqrt_te * (ni_raw > 1.0e8) * float(ni_affine["scale"])
+    grad_te = (
+        d_flux
+        * 0.5
+        * ni
+        / np.maximum(sqrt_te, np.sqrt(0.05))
+        * (te_raw > 0.05)
+        * float(te_affine["scale"])
+    )
+    return loss, {
+        density_key: grad_ni.astype(np.float32),
+        temperature_key: grad_te.astype(np.float32),
+    }
+
+
 def compose_supervised_numpy(
     pred_fields: dict[str, Any],
     target_fields: dict[str, Any],
@@ -600,22 +828,37 @@ def compose_supervised_numpy(
                 name=name,
                 component="point loss",
             )
-        loss_map, grad_map = _loss_map_and_grad_numpy((pred - target).astype(np.float32), cfg)
-
-        point_loss, grad = _weighted_reduce_numpy(
-            loss_map,
-            grad_map,
-            sw,
-            normalization=normalization,
-            weight_denominator=sample_mean_weight_denominator,
-            group_ids=group_ids,
-            group_mode=sample_mean_group_mode,
-        )
+        density_cfg = dict(cfg["density_decomposition"])
+        density_enabled = bool(density_cfg["enabled"]) and name in set(density_cfg["targets"])
+        density_shape_loss = 0.0
+        density_inventory_loss = 0.0
+        if density_enabled:
+            point_loss, grad, density_shape_loss, density_inventory_loss = _density_shape_inventory_numpy(
+                pred,
+                target,
+                sw,
+                loss_cfg=cfg,
+                density_cfg=density_cfg,
+                affine=dict((target_affine or {}).get(name, {})),
+            )
+            loss_map = grad_map = None
+        else:
+            loss_map, grad_map = _loss_map_and_grad_numpy((pred - target).astype(np.float32), cfg)
+            point_loss, grad = _weighted_reduce_numpy(
+                loss_map,
+                grad_map,
+                sw,
+                normalization=normalization,
+                weight_denominator=sample_mean_weight_denominator,
+                group_ids=group_ids,
+                group_mode=sample_mean_group_mode,
+            )
         spatial_cfg = dict(cfg["spatial"])
+        spatial_active = not spatial_cfg["targets"] or name in set(spatial_cfg["targets"])
         boundary_loss = 0.0
         gradient_loss = 0.0
         multiscale_loss = 0.0
-        if float(spatial_cfg["boundary_weight"]) > 0.0:
+        if spatial_active and float(spatial_cfg["boundary_weight"]) > 0.0:
             boundary_sw = _boundary_weights_numpy(
                 distance_any,
                 sw,
@@ -632,7 +875,7 @@ def compose_supervised_numpy(
                 group_mode=sample_mean_group_mode,
             )
             grad = grad + float(spatial_cfg["boundary_weight"]) * boundary_grad
-        if float(spatial_cfg["gradient_weight"]) > 0.0:
+        if spatial_active and float(spatial_cfg["gradient_weight"]) > 0.0:
             gradient_loss, gradient_grad = _gradient_loss_numpy(
                 pred,
                 target,
@@ -646,7 +889,7 @@ def compose_supervised_numpy(
                 gradient_epsilon=float(spatial_cfg["gradient_epsilon"]),
             )
             grad = grad + float(spatial_cfg["gradient_weight"]) * gradient_grad
-        if float(spatial_cfg["multiscale_weight"]) > 0.0:
+        if spatial_active and float(spatial_cfg["multiscale_weight"]) > 0.0:
             multiscale_loss, multiscale_grad = _multiscale_loss_numpy(
                 pred,
                 target,
@@ -681,7 +924,14 @@ def compose_supervised_numpy(
         elif fixed_weights_by_var:
             component_factor *= float(fixed_weights_by_var.get(name, 1.0))
         per_var_loss[name] = weighted
-        spatial_enabled = any(
+        if density_enabled:
+            per_var_loss[f"loss_supervised_density_shape_{name}"] = float(
+                density_shape_loss * float(density_cfg["shape_weight"]) * component_factor
+            )
+            per_var_loss[f"loss_supervised_density_inventory_{name}"] = float(
+                density_inventory_loss * float(density_cfg["inventory_weight"]) * component_factor
+            )
+        spatial_enabled = spatial_active and any(
             float(spatial_cfg[key]) > 0.0
             for key in ("boundary_weight", "gradient_weight", "multiscale_weight")
         )
@@ -698,6 +948,20 @@ def compose_supervised_numpy(
             )
         grads[name] = grad.astype(np.float32)
         total += weighted
+    bohm_cfg = dict(cfg["derived_qoi"]["bohm_wafer_profile"])
+    if bool(bohm_cfg["enabled"]):
+        bohm_loss, bohm_grads = _bohm_wafer_profile_numpy(
+            pred_fields,
+            target_fields,
+            mask=mask_arr,
+            cfg=cfg,
+            target_affine=target_affine,
+        )
+        bohm_weight = float(bohm_cfg["weight"])
+        total += bohm_weight * bohm_loss
+        for name, qoi_grad in bohm_grads.items():
+            grads[name] = (grads[name] + bohm_weight * qoi_grad).astype(np.float32)
+        per_var_loss["loss_supervised_qoi_bohm_wafer_profile"] = float(bohm_weight * bohm_loss)
     _append_group_loss_breakdown(per_var_loss, groups=target_groups)
     return float(total), grads, per_var_loss
 
@@ -756,6 +1020,52 @@ def _sanitize_supervised_torch(pred, target, sw, *, name: str):
     pred_safe = torch.where(active, pred, torch.zeros_like(pred))
     target_safe = torch.where(active, target, torch.zeros_like(target))
     return pred_safe, target_safe, sw
+
+
+def _density_shape_inventory_torch(
+    pred,
+    target,
+    sw,
+    *,
+    loss_cfg: dict[str, Any],
+    density_cfg: dict[str, Any],
+    affine: dict[str, float],
+):
+    """Separate density profile shape from its case-wise physical inventory."""
+
+    torch = require_torch()
+    mean = float(affine.get("mean", float("nan")))
+    scale = float(affine.get("scale", float("nan")))
+    if not np.isfinite(mean) or not np.isfinite(scale) or scale <= 0.0:
+        raise ValueError("density_decomposition requires finite zscore target affine")
+    physical_pred = pred * scale + mean
+    physical_target = target * scale + mean
+    denominator = torch.clamp(torch.sum(sw, dim=(1, 2, 3)), min=1.0e-12)
+    pred_mean = torch.sum(physical_pred * sw, dim=(1, 2, 3)) / denominator
+    target_mean = torch.sum(physical_target * sw, dim=(1, 2, 3)) / denominator
+    mean_floor = float(density_cfg["epsilon_fraction"]) * max(abs(scale), 1.0)
+    pred_safe = torch.clamp(pred_mean, min=mean_floor)
+    target_safe = torch.clamp(target_mean, min=mean_floor)
+
+    # Detaching the predicted mean makes this term teach only spatial shape;
+    # the inventory term alone controls the global density response.
+    pred_shape = physical_pred / pred_safe.detach()[:, None, None, None]
+    target_shape = physical_target / target_safe[:, None, None, None]
+    shape = _weighted_reduce_torch(
+        _loss_map_torch(pred_shape, target_shape, loss_cfg),
+        sw,
+        normalization="sample_mean",
+        weight_denominator="weighted",
+    )
+
+    inventory_error = 2.0 * (pred_mean - target_mean) / (
+        torch.abs(pred_mean) + torch.abs(target_mean) + mean_floor
+    )
+    inventory = torch.mean(
+        _loss_map_torch(inventory_error, torch.zeros_like(inventory_error), loss_cfg)
+    )
+    total = float(density_cfg["shape_weight"]) * shape + float(density_cfg["inventory_weight"]) * inventory
+    return total, shape, inventory
 
 
 def _require_nonempty_case_weights_torch(weights, *, name: str, component: str) -> None:
@@ -915,6 +1225,61 @@ def _multiscale_loss_torch(
     return torch.stack(losses).mean()
 
 
+def _bohm_wafer_profile_torch(
+    pred_fields: dict[str, Any],
+    target_fields: Any,
+    *,
+    y_order: list[str],
+    mask: Any | None,
+    cfg: dict[str, Any],
+    target_affine: dict[str, dict[str, float]] | None,
+):
+    torch = require_torch()
+    qoi = dict(cfg["derived_qoi"]["bohm_wafer_profile"])
+    density_key = str(qoi["ion_density_key"])
+    temperature_key = str(qoi["temperature_key"])
+    if density_key not in y_order or temperature_key not in y_order:
+        raise ValueError("Bohm wafer-profile loss requires ion-density and temperature targets")
+    ni = _as_bchw(pred_fields[density_key], key=f"pred_{density_key}")
+    te = _as_bchw(pred_fields[temperature_key], key=f"pred_{temperature_key}", device=ni.device)
+    target = torch.as_tensor(target_fields, dtype=torch.float32, device=ni.device)
+    ni_true = target[:, y_order.index(density_key) : y_order.index(density_key) + 1]
+    te_true = target[:, y_order.index(temperature_key) : y_order.index(temperature_key) + 1]
+    ni_affine = dict((target_affine or {}).get(density_key, {}))
+    te_affine = dict((target_affine or {}).get(temperature_key, {}))
+    if "mean" not in ni_affine or "scale" not in ni_affine or "mean" not in te_affine or "scale" not in te_affine:
+        raise ValueError("Bohm wafer-profile loss requires linear target affines")
+
+    ni_phys = torch.clamp(ni * float(ni_affine["scale"]) + float(ni_affine["mean"]), min=1.0e8)
+    te_phys = torch.clamp(te * float(te_affine["scale"]) + float(te_affine["mean"]), min=0.05)
+    ni_true_phys = torch.clamp(
+        ni_true * float(ni_affine["scale"]) + float(ni_affine["mean"]), min=1.0e8
+    )
+    te_true_phys = torch.clamp(
+        te_true * float(te_affine["scale"]) + float(te_affine["mean"]), min=0.05
+    )
+    active = torch.ones_like(ni_phys) if mask is None else _as_bchw(mask, key="mask", device=ni.device)
+    if int(active.shape[0]) == 1 and int(ni.shape[0]) > 1:
+        active = active.expand(int(ni.shape[0]), -1, -1, -1)
+    active = (active > 0.5).to(dtype=ni.dtype)
+    band = active * (torch.cumsum(active, dim=2) <= int(qoi["wafer_layers"])).to(dtype=ni.dtype)
+    counts = torch.sum(band, dim=2).clamp_min(1.0)
+    valid = torch.sum(band, dim=2) > 0.0
+    flux = ni_phys * torch.sqrt(te_phys)
+    flux_true = ni_true_phys * torch.sqrt(te_true_phys)
+    profile = torch.sum(flux * band, dim=2) / counts
+    profile_true = torch.sum(flux_true * band, dim=2) / counts
+    floor = float(qoi["flux_floor"])
+    error = torch.log(profile + floor) - torch.log(profile_true + floor)
+    delta = float(qoi["huber_delta"])
+    abs_error = torch.abs(error)
+    loss_map = torch.where(abs_error <= delta, 0.5 * error**2, delta * (abs_error - 0.5 * delta))
+    case_loss = torch.sum(torch.where(valid, loss_map, torch.zeros_like(loss_map)), dim=(1, 2)) / torch.sum(
+        valid.to(dtype=loss_map.dtype), dim=(1, 2)
+    ).clamp_min(1.0)
+    return torch.mean(case_loss)
+
+
 def compose_supervised_torch(
     pred_fields: dict[str, Any],
     target_fields: Any,
@@ -1004,14 +1369,34 @@ def compose_supervised_torch(
                 name=name,
                 component="point loss",
             )
-        base_map = _loss_map_torch(pred, target_i, cfg)
-
-        point = _weighted_reduce_torch(base_map, sw, normalization=normalization, weight_denominator=weight_denominator)
+        density_cfg = dict(cfg["density_decomposition"])
+        density_enabled = bool(density_cfg["enabled"]) and name in set(density_cfg["targets"])
+        density_shape = torch.zeros((), dtype=pred.dtype, device=pred.device)
+        density_inventory = torch.zeros((), dtype=pred.dtype, device=pred.device)
+        if density_enabled:
+            point, density_shape, density_inventory = _density_shape_inventory_torch(
+                pred,
+                target_i,
+                sw,
+                loss_cfg=cfg,
+                density_cfg=density_cfg,
+                affine=dict((target_affine or {}).get(name, {})),
+            )
+            base_map = None
+        else:
+            base_map = _loss_map_torch(pred, target_i, cfg)
+            point = _weighted_reduce_torch(
+                base_map,
+                sw,
+                normalization=normalization,
+                weight_denominator=weight_denominator,
+            )
         spatial_cfg = dict(cfg["spatial"])
+        spatial_active = not spatial_cfg["targets"] or name in set(spatial_cfg["targets"])
         boundary = torch.zeros((), dtype=point.dtype, device=point.device)
         gradient = torch.zeros((), dtype=point.dtype, device=point.device)
         multiscale = torch.zeros((), dtype=point.dtype, device=point.device)
-        if float(spatial_cfg["boundary_weight"]) > 0.0:
+        if spatial_active and float(spatial_cfg["boundary_weight"]) > 0.0:
             boundary_sw = _boundary_weights_torch(
                 distance_any,
                 sw,
@@ -1024,7 +1409,7 @@ def compose_supervised_torch(
                 normalization=normalization,
                 weight_denominator=weight_denominator,
             )
-        if float(spatial_cfg["gradient_weight"]) > 0.0:
+        if spatial_active and float(spatial_cfg["gradient_weight"]) > 0.0:
             gradient = _gradient_loss_torch(
                 pred,
                 target_i,
@@ -1036,7 +1421,7 @@ def compose_supervised_torch(
                 gradient_normalization=str(spatial_cfg["gradient_normalization"]),
                 gradient_epsilon=float(spatial_cfg["gradient_epsilon"]),
             )
-        if float(spatial_cfg["multiscale_weight"]) > 0.0:
+        if spatial_active and float(spatial_cfg["multiscale_weight"]) > 0.0:
             multiscale = _multiscale_loss_torch(
                 pred,
                 target_i,
@@ -1066,7 +1451,18 @@ def compose_supervised_torch(
         elif fixed_weights_by_var:
             component_factor *= float(fixed_weights_by_var.get(name, 1.0))
         per_var[name] = float(weighted.detach().cpu().item())
-        spatial_enabled = any(
+        if density_enabled:
+            per_var[f"loss_supervised_density_shape_{name}"] = (
+                float(density_shape.detach().cpu().item())
+                * float(density_cfg["shape_weight"])
+                * component_factor
+            )
+            per_var[f"loss_supervised_density_inventory_{name}"] = (
+                float(density_inventory.detach().cpu().item())
+                * float(density_cfg["inventory_weight"])
+                * component_factor
+            )
+        spatial_enabled = spatial_active and any(
             float(spatial_cfg[key]) > 0.0
             for key in ("boundary_weight", "gradient_weight", "multiscale_weight")
         )
@@ -1088,6 +1484,20 @@ def compose_supervised_torch(
                 * component_factor
             )
         total = total + weighted
+    bohm_cfg = dict(cfg["derived_qoi"]["bohm_wafer_profile"])
+    if bool(bohm_cfg["enabled"]):
+        bohm_loss = _bohm_wafer_profile_torch(
+            pred_fields,
+            target,
+            y_order=y_order,
+            mask=mask_tensor,
+            cfg=cfg,
+            target_affine=target_affine,
+        )
+        total = total + float(bohm_cfg["weight"]) * bohm_loss
+        per_var["loss_supervised_qoi_bohm_wafer_profile"] = float(
+            (float(bohm_cfg["weight"]) * bohm_loss).detach().cpu().item()
+        )
     _append_group_loss_breakdown(per_var, groups=target_groups)
     return total, per_var
 

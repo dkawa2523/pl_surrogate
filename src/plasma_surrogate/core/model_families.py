@@ -6,6 +6,7 @@ from typing import Iterable
 
 from plasma_surrogate.core.model_specs import model_names_by_family, model_names_where
 
+GLOBAL_MLP_FAMILY_MODELS: tuple[str, ...] = model_names_by_family("global_mlp")
 UNET_FAMILY_MODELS: tuple[str, ...] = (
     model_names_by_family("unet")
     + model_names_by_family("unetpp")
@@ -34,6 +35,7 @@ def resolve_single_family_model(*, model_names: Iterable[str], family: Iterable[
 __all__ = [
     "COND_ONLY_TORCH_MODELS",
     "CNO_FAMILY_MODELS",
+    "GLOBAL_MLP_FAMILY_MODELS",
     "GEOM_DEEPONET_SIREN_FAMILY_MODELS",
     "GRID_TORCH_MODELS",
     "MAINLINE_GEOM_PACK_MODELS",

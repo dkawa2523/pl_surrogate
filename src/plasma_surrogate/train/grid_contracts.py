@@ -21,6 +21,7 @@ from plasma_surrogate.core.vector_pack import load_vector_from_pack
 from plasma_surrogate.features.structure_feature_registry import FEATURE_PROFILE_CHANNELS
 from plasma_surrogate.models.heads.role_grouped import (
     GROUPED_OUTPUT_HEAD_MODES,
+    OUTPUT_HEAD_MODE_CAUSAL_EM,
     ROLE_GROUPED_OUTPUT_HEAD_MODELS,
     is_grouped_output_head_mode,
 )
@@ -58,9 +59,12 @@ def validate_unet_like_mainline_contract(
     if require_shared_output_head:
         head_mode = str(dict(dict(model_cfg or {}).get("output_heads", {})).get("mode", "shared")).strip().lower()
         allowed_head_modes = {"shared", *GROUPED_OUTPUT_HEAD_MODES}
+        if model_key == "unet":
+            allowed_head_modes.add(OUTPUT_HEAD_MODE_CAUSAL_EM)
         if head_mode not in allowed_head_modes:
             raise ValueError(
-                f"{cfg_prefix}.model_cfg.output_heads.mode must be shared, role_grouped, or custom_groups for mainline"
+                f"{cfg_prefix}.model_cfg.output_heads.mode must be one of "
+                f"{sorted(allowed_head_modes)} for mainline"
             )
         if is_grouped_output_head_mode(head_mode) and model_key not in ROLE_GROUPED_OUTPUT_HEAD_MODELS:
             raise ValueError(

@@ -26,6 +26,10 @@ from plasma_surrogate.models.mlp.coord_mlp_pod_residual import (
 )
 from plasma_surrogate.models.mlp.coord_mlp_torch import CoordMLPTorch, _normalize_coord_mlp_model_cfg
 from plasma_surrogate.models.mlp.global_mlp import GlobalMLP
+from plasma_surrogate.models.mlp.global_vector_mlp import (
+    GLOBAL_VECTOR_MLP_MODEL_TYPES,
+    GlobalVectorMLP,
+)
 from plasma_surrogate.models.heads.role_grouped import (
     ROLE_GROUPED_OUTPUT_HEAD_MODELS,
     is_grouped_output_head_mode,
@@ -42,6 +46,7 @@ _MODEL_BUILDER = Callable[..., Any]
 
 def _build_global_mlp_family_model(
     *,
+    model_name: str,
     cfg: dict[str, Any],
     input_dim: int,
     grid_shape: tuple[int, int],
@@ -49,7 +54,20 @@ def _build_global_mlp_family_model(
     output_keys: list[str] | None,
     seed: int,
     **_: Any,
-) -> GlobalMLP:
+) -> GlobalMLP | GlobalVectorMLP:
+    model_key = str(model_name).strip().lower()
+    if model_key in GLOBAL_VECTOR_MLP_MODEL_TYPES:
+        return GlobalVectorMLP(
+            model_type=model_key,
+            input_dim=int(input_dim),
+            grid_shape=tuple(grid_shape),
+            out_channels=int(out_channels),
+            output_keys=output_keys,
+            model_cfg=cfg,
+            seed=int(seed),
+        )
+    if model_key != "global_mlp":
+        raise ValueError(f"Unsupported global-MLP family member: {model_name}")
     return GlobalMLP(
         input_dim=int(input_dim),
         grid_shape=tuple(grid_shape),
@@ -199,6 +217,7 @@ def _build_spectral_family_model(
         spectral_cfg=dict(cfg.get("spectral_cfg", {})),
         output_heads=dict(cfg.get("output_heads", {})),
         target_role_schema=dict(cfg.get("target_role_schema", {})),
+        operator_response_cfg=dict(cfg.get("operator_response_cfg", {})),
         seed=int(seed),
         backend=str(cfg.get("backend", "torch")),
     )
@@ -279,6 +298,7 @@ def _build_uno_family_model(
         uno_cfg=normalize_uno_cfg(dict(cfg.get("uno_cfg", {}))),
         output_heads=dict(cfg.get("output_heads", {})),
         target_role_schema=dict(cfg.get("target_role_schema", {})),
+        operator_response_cfg=dict(cfg.get("operator_response_cfg", {})),
         seed=int(seed),
         backend=backend,
     )
@@ -326,6 +346,7 @@ def _build_cno_family_model(
         cno_cfg=normalize_cno_cfg(dict(cfg.get("cno_cfg", {}))),
         output_heads=dict(cfg.get("output_heads", {})),
         target_role_schema=dict(cfg.get("target_role_schema", {})),
+        operator_response_cfg=dict(cfg.get("operator_response_cfg", {})),
         seed=int(seed),
         backend=backend,
     )
@@ -420,6 +441,7 @@ def _build_pod_deeponet_model(
     output_keys: list[str] | None,
     seed: int,
     pod_basis_bundle: PODBasisBundle | None = None,
+    pod_descriptor_normalization_stats: dict[str, Any] | None = None,
     **_: Any,
 ) -> PODDeepONetTorch:
     model_type = str(model_name).strip().lower()
@@ -431,6 +453,7 @@ def _build_pod_deeponet_model(
         output_keys=output_keys,
         pod_basis_bundle=pod_basis_bundle,
         model_cfg=cfg_local,
+        descriptor_normalization_stats=pod_descriptor_normalization_stats,
         seed=int(seed),
         backend=str(dict(cfg).get("backend", "torch")),
         model_type=model_type,
@@ -465,6 +488,7 @@ def build_model_from_name(
     coord_feature_dim: int = 2,
     unet_feature_channels: list[str] | None = None,
     pod_basis_bundle: PODBasisBundle | None = None,
+    pod_descriptor_normalization_stats: dict[str, Any] | None = None,
 ) -> Any:
     """Build a model instance from a public model name."""
 
@@ -492,4 +516,5 @@ def build_model_from_name(
         unet_feature_channels=unet_feature_channels,
         seed=int(seed),
         pod_basis_bundle=pod_basis_bundle,
+        pod_descriptor_normalization_stats=pod_descriptor_normalization_stats,
     )

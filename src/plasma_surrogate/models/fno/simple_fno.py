@@ -12,6 +12,7 @@ from plasma_surrogate.models.heads.role_grouped import (
     build_role_grouped_conv2d_head,
     is_grouped_output_head_mode,
 )
+from plasma_surrogate.models.operator_response import apply_operator_response_adapter
 
 
 class FNOBaseline(_TorchGridFieldBaseline):
@@ -32,6 +33,7 @@ class FNOBaseline(_TorchGridFieldBaseline):
         backend: str = "torch",
         output_heads: dict[str, Any] | None = None,
         target_role_schema: dict[str, Any] | None = None,
+        operator_response_cfg: dict[str, Any] | None = None,
     ):
         super().__init__(
             input_dim=input_dim,
@@ -259,3 +261,4 @@ class FNOBaseline(_TorchGridFieldBaseline):
         )
         self._torch_width = int(width)
         self._torch_layers = int(n_layers)
+        apply_operator_response_adapter(self, operator_response_cfg)

@@ -24,7 +24,11 @@ from plasma_surrogate.core.model_input_policy import (
 )
 from plasma_surrogate.core.model_specs import normalize_model_name
 from plasma_surrogate.eval.metrics import r2_by_var, rmse_by_var
-from plasma_surrogate.models.deeponet.pod_deeponet_torch import fit_pod_basis_from_targets, normalize_pod_deeponet_model_cfg
+from plasma_surrogate.models.deeponet.pod_deeponet_torch import (
+    fit_pod_basis_from_targets,
+    fit_pod_descriptor_train_zscore,
+    normalize_pod_deeponet_model_cfg,
+)
 from plasma_surrogate.models.checkpoint import build_model_from_name
 from plasma_surrogate.train.grid_training import run_grid_torch_train_predict
 from plasma_surrogate.train.model_adapters import (
@@ -404,7 +408,7 @@ def _resolve_case_supervision_splits(
 def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     ctx = rt.ctx
     train_cfg = rt.train_cfg
-    cfg = dict(train_cfg.get("global_mlp", {}))
+    cfg = dict(train_cfg.get(rt.model_name, {}))
     batch_size_cases = int(cfg.get("batch_size_cases", 0))
     shuffle_cases = bool(cfg.get("shuffle_cases", True))
     grad_scale_cfg = dict(cfg.get("grad_scale", {}))
@@ -435,7 +439,7 @@ def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         selection_cfg=dict(cfg.get("selection", {})),
     )
     model = build_model_from_name(
-        model_name="global_mlp",
+        model_name=rt.model_name,
         input_dim=ctx.cond_scaled.shape[1],
         grid_shape=(rt.h, rt.w),
         model_cfg=dict(cfg.get("model_cfg", {})),
@@ -469,6 +473,7 @@ def _run_global_mlp_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         selection_cfg=dict(cfg.get("selection", {})),
         supervision_train=supervision_train,
         supervision_val=supervision_val,
+        cfg_prefix=f"train.{rt.model_name}",
     )
     history = out.history
     steps_per_epoch = int(np.ceil(len(ctx.tr) / max(1, batch_size_cases))) if batch_size_cases > 0 else 1
@@ -589,6 +594,50 @@ def _resolve_pod_descriptor_splits(
     return tuple(rows[split_indices[name]].astype(np.float32) for name in ("train", "val", "test"))
 
 
+def _validate_explicit_pod_descriptor_branch(
+    *,
+    raw_model_cfg: dict[str, Any],
+    normalized_model_cfg: dict[str, Any],
+    desc_train: np.ndarray | None,
+    condition_feature_dim: int,
+    cfg_prefix: str,
+) -> None:
+    """Validate descriptor data whenever a new-style descriptor branch is explicit."""
+
+    branch_raw = raw_model_cfg.get("branch")
+    if not isinstance(branch_raw, dict) or "descriptor" not in branch_raw:
+        # Legacy configs did not declare a branch and consumed the complete
+        # condition-plus-descriptor vector directly.
+        return
+    descriptor_cfg = dict(dict(normalized_model_cfg["branch"])["descriptor"])
+    if desc_train is None:
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch.descriptor requires an active structure descriptor input"
+        )
+    descriptor_rows = np.asarray(desc_train)
+    descriptor_dim = int(descriptor_cfg["dim"])
+    if descriptor_rows.ndim != 2 or int(descriptor_rows.shape[1]) != descriptor_dim:
+        actual = (
+            int(descriptor_rows.shape[1])
+            if descriptor_rows.ndim == 2
+            else f"shape={descriptor_rows.shape}"
+        )
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch.descriptor.dim mismatch: "
+            f"configured={descriptor_dim}, training_descriptor={actual}"
+        )
+    configured_condition_dim = descriptor_cfg.get("condition_dim")
+    if (
+        configured_condition_dim is not None
+        and int(configured_condition_dim) != int(condition_feature_dim)
+    ):
+        raise ValueError(
+            f"{cfg_prefix}.model_cfg.branch.descriptor.condition_dim mismatch: "
+            f"configured={int(configured_condition_dim)}, "
+            f"condition_features={int(condition_feature_dim)}"
+        )
+
+
 def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     ctx = rt.ctx
     train_cfg = rt.train_cfg
@@ -626,6 +675,7 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
     cond_train = np.asarray(ctx.cond_scaled[ctx.tr], dtype=np.float32)
     cond_val = np.asarray(ctx.cond_scaled[ctx.va], dtype=np.float32)
     cond_test = np.asarray(ctx.cond_scaled[ctx.te], dtype=np.float32)
+    desc_train: np.ndarray | None = None
     if pod_descriptor_input is not None:
         dataset_cfg = dict(ctx.run_cfg.get("dataset", {}) or {})
         desc_train, desc_val, desc_test = _resolve_pod_descriptor_splits(
@@ -667,11 +717,33 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         center=bool(basis_cfg_effective["center"]),
         per_var=bool(basis_cfg_effective["per_var"]),
         active_mask=basis_geometry["mask"],
+        energy_threshold=basis_cfg_effective.get("energy_threshold"),
+        min_rank=int(basis_cfg_effective.get("min_rank", 1)),
+        coeff_std_floor_rel=float(basis_cfg_effective.get("coeff_std_floor_rel", 0.0)),
     )
+    pod_model_cfg_raw = dict(cfg.get("model_cfg", {}))
     pod_model_cfg = normalize_pod_deeponet_model_cfg(
-        dict(cfg.get("model_cfg", {})),
+        pod_model_cfg_raw,
         model_type=pod_model_type,
     )
+    descriptor_cfg_effective = dict(dict(pod_model_cfg["branch"])["descriptor"])
+    _validate_explicit_pod_descriptor_branch(
+        raw_model_cfg=pod_model_cfg_raw,
+        normalized_model_cfg=pod_model_cfg,
+        desc_train=desc_train,
+        condition_feature_dim=int(ctx.cond_scaled.shape[1]),
+        cfg_prefix=train_key,
+    )
+    pod_descriptor_normalization_stats = None
+    if str(descriptor_cfg_effective["normalization"]) == "train_zscore":
+        if desc_train is None:
+            raise ValueError(
+                f"{train_key}.model_cfg.branch.descriptor.normalization=train_zscore "
+                "requires an active structure descriptor input"
+            )
+        # Deliberately fit on desc_train only.  Validation and test descriptors
+        # are transformed by the persisted training statistics inside the model.
+        pod_descriptor_normalization_stats = fit_pod_descriptor_train_zscore(desc_train)
     model = build_model_from_name(
         model_name=rt.model_name,
         input_dim=int(cond_train.shape[1]),
@@ -682,6 +754,7 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
         out_channels=len(pod_target_vars),
         output_keys=pod_target_vars,
         pod_basis_bundle=pod_basis_bundle,
+        pod_descriptor_normalization_stats=pod_descriptor_normalization_stats,
     )
     pod_optimizer_cfg = dict(cfg.get("optimizer", {}))
     grid_like_cfg = dict(train_cfg.get("unet_like", {}))
@@ -727,6 +800,11 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
             "basis_fit_scope_effective": str(basis_cfg_effective["fit_scope"]),
             "basis_center_effective": bool(basis_cfg_effective["center"]),
             "basis_per_var_effective": bool(basis_cfg_effective["per_var"]),
+            "basis_energy_threshold_effective": basis_cfg_effective.get("energy_threshold"),
+            "basis_min_rank_effective": int(basis_cfg_effective.get("min_rank", 1)),
+            "basis_coeff_std_floor_rel_effective": float(
+                basis_cfg_effective.get("coeff_std_floor_rel", 0.0)
+            ),
             "selection_mode_effective": str(pod_selection_cfg.get("mode", "last")).strip().lower(),
             "selection_weights_effective": dict(pod_selection_cfg.get("weights", {})),
             "optimizer_effective": {
@@ -736,6 +814,14 @@ def _run_pod_deeponet_lane(rt: TrainLaneRuntime) -> TrainLaneResult:
                 "warmup_epochs": int(max(int(pod_optimizer_cfg.get("warmup_epochs", 0)), 0)),
             },
             "model_cfg_effective": dict(pod_model_cfg),
+            "descriptor_normalization_effective": str(
+                descriptor_cfg_effective["normalization"]
+            ),
+            "descriptor_normalization_fit_scope_effective": (
+                "train_only"
+                if str(descriptor_cfg_effective["normalization"]) == "train_zscore"
+                else "not_applicable"
+            ),
             DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY: int(
                 pod_descriptor_meta[DEEPONET_POD_DESCRIPTOR_DIM_EFFECTIVE_KEY]
             ),

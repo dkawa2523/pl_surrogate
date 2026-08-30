@@ -42,14 +42,45 @@ def _build_unetpp_modules(
     output_keys: list[str],
     target_groups: dict[str, Any],
     group_options: dict[str, Any] | None = None,
+    architecture: str = "unetpp",
+    response_scale_cfg: dict[str, Any] | None = None,
+    mask_channel_index: int | None = None,
 ):
+    response_cfg = dict(response_scale_cfg or {})
+    radial_padding_mode = str(response_cfg.get("radial_padding_mode", "zero"))
+    downsampling_stem = str(response_cfg.get("downsampling_stem", "fixed_area_v1")).strip().lower()
+
+    class _AxisymmetricNeumannConv2d(nn.Module):
+        def __init__(self, in_channels: int, out_channels: int, *, stride: int = 1):
+            super().__init__()
+            self.conv = nn.Conv2d(
+                in_channels, out_channels, kernel_size=3, stride=int(stride), padding=0
+            )
+
+        @property
+        def weight(self):
+            return self.conv.weight
+
+        def forward(self, value):
+            reflected = value[..., :1]
+            padded = torch.cat((reflected, value), dim=-1)
+            padded = nn.functional.pad(padded, (0, 1, 1, 1), mode="constant", value=0.0)
+            return self.conv(padded)
+
+    def _conv3(in_channels: int, out_channels: int, *, stride: int = 1):
+        if radial_padding_mode == "axisymmetric_neumann":
+            return _AxisymmetricNeumannConv2d(in_channels, out_channels, stride=stride)
+        return nn.Conv2d(
+            in_channels, out_channels, kernel_size=3, stride=int(stride), padding=1
+        )
+
     class _DoubleConv(nn.Module):
         def __init__(self, in_channels: int, out_channels: int):
             super().__init__()
             self.block = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+                _conv3(in_channels, out_channels),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+                _conv3(out_channels, out_channels),
                 nn.ReLU(inplace=True),
             )
 
@@ -60,7 +91,7 @@ def _build_unetpp_modules(
         def __init__(self, in_channels: int, out_channels: int):
             super().__init__()
             self.block = nn.Sequential(
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=2, padding=1),
+                _conv3(in_channels, out_channels, stride=2),
                 nn.ReLU(inplace=True),
             )
 
@@ -76,7 +107,7 @@ def _build_unetpp_modules(
                 self.refine = None
             else:
                 self.up = nn.Upsample(scale_factor=2.0, mode="bilinear", align_corners=False)
-                self.refine = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
+                self.refine = _conv3(in_channels, out_channels)
 
         def forward(self, x, size: tuple[int, int]):
             y = self.up(x)
@@ -105,7 +136,50 @@ def _build_unetpp_modules(
         def __init__(self):
             super().__init__()
             self.mode = str(head_mode)
-            if is_grouped_output_head_mode(self.mode):
+            self.response_scale = str(architecture) == "response_scale"
+            if self.response_scale:
+                if self.mode != "shared":
+                    raise ValueError("UNet++ response_scale architecture requires output_heads.mode=shared")
+                if with_rho_eff_head:
+                    raise ValueError("UNet++ response_scale architecture does not support rho_eff head")
+                required = {"ne", "ni", "Te", "phi"}
+                if set(output_keys) != required or len(output_keys) != 4:
+                    raise ValueError(
+                        "UNet++ response_scale architecture requires output_keys to contain exactly ne, ni, Te, phi"
+                    )
+                target_affine = dict(response_cfg.get("target_affine", {}) or {})
+                means: list[float] = []
+                scales: list[float] = []
+                for name in ("ne", "ni"):
+                    affine = dict(target_affine.get(name, {}) or {})
+                    mean = float(affine.get("mean", float("nan")))
+                    scale = float(affine.get("scale", float("nan")))
+                    if not np.isfinite(mean) or not np.isfinite(scale) or scale <= 0.0:
+                        raise ValueError(f"UNet++ response_scale requires finite positive target affine for {name}")
+                    means.append(mean)
+                    scales.append(scale)
+                imbalance = float(response_cfg.get("density_imbalance_fraction", 0.05))
+                if not np.isfinite(imbalance) or not (0.0 <= imbalance < 1.0):
+                    raise ValueError("UNet++ response_scale density_imbalance_fraction must be in [0,1)")
+                self.imbalance_fraction = imbalance
+                self.density_shape = nn.Conv2d(base_ch, 1, kernel_size=1)
+                self.density_imbalance = nn.Conv2d(base_ch, 1, kernel_size=1)
+                self.density_amplitude = nn.Sequential(
+                    nn.AdaptiveAvgPool2d(1), nn.Conv2d(base_ch, 1, kernel_size=1)
+                )
+                self.other_head = nn.Conv2d(base_ch, 2, kernel_size=1)
+                self.register_buffer(
+                    "density_means", torch.tensor(means, dtype=torch.float32).reshape(1, 2, 1, 1)
+                )
+                self.register_buffer(
+                    "density_scales", torch.tensor(scales, dtype=torch.float32).reshape(1, 2, 1, 1)
+                )
+                self.register_buffer(
+                    "density_reference_scale", torch.tensor(float(np.mean(scales)), dtype=torch.float32)
+                )
+                self.out = None
+                self.role_grouped = None
+            elif is_grouped_output_head_mode(self.mode):
                 self.out = None
                 self.role_grouped = build_role_grouped_conv2d_head(
                     torch=torch,
@@ -119,12 +193,37 @@ def _build_unetpp_modules(
                 self.out = nn.Conv2d(base_ch, out_ch + (1 if with_rho_eff_head else 0), kernel_size=1)
                 self.role_grouped = None
 
-        def forward(self, feat):
+        def forward(self, feat, mask=None, full_size=None):
+            if self.response_scale:
+                if mask is None or full_size is None:
+                    raise RuntimeError("UNet++ response_scale head requires plasma mask and full grid size")
+                low_size = (max(int(full_size[0]) // 4, 1), max(int(full_size[1]) // 4, 1))
+                low_feat = nn.functional.interpolate(feat, size=low_size, mode="area")
+                low_mask = nn.functional.interpolate(mask, size=low_size, mode="area").clamp(0.0, 1.0)
+                positive_shape = nn.functional.softplus(self.density_shape(low_feat)) + 1.0e-6
+                normalizer = torch.sum(positive_shape * low_mask, dim=(2, 3), keepdim=True) / torch.clamp(
+                    torch.sum(low_mask, dim=(2, 3), keepdim=True), min=1.0
+                )
+                shape = positive_shape / torch.clamp(normalizer, min=1.0e-6)
+                amplitude = nn.functional.softplus(self.density_amplitude(low_feat)) + 1.0e-6
+                common = self.density_reference_scale * amplitude * shape
+                imbalance = self.imbalance_fraction * torch.tanh(self.density_imbalance(low_feat))
+                physical = torch.cat((common * (1.0 - imbalance), common * (1.0 + imbalance)), dim=1)
+                density = (physical - self.density_means) / self.density_scales
+                other = self.other_head(low_feat)
+                low = low_feat.new_empty((low_feat.shape[0], len(output_keys), *low_size))
+                low[:, output_keys.index("ne") : output_keys.index("ne") + 1] = density[:, 0:1]
+                low[:, output_keys.index("ni") : output_keys.index("ni") + 1] = density[:, 1:2]
+                low[:, output_keys.index("Te") : output_keys.index("Te") + 1] = other[:, 0:1]
+                low[:, output_keys.index("phi") : output_keys.index("phi") + 1] = other[:, 1:2]
+                return nn.functional.interpolate(low, size=full_size, mode="bilinear", align_corners=False)
             if self.role_grouped is not None:
                 return self.role_grouped(feat)
             return self.out(feat)
 
         def step_reference(self):
+            if self.response_scale:
+                return self.other_head.weight
             if self.role_grouped is not None:
                 return self.role_grouped.step_reference()
             return self.out.weight
@@ -132,7 +231,18 @@ def _build_unetpp_modules(
     class _UNetPPModel(nn.Module):
         def __init__(self):
             super().__init__()
-            self.x00 = _DoubleConv(in_ch, base_ch)
+            self.response_stem = None
+            if str(architecture) == "response_scale" and downsampling_stem == "learned_stride2_v1":
+                self.response_stem = nn.Sequential(
+                    _conv3(in_ch, base_ch, stride=2),
+                    nn.GELU(),
+                    _conv3(base_ch, base_ch, stride=2),
+                    nn.GELU(),
+                )
+                x00_in_ch = base_ch
+            else:
+                x00_in_ch = in_ch
+            self.x00 = _DoubleConv(x00_in_ch, base_ch)
             self.down0 = _Downsample(base_ch, mid_ch)
             self.x10 = _DoubleConv(mid_ch, mid_ch)
             self.down1 = _Downsample(mid_ch, bot_ch)
@@ -159,7 +269,24 @@ def _build_unetpp_modules(
                 self.gate_x01_from_x11 = None
 
         def forward(self, x):
-            x00 = self.x00(x)
+            full_size = x.shape[-2:]
+            model_input = x
+            response_mask = None
+            if str(architecture) == "response_scale":
+                native_size = (max(int(full_size[0]) // 4, 4), max(int(full_size[1]) // 4, 4))
+                if mask_channel_index is not None:
+                    response_mask = nn.functional.interpolate(
+                        x[:, mask_channel_index : mask_channel_index + 1], size=native_size, mode="area"
+                    )
+                if self.response_stem is not None:
+                    model_input = self.response_stem(x)
+                    if model_input.shape[-2:] != native_size:
+                        model_input = nn.functional.interpolate(
+                            model_input, size=native_size, mode="bilinear", align_corners=False
+                        )
+                else:
+                    model_input = nn.functional.interpolate(x, size=native_size, mode="area")
+            x00 = self.x00(model_input)
             x10 = self.x10(self.down0(x00))
             x20 = self.x20(self.down1(x10))
 
@@ -175,7 +302,10 @@ def _build_unetpp_modules(
             skip_x00_for_x02 = self.gate_x00_from_x11(x00, up_11_to_00) if self.attention_enabled else x00
             skip_x01_for_x02 = self.gate_x01_from_x11(x01, up_11_to_00) if self.attention_enabled else x01
             x02 = self.x02(torch.cat([skip_x00_for_x02, skip_x01_for_x02, up_11_to_00], dim=1))
-            return self.head(x02)
+            mask = response_mask
+            if str(architecture) != "response_scale" and mask_channel_index is not None:
+                mask = model_input[:, mask_channel_index : mask_channel_index + 1]
+            return self.head(x02, mask=mask, full_size=full_size)
 
         def step_reference(self):
             return self.x00.block[0].weight, self.head.step_reference()
@@ -245,6 +375,28 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
         torch = require_torch()
         nn = torch.nn
         cfg = dict(conv_cfg or {})
+        architecture = str(cfg.get("architecture", "unetpp")).strip().lower()
+        if architecture not in {"unetpp", "response_scale"}:
+            raise ValueError(
+                f"{self._config_prefix}.model_cfg.conv_cfg.architecture must be one of: response_scale, unetpp"
+            )
+        response_scale_cfg = dict(cfg.get("response_scale_cfg", {}) or {})
+        downsampling_stem = str(
+            response_scale_cfg.get("downsampling_stem", "fixed_area_v1")
+        ).strip().lower()
+        if downsampling_stem not in {"fixed_area_v1", "learned_stride2_v1"}:
+            raise ValueError(
+                f"{self._config_prefix}.model_cfg.conv_cfg.response_scale_cfg.downsampling_stem "
+                "must be one of: fixed_area_v1, learned_stride2_v1"
+            )
+        radial_padding_mode = str(
+            response_scale_cfg.get("radial_padding_mode", "zero")
+        ).strip().lower()
+        if radial_padding_mode not in {"zero", "axisymmetric_neumann"}:
+            raise ValueError(
+                f"{self._config_prefix}.model_cfg.conv_cfg.response_scale_cfg.radial_padding_mode "
+                "must be one of: axisymmetric_neumann, zero"
+            )
         base_channels = int(cfg.get("base_channels", 32))
         if base_channels <= 0:
             raise ValueError(f"{self._config_prefix}.model_cfg.conv_cfg.base_channels must be > 0")
@@ -295,6 +447,13 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
             output_keys=list(self.output_keys),
             target_groups=dict(self.target_groups),
             group_options=dict(getattr(self, "output_head_group_options", {}) or {}),
+            architecture=architecture,
+            response_scale_cfg=response_scale_cfg,
+            mask_channel_index=(
+                self.input_dim + self.input_feature_channels.index("mask_plasma")
+                if "mask_plasma" in self.input_feature_channels
+                else None
+            ),
         )
         self._ensure_net_device()
         self.net.train()
@@ -306,11 +465,15 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
         self._torch_attention_enabled = bool(attention_enabled)
         self._torch_attention_reduction = int(attention_reduction)
         self._torch_attention_gate_activation = str(gate_activation)
+        self._torch_architecture = str(architecture)
+        self._torch_response_scale_cfg = dict(response_scale_cfg)
         self._torch_conv_cfg = {
             "base_channels": int(base_channels),
             "depth": int(depth),
             "upsample_mode": str(mode_effective),
             "nested_skip": bool(nested_skip),
+            "architecture": str(architecture),
+            "response_scale_cfg": dict(response_scale_cfg),
             "attention_cfg": {
                 "enabled": bool(attention_enabled),
                 "reduction": int(attention_reduction),
@@ -328,7 +491,15 @@ class UNetPPBaseline(_TorchSpatialFieldMixin):
         self.model_type = "unetpp_attn" if attention_enabled else "unetpp"
         self._spatial_label = self.model_type
         self._config_prefix = f"train.{self.model_type}"
-        self.head_arch_version = "conv_unetpp_attn_v1" if attention_enabled else "conv_unetpp_v1"
+        self.head_arch_version = (
+            "response_scale_unetpp_attn_v1"
+            if architecture == "response_scale" and attention_enabled
+            else (
+                "response_scale_unetpp_v1"
+                if architecture == "response_scale"
+                else ("conv_unetpp_attn_v1" if attention_enabled else "conv_unetpp_v1")
+            )
+        )
 
     def _torch_step_reference(self):
         return self.net.step_reference()
