@@ -1,0 +1,126 @@
+{
+  "schema_version": 1,
+  "study_id": "icp_uno_epoch500_four_model_v47",
+  "status": "protocol_frozen_implementation_not_started",
+  "created": "2026-08-31",
+  "isolation": {
+    "source_root": "experiments/icp_stage4/uno_epoch500_four_model_protocol_v47",
+    "run_root": "runs/icp_uno_epoch500_four_model_v47",
+    "report_root": "reports/icp_conference_materials/icp_uno_epoch500_four_model_v47",
+    "forbidden_write_roots": [
+      "experiments/icp_stage4/conference_continuity_v45",
+      "experiments/icp_stage4/uno_structure_em_v46",
+      "runs/icp_conference_continuity_v45",
+      "runs/icp_uno_structure_em_v46"
+    ]
+  },
+  "dataset": {
+    "root": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45",
+    "case_count": 957,
+    "split": {
+      "train": 685,
+      "validation": 136,
+      "test": 136
+    },
+    "unknown_evaluation": {
+      "unknown": 75,
+      "anchors": 25,
+      "families": [
+        "unknown_gap_topology",
+        "unseen_rank_height_size",
+        "coupled_transform"
+      ]
+    }
+  },
+  "training": {
+    "seed": 1237,
+    "epochs": 500,
+    "sequential": true,
+    "early_stopping": false,
+    "batch_size_cases": 16,
+    "optimizer": {
+      "type": "adamw",
+      "lr": 0.0003,
+      "weight_decay": 0.0001,
+      "betas": [0.9, 0.999],
+      "eps": 1e-8,
+      "schedule": "cosine"
+    },
+    "recovery_interval_epochs": 25,
+    "models_in_order": [
+      "formal_sdf_500",
+      "formal_dimension_500",
+      "abc_sdf_500",
+      "abc_dimension_p_500"
+    ]
+  },
+  "models": {
+    "formal_sdf_500": {
+      "representation": "actual_union_sdf_plus_count_neutral_source",
+      "condition_channels": 2,
+      "spatial_channels": 7
+    },
+    "formal_dimension_500": {
+      "representation": "five_regular_geometry_dimensions_plus_two_process_scalars",
+      "condition_channels": 7,
+      "spatial_channels": 5
+    },
+    "abc_sdf_500": {
+      "representation": "actual_structure_maps_plus_actual_structure_unit_vacuum_em",
+      "condition_channels": 2,
+      "spatial_channels": 14,
+      "architecture": [
+        "multiresolution",
+        "separate_lifting",
+        "adaptive_local_global"
+      ]
+    },
+    "abc_dimension_p_500": {
+      "representation": "five_broadcast_dimensions_plus_dimension_reconstructed_unit_vacuum_em",
+      "actual_structure_inputs_allowed": false,
+      "condition_channels": 2,
+      "spatial_channels": 14,
+      "architecture": [
+        "multiresolution",
+        "separate_lifting",
+        "adaptive_local_global"
+      ]
+    }
+  },
+  "optimization": {
+    "seed": 4099,
+    "tracks": [
+      "matched_regular_layout_all_four_models",
+      "expressive_independent_coils_sdf_models_with_dimension_regular_reference"
+    ],
+    "primary_objective": "bohm_max_local_deviation_percent",
+    "requires_comsol_confirmation": true,
+    "regular_bounds": {
+      "llcoil": [0.55344, 1.44492],
+      "rrc": [2.4933, 9.52599],
+      "rrce": [20.5964, 29.3805],
+      "zzc": [0.29864, 4.69076],
+      "nncoil": [2, 3, 4, 5, 6],
+      "min_gap_fraction": 0.2
+    },
+    "fixed_center_operation": {
+      "pp": 1758.995,
+      "pp0": 0.017931
+    }
+  },
+  "conference_figures": [
+    "00_direct_unknown_field_comparison",
+    "01_wafer_bohm_profiles",
+    "02_unknown75_error_distribution",
+    "03_error_by_structure_family",
+    "04_structural_response_recovery",
+    "05_epoch500_learning_audit",
+    "06_matched_regular_optimization",
+    "07_optimized_geometry_comsol_profile",
+    "08_regular_vs_expressive_design_freedom"
+  ],
+  "estimated_wall_time": {
+    "pure_training_hours": [105, 108],
+    "full_workflow_days": [5, 6]
+  }
+}

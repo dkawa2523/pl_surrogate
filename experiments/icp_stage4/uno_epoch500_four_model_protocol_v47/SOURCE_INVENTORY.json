@@ -1,0 +1,81 @@
+{
+  "study_id": "icp_uno_epoch500_four_model_v47",
+  "inventory_date": "2026-08-31",
+  "git_head": "ad5ca0854c2e754b1193b67ef921ad791f3e4bfa",
+  "git_head_is_sufficient": false,
+  "warning": "The working tree contains material uncommitted and untracked ICP implementation files. Transfer the complete frozen working-tree source.",
+  "files": [
+    {
+      "path": "requirements-cuda-cu128-py310.txt",
+      "bytes": 174,
+      "sha256": "83298356EDD11CFE7807963D824D1644DCB60B28878DA515BA7DF790CD79298E"
+    },
+    {
+      "path": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/index.csv",
+      "bytes": 218750,
+      "sha256": "AECE11604552AA861A5250370901DA7FEC441B0AF88687F3037593372A05B691"
+    },
+    {
+      "path": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/split_membership.json",
+      "bytes": 30456,
+      "sha256": "69F6D3A47FCBC8701B758F7685A664DA95AC0FE27D3E081A06751CF69D16315F"
+    },
+    {
+      "path": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45/design_metadata_v43.csv",
+      "bytes": 106175,
+      "sha256": "FDAF26EE9D8BDFF47D2B0EFFB2064194FC8AFA05A45350413F0542C7BD5DBAC7"
+    },
+    {
+      "path": "configs/experimental/icp_stage4/conference_continuity_v45/final/conference_sdf/seed_1237.yaml",
+      "bytes": 10882,
+      "sha256": "BC844341307BB66F34120B737058A984B6897A9AFA6341D3C4C692319A16ABA3"
+    },
+    {
+      "path": "configs/experimental/icp_stage4/conference_continuity_v45/final/conference_dimension/seed_1237.yaml",
+      "bytes": 10573,
+      "sha256": "317AED3E254962EF184CA45ACCAC22D5B8056ECE920A9B8178FB1B861E23153F"
+    },
+    {
+      "path": "configs/experimental/icp_stage4/conference_continuity_v45/initial_weights/conference_sdf_seed1237.npz",
+      "bytes": 79253084,
+      "sha256": "A8FA9C89ACE3778EDE82A49FD32181508CFDEB4D0512965EAC6FDA34361F0AC3"
+    },
+    {
+      "path": "configs/experimental/icp_stage4/conference_continuity_v45/initial_weights/conference_dimension_seed1237.npz",
+      "bytes": 79244861,
+      "sha256": "7A37F0D0CC0FD33E3FB020429C8C0DDBB1C308D5EFC52D1D2B2A68B255759863"
+    },
+    {
+      "path": "experiments/icp_stage4/uno_structure_em_v46/experimental_uno.py",
+      "bytes": 29212,
+      "sha256": "9AC2A9E498E0B131070CC9F62F5291F56283B330EE887C21DD8000A7357535E1"
+    },
+    {
+      "path": "experiments/icp_stage4/uno_structure_em_v46/run_entry.py",
+      "bytes": 7184,
+      "sha256": "BC2B26F2E33B8903B5E2308717DFA8F89754377037EAC58D8C12A33F9577B302"
+    },
+    {
+      "path": "experiments/icp_stage4/uno_structure_em_v46/configs/final/ABC_adaptive_mix/seed_1237.yaml",
+      "bytes": 12437,
+      "sha256": "060D95211E6346135BCF307BF162FD59AD187EE68E520D07E8F146093C444267"
+    },
+    {
+      "path": "experiments/icp_stage4/uno_structure_em_v46/configs/initial_weights/ABC_adaptive_mix_seed1237.npz",
+      "bytes": 111299875,
+      "sha256": "EF61DA02F913E2D30A558527967E9517DD80A8412C67FD1C604C62322F8265F3"
+    }
+  ],
+  "formal_reference_checkpoints": [
+    {
+      "model": "formal_sdf",
+      "path": "runs/icp_conference_continuity_v45/final/conference_sdf/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz",
+      "sha256": "DB8568A958D7D1A2208C036F27B9B22EB93615008012D0C72E4FF642946FAAC1"
+    },
+    {
+      "model": "formal_dimension",
+      "path": "runs/icp_conference_continuity_v45/final/conference_dimension/seed_1237/models/u_no/eval_protocol/interp/checkpoints/weights.npz",
+      "sha256": "A87AADB88C3FE383BC2B2BB27F306DCC8BBA5735E5C4F1BA2796559C856B04FF"
+    }
+  ]
+}

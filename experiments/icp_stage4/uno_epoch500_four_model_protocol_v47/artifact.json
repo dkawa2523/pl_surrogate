@@ -1,0 +1,178 @@
+{
+  "surface": "report",
+  "manifest": {
+    "version": 1,
+    "surface": "report",
+    "title": "ICP UNO 500-Epoch Four-Model Portable Execution Specification",
+    "description": "A frozen, isolated hand-off contract for four-model training, evaluation, optimization and conference output.",
+    "generatedAt": "2026-08-30T15:00:00Z",
+    "filters": [],
+    "cards": [],
+    "charts": [
+      {
+        "id": "training_time_chart",
+        "title": "Estimated 500-epoch training time by model",
+        "subtitle": "Existing measured throughput on one RTX 5060 Ti; ABC estimates are about 41.5 hours per model.",
+        "type": "bar",
+        "dataset": "execution_plan",
+        "sourceId": "portable_manifest",
+        "valueFormat": "number",
+        "encodings": {
+          "x": {"field": "model", "type": "nominal", "label": "Model"},
+          "y": {"field": "estimated_hours", "type": "quantitative", "label": "Estimated training time [hours]"},
+          "tooltip": [
+            {"field": "representation", "type": "nominal", "label": "Information source"},
+            {"field": "estimated_hours", "type": "quantitative", "label": "Hours", "format": "number"}
+          ]
+        }
+      }
+    ],
+    "tables": [
+      {
+        "id": "execution_plan_table",
+        "title": "Sequential execution plan",
+        "subtitle": "One GPU, seed 1237, 500 completed epochs per model; estimates use existing measured runs.",
+        "dataset": "execution_plan",
+        "sourceId": "portable_manifest",
+        "defaultSort": {
+          "field": "order",
+          "direction": "asc"
+        },
+        "columns": [
+          {"field": "order", "label": "Order", "type": "number"},
+          {"field": "model", "label": "Model", "type": "text"},
+          {"field": "representation", "label": "Information source", "type": "text"},
+          {"field": "estimated_hours", "label": "Estimated training hours", "type": "number"}
+        ]
+      }
+    ],
+    "sources": [
+      {
+        "id": "portable_manifest",
+        "label": "Frozen v47 portability manifest",
+        "path": "PORTABILITY_MANIFEST.json",
+        "query": {
+          "engine": "duckdb",
+          "language": "sql",
+          "description": "Materializes the reviewed model order, information source and 500-epoch wall-time planning values recorded in the portability manifest.",
+          "sql": "SELECT * FROM (VALUES (1, 'Formal SDF', 'Actual union SDF + mean source', 12.61), (2, 'Formal Dimension', 'Five geometry + two process scalars', 10.51), (3, 'ABC-SDF', 'Actual structure maps + actual-structure vacuum EM', 41.55), (4, 'ABC-Dimension-P', 'Broadcast dimensions + dimension-reconstructed vacuum EM', 41.50)) AS execution_plan(order_id, model, representation, estimated_hours) ORDER BY order_id",
+          "executed_at": "2026-08-30T15:00:00Z",
+          "metric_definitions": {
+            "estimated_hours": "Existing measured elapsed time divided by completed epochs and multiplied by 500; ABC-Dimension-P is architecture-matched to ABC-SDF and remains an estimate until run."
+          },
+          "filters": {
+            "training_seed": 1237,
+            "epochs": 500,
+            "execution": "sequential"
+          }
+        }
+      },
+      {
+        "id": "model_contract",
+        "label": "Four-model fairness contract",
+        "path": "docs/01_MODEL_COMPARISON_CONTRACT.md"
+      },
+      {
+        "id": "training_runbook",
+        "label": "500-epoch training runbook",
+        "path": "docs/03_TRAINING_RUNBOOK.md"
+      },
+      {
+        "id": "evaluation_protocol",
+        "label": "Evaluation and optimization protocol",
+        "path": "docs/04_EVALUATION_AND_OPTIMIZATION.md"
+      },
+      {
+        "id": "figure_specification",
+        "label": "Conference figure specification",
+        "path": "docs/05_CONFERENCE_FIGURES.md"
+      }
+    ],
+    "blocks": [
+      {
+        "id": "title",
+        "type": "markdown",
+        "body": "# ICP UNO 500-Epoch Four-Model Portable Execution Specification"
+      },
+      {
+        "id": "technical_summary",
+        "type": "markdown",
+        "sourceId": "portable_manifest",
+        "body": "## The protocol is frozen, isolated, and ready for implementation hand-off\n\nThe study trains formal SDF, formal Dimension, ABC-SDF, and an architecture-matched ABC-Dimension-P control for 500 completed epochs each. It reserves separate paths, forbids writes into adopted v45/v46 assets, and defines evaluation, two optimization tracks, COMSOL confirmation, recovery and nine conference figures. Existing measurements imply about 105-108 hours of pure sequential training and five to six days for the full workflow. This document records specifications only; it does not claim that the 500-epoch runs have started or completed."
+      },
+      {
+        "id": "execution_answer",
+        "type": "markdown",
+        "sourceId": "model_contract",
+        "body": "## The ABC comparison isolates structure information rather than model capacity\n\nABC-SDF receives actual structure maps and actual-structure unit-current vacuum fields. ABC-Dimension-P replaces the five structure maps with five broadcast dimensions and derives its four vacuum-field channels only from the regular geometry reconstructed from those dimensions. Both ABC models keep two process conditions, fourteen spatial channels, the same adaptive local/global UNO and an asserted equal parameter count."
+      },
+      {
+        "id": "execution_table_intro",
+        "type": "markdown",
+        "sourceId": "training_runbook",
+        "body": "## Sequential execution is required for reproducible timing and GPU state\n\nRun one model at a time in the listed order. The estimates below are planning values, not completed 500-epoch measurements; the final report must replace them with recorded elapsed time."
+      },
+      {
+        "id": "training_time_chart_block",
+        "type": "chart",
+        "chartId": "training_time_chart"
+      },
+      {
+        "id": "execution_table",
+        "type": "table",
+        "tableId": "execution_plan_table"
+      },
+      {
+        "id": "scope_data",
+        "type": "markdown",
+        "sourceId": "portable_manifest",
+        "body": "## The evidence population and metrics are fixed before training\n\nAll models use the same 957-case dataset and 685/136/136 split. The structural test contains exactly 75 unknown structures and 25 matched regular anchors. Primary audience-facing measures are physical ion-density relative L2, wafer Bohm-profile relative L2, Bohm-uniformity error, and unknown-minus-anchor structural response. COMSOL response arrays may be used as truth only and never as model inputs."
+      },
+      {
+        "id": "methodology",
+        "type": "markdown",
+        "sourceId": "evaluation_protocol",
+        "body": "## Optimization is split into matched and expressive design spaces\n\nTrack A lets all four models search the same regular five-dimension family under one budget and one feasibility definition. Track B lets SDF models search independent coil placement, height and size while Dimension models remain a regular-layout reference. The top distinct candidates must be rerun in COMSOL; surrogate rankings alone do not establish an optimization result."
+      },
+      {
+        "id": "figures",
+        "type": "markdown",
+        "sourceId": "figure_specification",
+        "body": "## Conference figures lead with fields, Bohm profiles, and all-case distributions\n\nThe required figure set starts with a direct geometry/COMSOL/four-model field comparison, then shows wafer Bohm profiles and the error distribution over all 75 unknown cases. Family, structural-response, learning-curve and optimization figures provide robustness and mechanism checks. No result figure is included here because the 500-epoch runs do not yet exist."
+      },
+      {
+        "id": "limitations",
+        "type": "markdown",
+        "body": "## Limitations remain visible\n\nThis is a one-seed high-budget comparison, not a seed-variance study. The workspace contains uncommitted implementation state, so Git HEAD alone cannot reproduce it. ABC input semantics require a declared initialization mapping. Five-day runs also require optimizer, scheduler and RNG recovery checkpoints before execution."
+      },
+      {
+        "id": "next_steps",
+        "type": "markdown",
+        "body": "## Next step: implement the isolated launcher, prove resume equivalence, then start training\n\nThe receiving environment should first transfer and hash the complete source snapshot, implement the v47-only launcher and ABC-Dimension-P feature provider, pass model and stop/resume smokes, and verify every output path. Only after these gates pass should the four 500-epoch jobs run sequentially."
+      },
+      {
+        "id": "further_questions",
+        "type": "markdown",
+        "body": "## Questions the completed run must answer\n\nDoes ABC-SDF improve both unknown ion-density and Bohm-profile error without a family regression? Does a longer schedule improve validation behavior rather than only training loss? Do surrogate-selected structures remain superior after COMSOL confirmation? If any answer is negative, the final report must retain that result rather than promote the model."
+      }
+    ]
+  },
+  "snapshot": {
+    "version": 1,
+    "generatedAt": "2026-08-30T15:00:00Z",
+    "status": "ready",
+    "datasets": {
+      "execution_plan": [
+        {"order": 1, "model": "Formal SDF", "representation": "Actual union SDF + mean source", "estimated_hours": 12.61},
+        {"order": 2, "model": "Formal Dimension", "representation": "Five geometry + two process scalars", "estimated_hours": 10.51},
+        {"order": 3, "model": "ABC-SDF", "representation": "Actual structure maps + actual-structure vacuum EM", "estimated_hours": 41.55},
+        {"order": 4, "model": "ABC-Dimension-P", "representation": "Broadcast dimensions + dimension-reconstructed vacuum EM", "estimated_hours": 41.5}
+      ]
+    },
+    "accessIssues": []
+  },
+  "sources": [],
+  "package_info": {
+    "originUrl": "artifact://icp-uno-epoch500-four-model-v47"
+  }
+}
