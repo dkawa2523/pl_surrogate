@@ -1,5 +1,23 @@
 # 他環境での500 epoch学習：最初に読む文書
 
+## 最短の参照順序
+
+1. 他環境エージェントへ渡す指示：
+   [REMOTE_AGENT_500EPOCH_PROMPT_JA.md](REMOTE_AGENT_500EPOCH_PROMPT_JA.md)
+2. データセットとLFS資産の取得：
+   [DATASET_ACQUISITION_JA.md](DATASET_ACQUISITION_JA.md)
+3. モデル間の公平比較契約：
+   [docs/01_MODEL_COMPARISON_CONTRACT.md](docs/01_MODEL_COMPARISON_CONTRACT.md)
+4. 500 epochの実装・学習・resume：
+   [docs/03_TRAINING_RUNBOOK.md](docs/03_TRAINING_RUNBOOK.md)
+5. 学習後の評価・最適化・図・監査：
+   [docs/04_EVALUATION_AND_OPTIMIZATION.md](docs/04_EVALUATION_AND_OPTIMIZATION.md)、
+   [docs/05_CONFERENCE_FIGURES.md](docs/05_CONFERENCE_FIGURES.md)、
+   [docs/06_RECOVERY_AUDIT_ACCEPTANCE.md](docs/06_RECOVERY_AUDIT_ACCEPTANCE.md)
+
+エージェントへ依頼するときは、1のMarkdownをそのまま貼り付ける。
+データ取得だけを別担当者が行う場合は2を渡す。
+
 ## このブランチで受け取れるもの
 
 `docs/icp-uno-epoch500-portable-v47` ブランチは、他環境でv47を実装・学習するための
@@ -18,6 +36,9 @@
 v45/v46のrun rootへ書き込まず、v47専用領域へ実装する。
 
 ## 取得
+
+詳細、容量を限定した取得方法、検証条件は
+[DATASET_ACQUISITION_JA.md](DATASET_ACQUISITION_JA.md)を正とする。
 
 ```powershell
 git clone --branch docs/icp-uno-epoch500-portable-v47 --single-branch `

@@ -16,6 +16,21 @@
 本ブランチにはデータに加えて、現行Python source snapshot、正式設定・初期重み、
 ABC-SDF参照実装・初期重み、正式参照checkpointを含めます。
 
+目的別の直接リンクは次のとおりです。
+
+- エージェントへ貼る指示文：
+  [REMOTE_AGENT_500EPOCH_PROMPT_JA.md](REMOTE_AGENT_500EPOCH_PROMPT_JA.md)
+- データセット・Git LFS取得：
+  [DATASET_ACQUISITION_JA.md](DATASET_ACQUISITION_JA.md)
+- 500 epoch学習・resume仕様：
+  [docs/03_TRAINING_RUNBOOK.md](docs/03_TRAINING_RUNBOOK.md)
+- 評価・最適化仕様：
+  [docs/04_EVALUATION_AND_OPTIMIZATION.md](docs/04_EVALUATION_AND_OPTIMIZATION.md)
+- 学会用図仕様：
+  [docs/05_CONFERENCE_FIGURES.md](docs/05_CONFERENCE_FIGURES.md)
+- 監査・完了条件：
+  [docs/06_RECOVERY_AUDIT_ACCEPTANCE.md](docs/06_RECOVERY_AUDIT_ACCEPTANCE.md)
+
 1. 正式SDF
 2. 正式Dimension
 3. ABC-SDF：多重解像度、入力群別lifting、適応的局所・大域混合
