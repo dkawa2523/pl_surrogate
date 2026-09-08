@@ -1,0 +1,55 @@
+{
+  "schema": "icp-uno-e1-dimension-current-trial-spatial-cache-v52",
+  "source": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237",
+  "dataset": "data/outputs_icp_stage4_plus_v43_vacuum_q3_v45",
+  "history_rows": {
+    "dimension": 7040,
+    "e1": 7040
+  },
+  "displayed_trial_states": {
+    "dimension": 90,
+    "e1": 90
+  },
+  "first_history_index": {
+    "dimension": 0,
+    "e1": 0
+  },
+  "last_history_index": {
+    "dimension": 7039,
+    "e1": 7039
+  },
+  "exact_index_coverage": {
+    "dimension": true,
+    "e1": true
+  },
+  "inference_qa": {
+    "dimension": {
+      "unique_states": 90,
+      "max_recomputed_dmax_abs_delta": 9.107589721679688e-05,
+      "max_recomputed_mean_flux_relative_delta": 8.563612236307647e-06
+    },
+    "e1": {
+      "unique_states": 90,
+      "max_recomputed_dmax_abs_delta": 0.0001252293586730957,
+      "max_recomputed_mean_flux_relative_delta": 1.3159857559114919e-05
+    }
+  },
+  "display": {
+    "finite_value_count": 23040000,
+    "raw_min": 1.4904599083820358e-06,
+    "raw_max": 30.942434310913086,
+    "display_quantile_low": 0.01,
+    "display_quantile_high": 0.99,
+    "display_min": 0.1176784411072731,
+    "display_max": 22.343286609649674
+  },
+  "cache": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/animation_trial_spatial_cache_v52.npz",
+  "frame_index_invariant": "profile = spatial field = geometry = Dmax annotation = current marker",
+  "running_best_usage": "optimization-history line only",
+  "surrogate_only_pending_COMSOL_validation": true,
+  "reconstruction_tolerances": {
+    "dmax_absolute": 0.0005,
+    "mean_flux_relative": 0.001
+  },
+  "validation_passed": true
+}

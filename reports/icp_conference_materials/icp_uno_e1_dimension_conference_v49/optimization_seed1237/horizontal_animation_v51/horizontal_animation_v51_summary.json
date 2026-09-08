@@ -1,5 +1,5 @@
 {
-  "schema": "icp-uno-e1-dimension-horizontal-animation-v51",
+  "schema": "icp-uno-e1-dimension-horizontal-current-trial-animation-v52",
   "reference_assets": {
     "icp": "reports/icp_conference_materials/axisymmetric_dimension_sdf_bohm_optimization_model_case_v1/optimization_animation_v1",
     "gec": "reports/gec_conference_materials/optimization_assets/field_loss_animation"
@@ -9,14 +9,14 @@
     "e1": 7040
   },
   "shared_limits": {
-    "profile_limit_percent": 70.0,
+    "profile_limit_percent": 140.0,
     "loss_limits_percent": [
       8.309528231620789,
       344.7869122028351
     ],
     "spatial_limits": [
-      0.08120058722794057,
-      23.548712921142553
+      0.1176784411072731,
+      22.343286609649674
     ]
   },
   "palette": {
@@ -33,6 +33,27 @@
   },
   "layout_fixed_between_frames": true,
   "model_stacking": "none; one landscape GIF per model",
+  "frame_state": "current sampled trial; running best appears only in the orange history line",
+  "displayed_trial_count": 90,
+  "full_history_rows_per_model": 7040,
+  "frame_index_qa": {
+    "dimension": {
+      "displayed_unique_history_indices": 90,
+      "cached_history_indices": 90,
+      "exact_spatial_index_set": true,
+      "first_history_index": 0,
+      "middle_history_index": 3559,
+      "last_history_index": 7039
+    },
+    "e1": {
+      "displayed_unique_history_indices": 90,
+      "cached_history_indices": 90,
+      "exact_spatial_index_set": true,
+      "first_history_index": 0,
+      "middle_history_index": 3559,
+      "last_history_index": 7039
+    }
+  },
   "outputs": {
     "dimension": {
       "one_dimensional": {
@@ -53,7 +74,10 @@
         "canvas_inches": [
           13.4,
           4.2
-        ]
+        ],
+        "frame_state": "current sampled trial",
+        "frame_index_invariant": "profile = spatial field = geometry = current marker",
+        "best_so_far_usage": "orange optimization-history line only"
       },
       "two_dimensional": {
         "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_2d_horizontal.gif",
@@ -73,7 +97,10 @@
         "canvas_inches": [
           13.4,
           4.2
-        ]
+        ],
+        "frame_state": "current sampled trial",
+        "frame_index_invariant": "profile = spatial field = geometry = current marker",
+        "best_so_far_usage": "orange optimization-history line only"
       },
       "combined_1d_2d": {
         "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_1d_2d_horizontal.gif",
@@ -93,7 +120,10 @@
         "canvas_inches": [
           17.4,
           4.2
-        ]
+        ],
+        "frame_state": "current sampled trial",
+        "frame_index_invariant": "profile = spatial field = geometry = current marker",
+        "best_so_far_usage": "orange optimization-history line only"
       }
     },
     "e1": {
@@ -115,7 +145,10 @@
         "canvas_inches": [
           13.4,
           4.2
-        ]
+        ],
+        "frame_state": "current sampled trial",
+        "frame_index_invariant": "profile = spatial field = geometry = current marker",
+        "best_so_far_usage": "orange optimization-history line only"
       },
       "two_dimensional": {
         "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_2d_horizontal.gif",
@@ -135,7 +168,10 @@
         "canvas_inches": [
           13.4,
           4.2
-        ]
+        ],
+        "frame_state": "current sampled trial",
+        "frame_index_invariant": "profile = spatial field = geometry = current marker",
+        "best_so_far_usage": "orange optimization-history line only"
       },
       "combined_1d_2d": {
         "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_1d_2d_horizontal.gif",
@@ -155,7 +191,10 @@
         "canvas_inches": [
           17.4,
           4.2
-        ]
+        ],
+        "frame_state": "current sampled trial",
+        "frame_index_invariant": "profile = spatial field = geometry = current marker",
+        "best_so_far_usage": "orange optimization-history line only"
       }
     }
   },

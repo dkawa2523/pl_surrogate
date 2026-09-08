@@ -2,9 +2,10 @@
 """Restore the established landscape GEC/ICP optimization-animation layout.
 
 This renderer does not rerun optimization or training.  It uses the validated
-v49 search histories and the v50 spatial cache, then exports synchronized 1D,
-2D, and combined landscape animations per model.  All outputs remain
-surrogate-only.
+v49 search histories and the v52 current-trial spatial cache, then exports
+synchronized 1D, 2D, and combined landscape animations per model.  In every
+frame the profile, field, geometry, annotation, and current marker resolve to
+one identical sampled trial.  All outputs remain surrogate-only.
 """
 
 from __future__ import annotations
@@ -88,23 +89,6 @@ def _read_history(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _running_best_indices(rows: list[dict[str, Any]]) -> np.ndarray:
-    best = np.empty(len(rows), dtype=np.int64)
-    current = -1
-    current_rank = np.inf
-    for index, row in enumerate(rows):
-        feasible = bool(row["density_feasible"] and row["geometry_feasible"])
-        rank = float(row["rank"])
-        if feasible and rank < current_rank:
-            current = index
-            current_rank = rank
-        if current < 0 and rank < current_rank:
-            current = index
-            current_rank = rank
-        best[index] = max(current, 0)
-    return best
-
-
 def _frame_plan(
     histories: dict[str, list[dict[str, Any]]],
     frames: int,
@@ -115,15 +99,18 @@ def _frame_plan(
     progress = np.linspace(0.0, 1.0, frame_count)
     hold = max(1, int(round(float(hold_seconds) * float(fps))))
     progress = np.concatenate((progress, np.ones(hold)))
-    running = {name: _running_best_indices(rows) for name, rows in histories.items()}
-    selected: dict[str, np.ndarray] = {}
+    positions_by_model: dict[str, np.ndarray] = {}
     for name, rows in histories.items():
         positions = np.asarray(
             [min(len(rows) - 1, int(round(float(fraction) * (len(rows) - 1)))) for fraction in progress],
             dtype=np.int64,
         )
-        selected[name] = running[name][positions]
-    return {"progress": progress, "hold": hold, "running": running, "selected": selected}
+        positions_by_model[name] = positions
+    return {
+        "progress": progress,
+        "hold": hold,
+        "positions": positions_by_model,
+    }
 
 
 def _load_payload(source: Path, representation: str, expected_rows: int) -> dict[str, np.ndarray]:
@@ -157,7 +144,7 @@ def _animation_metadata(path: Path, render_steps: int, fps: float, hold: int) ->
 
 
 def _load_spatial_cache(source: Path) -> tuple[dict[str, dict[int, np.ndarray]], dict[str, np.ndarray]]:
-    with np.load(source / "animation_spatial_cache_v50.npz", allow_pickle=False) as pack:
+    with np.load(source / "animation_trial_spatial_cache_v52.npz", allow_pickle=False) as pack:
         grid = {
             "r": np.asarray(pack["r"], dtype=np.float32),
             "z": np.asarray(pack["z"], dtype=np.float32),
@@ -193,7 +180,7 @@ def _shared_limits(
     for name in REPRESENTATIONS:
         means = np.asarray([float(row["mean_bohm_flux"]) for row in histories[name]], dtype=np.float64)
         normalized = 100.0 * (payloads[name]["profiles"] / np.maximum(means[:, None], 1.0) - 1.0)
-        selected_profiles.append(normalized[np.unique(plan["selected"][name])])
+        selected_profiles.append(normalized[np.unique(plan["positions"][name])])
     max_abs = float(np.max(np.abs(np.concatenate(selected_profiles, axis=0))))
     profile_limit = max(20.0, 10.0 * math.ceil(1.08 * max_abs / 10.0))
     deviations = np.concatenate([100.0 * payloads[name]["deviations"] for name in REPRESENTATIONS])
@@ -331,7 +318,7 @@ def _geometry_axis(axis: plt.Axes, grid: dict[str, np.ndarray]) -> tuple[list[Re
     )
     text = axis.text(
         0.03,
-        0.97,
+        0.37,
         "",
         transform=axis.transAxes,
         va="top",
@@ -476,13 +463,13 @@ def _render_one(
     fig.text(
         0.5,
         0.885,
-        "Frozen seed-1237 surrogate; same 7,040-evaluation history. Axes and colors are fixed. Surrogate-only.",
+        "Each frame shows one sampled current trial; orange line is best-so-far. Same 7,040-evaluation history; surrogate-only.",
         ha="center",
         fontsize=8.2,
         color=MID,
     )
-    selected = plan["selected"][representation]
-    first_index = int(selected[0])
+    positions = plan["positions"][representation]
+    first_index = int(positions[0])
     image = spatial_text = None
     if spatial_axis is not None:
         image, spatial_text = _spatial_axis(
@@ -511,18 +498,17 @@ def _render_one(
     running = _running_feasible(history)
 
     def update(frame: int):
-        progress = float(plan["progress"][frame])
-        position = min(len(history) - 1, int(round(progress * (len(history) - 1))))
-        best_index = int(selected[frame])
-        row = history[best_index]
+        current_index = int(positions[frame])
+        position = current_index
+        row = history[current_index]
         dmax = 100.0 * float(row["bohm_max_deviation"])
         density = float(row["mean_density"]) / 1.0e17
         if image is not None and spatial_text is not None:
-            image.set_data(np.ma.masked_invalid(fields[best_index]))
-            spatial_text.set_text(f"best N={int(row['nncoil'])}\nDmax={dmax:.2f}%")
+            image.set_data(np.ma.masked_invalid(fields[current_index]))
+            spatial_text.set_text(f"current N={int(row['nncoil'])}\ntrial Dmax={dmax:.2f}%")
         _update_geometry(coil_patches, row)
         geometry_text.set_text(
-            f"best N={int(row['nncoil'])}\n"
+            f"current N={int(row['nncoil'])}\n"
             f"height span={float(row.get('height_span_cm', 0.0)):.2f} cm\n"
             f"size span={float(row.get('size_span_cm', 0.0)):.2f} cm"
         )
@@ -539,15 +525,16 @@ def _render_one(
             loss_artists["completed"].set_offsets(np.empty((0, 2)))
         finite = np.isfinite(running[:upto])
         loss_artists["best"].set_data(np.arange(1, upto + 1)[finite], running[:upto][finite])
-        loss_artists["current"].set_offsets([[position + 1, deviation[position]]])
+        loss_artists["current"].set_offsets([[current_index + 1, deviation[current_index]]])
         best_value = float(running[position]) if np.isfinite(running[position]) else float("nan")
         loss_artists["text"].set_text(
-            f"evaluation: {position + 1}/{len(history)}\n"
+            f"current trial: {current_index + 1}/{len(history)}\n"
+            f"trial Dmax: {deviation[current_index]:.2f}%\n"
             f"best feasible: {best_value:.2f}%"
         )
         if profile_line is not None and profile_text is not None:
-            profile_line.set_ydata(profile_deviation[best_index])
-            profile_text.set_text(f"Dmax: {dmax:.2f}%\nmean density: {density:.2f} x 1e17 m^-3")
+            profile_line.set_ydata(profile_deviation[current_index])
+            profile_text.set_text(f"trial Dmax: {dmax:.2f}%\nmean density: {density:.2f} x 1e17 m^-3")
         displayed_frame = min(frame + 1, len(plan["progress"]) - int(plan["hold"]))
         displayed_total = len(plan["progress"]) - int(plan["hold"])
         title.set_text(
@@ -586,6 +573,9 @@ def _render_one(
             "representation": representation,
             "layout": layout,
             "canvas_inches": list(figsize),
+            "frame_state": "current sampled trial",
+            "frame_index_invariant": "profile = spatial field = geometry = current marker",
+            "best_so_far_usage": "orange optimization-history line only",
         }
     )
     return metadata
@@ -607,11 +597,22 @@ def main() -> int:
         float(args.final_hold_seconds),
     )
     fields, grid = _load_spatial_cache(source)
+    frame_index_qa: dict[str, dict[str, Any]] = {}
     for name in REPRESENTATIONS:
-        missing = sorted(set(map(int, np.unique(plan["selected"][name]))) - set(fields[name]))
+        expected = set(map(int, np.unique(plan["positions"][name])))
+        actual = set(fields[name])
+        missing = sorted(expected - actual)
         if missing:
             raise ValueError(f"spatial cache is missing {name} history indices: {missing}")
-    display_summary = json.loads((source / "animation_revision_v50_summary.json").read_text(encoding="utf-8"))
+        frame_index_qa[name] = {
+            "displayed_unique_history_indices": len(expected),
+            "cached_history_indices": len(actual),
+            "exact_spatial_index_set": bool(expected == actual),
+            "first_history_index": int(plan["positions"][name][0]),
+            "middle_history_index": int(plan["positions"][name][int(args.animation_frames) // 2]),
+            "last_history_index": int(plan["positions"][name][int(args.animation_frames) - 1]),
+        }
+    display_summary = json.loads((source / "animation_trial_spatial_cache_v52_summary.json").read_text(encoding="utf-8"))
     shared = _shared_limits(histories, payloads, plan, display_summary)
     outputs: dict[str, dict[str, Any]] = {}
     for name in REPRESENTATIONS:
@@ -657,7 +658,7 @@ def main() -> int:
             ),
         }
     summary = {
-        "schema": "icp-uno-e1-dimension-horizontal-animation-v51",
+        "schema": "icp-uno-e1-dimension-horizontal-current-trial-animation-v52",
         "reference_assets": {
             "icp": "reports/icp_conference_materials/axisymmetric_dimension_sdf_bohm_optimization_model_case_v1/optimization_animation_v1",
             "gec": "reports/gec_conference_materials/optimization_assets/field_loss_animation",
@@ -678,6 +679,10 @@ def main() -> int:
         },
         "layout_fixed_between_frames": True,
         "model_stacking": "none; one landscape GIF per model",
+        "frame_state": "current sampled trial; running best appears only in the orange history line",
+        "displayed_trial_count": int(args.animation_frames),
+        "full_history_rows_per_model": 7040,
+        "frame_index_qa": frame_index_qa,
         "outputs": outputs,
         "surrogate_only_pending_COMSOL_validation": True,
         "validation_passed": bool(
@@ -685,6 +690,7 @@ def main() -> int:
             and shared["spatial_limits"][1] > shared["spatial_limits"][0] >= 0.0
             and shared["profile_limit_percent"] > 0.0
             and shared["loss_limits_percent"][1] > shared["loss_limits_percent"][0] > 0.0
+            and all(frame_index_qa[name]["exact_spatial_index_set"] for name in REPRESENTATIONS)
         ),
     }
     path = out_dir / "horizontal_animation_v51_summary.json"

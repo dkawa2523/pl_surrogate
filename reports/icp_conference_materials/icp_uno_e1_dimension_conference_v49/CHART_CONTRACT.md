@@ -130,3 +130,24 @@
 - Metric: the left axis shows percentage deviation from each candidate's area-weighted wafer mean over the established 200 radial bins and ten-layer wafer-near band; the center axis shows the saved Dmax objective for all 7,040 evaluations.
 - Comparison: Dimension and E1 use identical axis limits, frame indices, final hold, geometry bounds, and non-color encodings; no panel is reflowed between frames.
 - Claim boundary: the animation visualizes frozen-surrogate optimization behavior only; the optimized final candidate remains pending COMSOL confirmation.
+
+## Current-trial coherence revision
+
+- Analytical question: for each displayed optimization trial, what geometry was evaluated and what 1D/2D Bohm response did that exact geometry predict?
+- Frame grain: 90 uniformly spaced evaluated trials are sampled from each complete 7,040-trial history; the final hold repeats trial 7,040 without creating a new analytical state.
+- Index invariant: profile, spatial field, coil geometry, trial Dmax annotation, and pink current-trial marker must all use the same saved history index. Only the orange convergence line represents the running best.
+- Comparison: Dimension and E1 retain identical sampled progress fractions, axis limits, palette, canvas dimensions, and final hold.
+- Visible wording: panels and annotations say `current trial` or `trial Dmax`; they must not call the displayed geometry or field `best`.
+- QA blocker: publication is blocked if any frame's profile, field, geometry, and current marker do not resolve to one identical history index.
+
+## Formal Dimension–SDF truth/prediction/error spatial figures
+
+- Analytical question: on the same three frozen unknown-structure cases, where do the latest Formal Dimension and Formal SDF ion-density predictions agree with or deviate from COMSOL?
+- Models: seed 1237, 200 training epochs, identical 957-case dataset and fixed split; validation-selected epochs are 36 for Formal Dimension and 152 for Formal SDF.
+- Data grain: three representative unknown-structure cases, each on the same 440 x 600 axisymmetric grid. Population claims remain based on all 75 unknown-structure cases and are not inferred from the three displayed cases alone.
+- Figures: one 3 x 3 `COMSOL truth | model prediction | signed error` figure per model, plus one 3 x 5 direct-comparison figure with a single COMSOL column and prediction/error pairs for both models.
+- Field and units: physical ion density `ni` in `10^17 m^-3`; signed error is `prediction - COMSOL` in the same units.
+- Scale policy: every truth and prediction panel uses one joint physical scale; every error panel uses one joint symmetric signed-error scale across both models and all three cases. Both limits use the joint 99.5th percentile and the clipping policy is printed in the subtitle.
+- Palette: `viridis` for non-negative physical density and `RdBu_r` centered at zero for signed error; model identity is carried by panel titles and row labels, not by changing physical-field colors.
+- Outputs: PNG, SVG, and PDF under `formal_dimension_sdf_spatial_v52`; source metrics and a machine-readable validation summary are colocated.
+- QA blocker: masks, coordinates, and COMSOL truth must match between model records; recomputed plasma-domain relative L2 must match the saved case metrics within numerical tolerance.

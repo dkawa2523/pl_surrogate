@@ -18,9 +18,23 @@
 | 左から右へサイズを0.60／1.00／1.40 cmに変更 | 15.2% | 2.9% |
 | 左から右へ高さを-0.25／0／+0.25 cmに変更 | 15.0% | 3.9% |
 
+## 最新正式モデルの空間分布：COMSOL真値／予測値／誤差
+
+[推奨：Formal DimensionとFormal SDFの直接比較（PNG）](formal_dimension_sdf_spatial_v52/22_formal_dimension_sdf_truth_prediction_error.png) ([SVG](formal_dimension_sdf_spatial_v52/22_formal_dimension_sdf_truth_prediction_error.svg)／[PDF](formal_dimension_sdf_spatial_v52/22_formal_dimension_sdf_truth_prediction_error.pdf))
+
+![Formal DimensionとFormal SDFの空間分布比較](formal_dimension_sdf_spatial_v52/22_formal_dimension_sdf_truth_prediction_error.png)
+
+同じ未知構造3例について、`COMSOL真値 | Dimension予測 | Dimension誤差 | SDF予測 | SDF誤差` を同一色軸で示します。物理量はイオン密度、符号付き誤差は `予測 − COMSOL` です。
+
+- [図一式と読み方](formal_dimension_sdf_spatial_v52/README.md)
+- [Formal Dimensionのみ](formal_dimension_sdf_spatial_v52/20_formal_dimension_truth_prediction_error.png)
+- [Formal SDFのみ](formal_dimension_sdf_spatial_v52/20_formal_sdf_truth_prediction_error.png)
+- 未知構造75例全体のイオン密度相対L2中央値：Dimension `27.37%`、SDF `7.10%`。
+- 表示3例は誤差の空間的位置を説明する代表例です。全体性能の主張は75例の集団統計に基づきます。
+
 ## 最適化アニメーション
 
-全版とも、モデルごとに独立した横長レイアウトです。両モデルで同じ7,040評価、90表示状態、固定軸、12 fps、終端保持1.57秒を使用しています。
+全版とも、モデルごとに独立した横長レイアウトです。両モデルで同じ7,040評価から均等に抽出した90 trial、固定軸、12 fps、終端保持1.57秒を使用しています。各フレームの1D分布・2D分布・コイル構造・ピンクの現在点は、すべて同じtrialに対応します。橙線だけがその時点までの最良値です。
 
 ### 1D Bohm版：Bohm分布｜探索履歴｜コイル配置
 
@@ -55,7 +69,8 @@
 
 - [図の設計契約](CHART_CONTRACT.md)
 - [数値・表示検証レポート](optimization_seed1237/VALIDATION_REPORT.md)
-- [GIFメタデータと共通表示範囲](optimization_seed1237/horizontal_animation_v51/horizontal_animation_v51_summary.json)
+- [GIFメタデータ、trial対応検証、共通表示範囲](optimization_seed1237/horizontal_animation_v51/horizontal_animation_v51_summary.json)
+- [2D current-trialキャッシュの検証](optimization_seed1237/animation_trial_spatial_cache_v52_summary.json)
 
 横長アニメーションの再生成コマンド：
 
@@ -69,4 +84,10 @@
 .venv-torch\Scripts\python.exe experiments\icp_stage4\uno_causal_response_v48\plot_e1_dimension_00.py
 ```
 
-READMEから参照する図の入力CSV、v49探索履歴、候補payload、v50空間分布キャッシュも同じコミットに含めています。横長アニメーションの再生成は学習・最適化・COMSOLを再実行せず、保存済み結果だけを描画します。
+Formal Dimension／SDF空間分布図の再生成コマンド：
+
+```powershell
+.venv-torch\Scripts\python.exe experiments\icp_stage4\uno_epoch500_four_model_protocol_v47\plot_formal_dimension_sdf_truth_prediction_error_v52.py
+```
+
+READMEから参照する図の入力CSV、v49探索履歴、候補payload、各表示trialに対応するv52空間分布キャッシュも同じコミットに含めています。横長アニメーションの再生成は学習・最適化・COMSOLを再実行せず、保存済み結果だけを描画します。

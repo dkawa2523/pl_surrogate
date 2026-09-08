@@ -1,0 +1,7 @@
+﻿model,case_id,saved_ni_relative_l2_pct,recomputed_ni_relative_l2_pct,absolute_delta_percentage_points
+formal_dimension,v43_te_n4_variant_1__center,128.02296787431473,128.02296787431473,0.0
+formal_sdf,v43_te_n4_variant_1__center,44.13727850167839,44.13727850167839,0.0
+formal_dimension,v43_te_n4_variant_2__center,60.562550075851874,60.562550075851874,0.0
+formal_sdf,v43_te_n4_variant_2__center,3.6676731301169774,3.667673130116978,4.440892098500626e-16
+formal_dimension,v43_te_n4_variant_3__center,11.190390202906292,11.190390202906292,0.0
+formal_sdf,v43_te_n4_variant_3__center,3.19728933883295,3.19728933883295,0.0

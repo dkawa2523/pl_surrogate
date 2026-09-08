@@ -1,0 +1,61 @@
+{
+  "schema": "icp-formal-dimension-sdf-spatial-truth-prediction-error-v52",
+  "models": {
+    "formal_dimension": {
+      "training_epochs": 200,
+      "selected_epoch": 36
+    },
+    "formal_sdf": {
+      "training_epochs": 200,
+      "selected_epoch": 152
+    }
+  },
+  "source_prediction_pack": "reports/icp_conference_materials/icp_uno_epoch500_four_model_v47/formal_200epoch/unknown_structure_eval/representative_predictions.npz",
+  "source_case_metrics": "reports/icp_conference_materials/icp_uno_epoch500_four_model_v47/formal_200epoch/unknown_structure_eval/case_metrics_unknown75.csv",
+  "cases": [
+    "v43_te_n4_variant_1__center",
+    "v43_te_n4_variant_2__center",
+    "v43_te_n4_variant_3__center"
+  ],
+  "grid_shape": [
+    440,
+    600
+  ],
+  "field": "physical ion density ni",
+  "physical_units": "1e17 m^-3",
+  "error_definition": "prediction - COMSOL",
+  "physical_display_limit": 5.148507656844578,
+  "signed_error_display_limit": 2.81536525653592,
+  "display_quantile": 0.995,
+  "truth_exact_match_between_model_records": {
+    "v43_te_n4_variant_1__center": true,
+    "v43_te_n4_variant_2__center": true,
+    "v43_te_n4_variant_3__center": true
+  },
+  "mask_and_grid_exact_match_between_model_records": {
+    "v43_te_n4_variant_1__center": true,
+    "v43_te_n4_variant_2__center": true,
+    "v43_te_n4_variant_3__center": true
+  },
+  "max_recomputed_metric_delta_percentage_points": 4.440892098500626e-16,
+  "representative_case_scope": "three displayed examples; population claims use all 75 unknown-structure cases",
+  "outputs": {
+    "formal_dimension": [
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/20_formal_dimension_truth_prediction_error.png",
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/20_formal_dimension_truth_prediction_error.svg",
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/20_formal_dimension_truth_prediction_error.pdf"
+    ],
+    "formal_sdf": [
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/20_formal_sdf_truth_prediction_error.png",
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/20_formal_sdf_truth_prediction_error.svg",
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/20_formal_sdf_truth_prediction_error.pdf"
+    ],
+    "direct_comparison": [
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/22_formal_dimension_sdf_truth_prediction_error.png",
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/22_formal_dimension_sdf_truth_prediction_error.svg",
+      "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/22_formal_dimension_sdf_truth_prediction_error.pdf"
+    ]
+  },
+  "metrics_csv": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/formal_dimension_sdf_spatial_v52/spatial_case_metrics_v52.csv",
+  "validation_passed": true
+}

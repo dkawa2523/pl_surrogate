@@ -1,0 +1,74 @@
+{
+  "comparison_contract": {
+    "seed": 1237,
+    "epochs": 200,
+    "train_cases": 685,
+    "validation_cases": 136,
+    "test_cases": 136,
+    "unknown_test_cases": 75,
+    "unknown_cases_per_family": 25,
+    "same_test_membership": true,
+    "same_target_schema": true,
+    "checkpoint_selection": "minimum validation case-macro spatial objective"
+  },
+  "leaderboard": {
+    "formal_sdf": {
+      "quality_score": 0.0103505686190157,
+      "selected_epoch": 152,
+      "selection_value": 0.0964950647775157,
+      "plasma_r2": {
+        "ne": 0.9937921103780396,
+        "ni": 0.9937819281036456,
+        "Te": 0.9974801410091388,
+        "phi": 0.9963126477879348
+      }
+    },
+    "formal_dimension": {
+      "quality_score": 0.0857821231626739,
+      "selected_epoch": 36,
+      "selection_value": 0.19252702931106,
+      "plasma_r2": {
+        "ne": 0.902429595997964,
+        "ni": 0.902235118851086,
+        "Te": 0.9754133270794482,
+        "phi": 0.9304958538381436
+      }
+    }
+  },
+  "unknown75": {
+    "formal_sdf": {
+      "median_absolute_error_pct": {
+        "ne_rel_l2_pct": 7.091752867823378,
+        "ni_rel_l2_pct": 7.102600021105888,
+        "Te_rel_l2_pct": 1.5613940392461316,
+        "phi_rel_l2_pct": 1.818403755155425,
+        "bohm_profile_rel_l2_pct": 8.335956667371331
+      },
+      "median_response": {
+        "ni_delta_rel_l2_pct": 15.071495788329443,
+        "ni_delta_cosine": 0.993459208988876,
+        "ni_delta_gain": 0.992741004746485,
+        "bohm_delta_rel_l2_pct": 22.42867953866646,
+        "bohm_delta_cosine": 0.983537125053367,
+        "bohm_delta_gain": 1.0224953377857446
+      }
+    },
+    "formal_dimension": {
+      "median_absolute_error_pct": {
+        "ne_rel_l2_pct": 27.41278806785247,
+        "ni_rel_l2_pct": 27.368586800269323,
+        "Te_rel_l2_pct": 4.323084381195448,
+        "phi_rel_l2_pct": 4.675565015016655,
+        "bohm_profile_rel_l2_pct": 33.299630208806164
+      },
+      "median_response": {
+        "ni_delta_rel_l2_pct": 59.78786873610829,
+        "ni_delta_cosine": 0.9682082418226956,
+        "ni_delta_gain": 1.0941537530507484,
+        "bohm_delta_rel_l2_pct": 81.02185440813506,
+        "bohm_delta_cosine": 0.9460364439304564,
+        "bohm_delta_gain": 1.217310786310378
+      }
+    }
+  }
+}
