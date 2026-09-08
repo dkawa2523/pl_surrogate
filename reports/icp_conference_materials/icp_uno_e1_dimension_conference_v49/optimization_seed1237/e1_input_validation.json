@@ -1,0 +1,19 @@
+{
+  "case_id": "case_g023_op03",
+  "generated_vs_training_feature_relative_l2_pct": {
+    "vacuum_aphi_unit": 0.00034614013704812273,
+    "vacuum_br_unit": 0.00011594922611894553,
+    "vacuum_bz_unit": 8.187754499485938e-05,
+    "vacuum_bmag_unit": 6.692172172358128e-05,
+    "sdf_coil_01": 0.28862251009342504,
+    "sdf_coil_02": 0.3647151428084713,
+    "sdf_coil_03": 0.3181426783409306
+  },
+  "torch_vs_production_numpy_vacuum_relative_l2_pct": {
+    "vacuum_aphi_unit": 0.00034547659572224725,
+    "vacuum_br_unit": 0.00010382920396070836,
+    "vacuum_bz_unit": 8.731195155140094e-05,
+    "vacuum_bmag_unit": 6.618260287971292e-05
+  },
+  "passed": true
+}

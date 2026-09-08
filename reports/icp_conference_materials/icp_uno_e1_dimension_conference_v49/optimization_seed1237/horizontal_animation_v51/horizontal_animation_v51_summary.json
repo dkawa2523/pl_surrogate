@@ -1,0 +1,164 @@
+{
+  "schema": "icp-uno-e1-dimension-horizontal-animation-v51",
+  "reference_assets": {
+    "icp": "reports/icp_conference_materials/axisymmetric_dimension_sdf_bohm_optimization_model_case_v1/optimization_animation_v1",
+    "gec": "reports/gec_conference_materials/optimization_assets/field_loss_animation"
+  },
+  "history_rows": {
+    "dimension": 7040,
+    "e1": 7040
+  },
+  "shared_limits": {
+    "profile_limit_percent": 70.0,
+    "loss_limits_percent": [
+      8.309528231620789,
+      344.7869122028351
+    ],
+    "spatial_limits": [
+      0.08120058722794057,
+      23.548712921142553
+    ]
+  },
+  "palette": {
+    "dimension": "#0072B2",
+    "e1": "#D55E00",
+    "spatial": "viridis",
+    "completed_feasible": "#0072B2",
+    "future_or_infeasible": "#999999",
+    "best_so_far": "#D55E00",
+    "current": "#CC79A7",
+    "coils": "#D62728",
+    "wafer": "#737373",
+    "wafer_band": "#FFB000"
+  },
+  "layout_fixed_between_frames": true,
+  "model_stacking": "none; one landscape GIF per model",
+  "outputs": {
+    "dimension": {
+      "one_dimensional": {
+        "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_1d_horizontal.gif",
+        "render_steps": 108,
+        "encoded_frame_count": 90,
+        "fps": 12.0,
+        "final_hold_render_steps": 18,
+        "encoded_duration_seconds": 8.69,
+        "final_frame_duration_seconds": 1.57,
+        "pixel_size": [
+          1407,
+          441
+        ],
+        "final_png": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_1d_horizontal_final.png",
+        "representation": "dimension",
+        "layout": "1 x 3 landscape",
+        "canvas_inches": [
+          13.4,
+          4.2
+        ]
+      },
+      "two_dimensional": {
+        "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_2d_horizontal.gif",
+        "render_steps": 108,
+        "encoded_frame_count": 90,
+        "fps": 12.0,
+        "final_hold_render_steps": 18,
+        "encoded_duration_seconds": 8.69,
+        "final_frame_duration_seconds": 1.57,
+        "pixel_size": [
+          1407,
+          441
+        ],
+        "final_png": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_2d_horizontal_final.png",
+        "representation": "dimension",
+        "layout": "1 x 3 landscape",
+        "canvas_inches": [
+          13.4,
+          4.2
+        ]
+      },
+      "combined_1d_2d": {
+        "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_1d_2d_horizontal.gif",
+        "render_steps": 108,
+        "encoded_frame_count": 90,
+        "fps": 12.0,
+        "final_hold_render_steps": 18,
+        "encoded_duration_seconds": 8.69,
+        "final_frame_duration_seconds": 1.57,
+        "pixel_size": [
+          1826,
+          441
+        ],
+        "final_png": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/dimension/dimension_optimization_1d_2d_horizontal_final.png",
+        "representation": "dimension",
+        "layout": "1 x 4 landscape",
+        "canvas_inches": [
+          17.4,
+          4.2
+        ]
+      }
+    },
+    "e1": {
+      "one_dimensional": {
+        "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_1d_horizontal.gif",
+        "render_steps": 108,
+        "encoded_frame_count": 90,
+        "fps": 12.0,
+        "final_hold_render_steps": 18,
+        "encoded_duration_seconds": 8.69,
+        "final_frame_duration_seconds": 1.57,
+        "pixel_size": [
+          1407,
+          441
+        ],
+        "final_png": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_1d_horizontal_final.png",
+        "representation": "e1",
+        "layout": "1 x 3 landscape",
+        "canvas_inches": [
+          13.4,
+          4.2
+        ]
+      },
+      "two_dimensional": {
+        "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_2d_horizontal.gif",
+        "render_steps": 108,
+        "encoded_frame_count": 90,
+        "fps": 12.0,
+        "final_hold_render_steps": 18,
+        "encoded_duration_seconds": 8.69,
+        "final_frame_duration_seconds": 1.57,
+        "pixel_size": [
+          1407,
+          441
+        ],
+        "final_png": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_2d_horizontal_final.png",
+        "representation": "e1",
+        "layout": "1 x 3 landscape",
+        "canvas_inches": [
+          13.4,
+          4.2
+        ]
+      },
+      "combined_1d_2d": {
+        "path": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_1d_2d_horizontal.gif",
+        "render_steps": 108,
+        "encoded_frame_count": 90,
+        "fps": 12.0,
+        "final_hold_render_steps": 18,
+        "encoded_duration_seconds": 8.69,
+        "final_frame_duration_seconds": 1.57,
+        "pixel_size": [
+          1826,
+          441
+        ],
+        "final_png": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/horizontal_animation_v51/e1/e1_optimization_1d_2d_horizontal_final.png",
+        "representation": "e1",
+        "layout": "1 x 4 landscape",
+        "canvas_inches": [
+          17.4,
+          4.2
+        ]
+      }
+    }
+  },
+  "surrogate_only_pending_COMSOL_validation": true,
+  "validation_passed": true
+}

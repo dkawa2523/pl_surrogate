@@ -1,0 +1,16 @@
+case,case_title,model,bohm_profile_relative_l2_pct
+anchor,Original equal layout,Formal Dimension,15.574894173704834
+spacing_left,Unequal spacing: middle -2.5 cm,Formal Dimension,16.805845089657737
+spacing_right,Unequal spacing: middle +2.5 cm,Formal Dimension,23.771893046023795
+size_gradient,Size only: 0.60 / 1.00 / 1.40 cm,Formal Dimension,15.234451840642286
+height_gradient_mild,Height only: -0.25 / 0 / +0.25 cm,Formal Dimension,15.028142876600594
+anchor,Original equal layout,Formal SDF,5.13207885034092
+spacing_left,Unequal spacing: middle -2.5 cm,Formal SDF,9.630241301005864
+spacing_right,Unequal spacing: middle +2.5 cm,Formal SDF,6.083342846659149
+size_gradient,Size only: 0.60 / 1.00 / 1.40 cm,Formal SDF,9.029157030881404
+height_gradient_mild,Height only: -0.25 / 0 / +0.25 cm,Formal SDF,5.3748543870661365
+anchor,Original equal layout,E1 causal EM,2.404506820658999
+spacing_left,Unequal spacing: middle -2.5 cm,E1 causal EM,7.969331036299766
+spacing_right,Unequal spacing: middle +2.5 cm,E1 causal EM,4.663715225198796
+size_gradient,Size only: 0.60 / 1.00 / 1.40 cm,E1 causal EM,2.8665184018231153
+height_gradient_mild,Height only: -0.25 / 0 / +0.25 cm,E1 causal EM,3.922110202096147

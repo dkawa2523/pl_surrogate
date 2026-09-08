@@ -1,0 +1,179 @@
+{
+  "schema": "icp-uno-e1-dimension-conference-optimization-v49",
+  "seed": 1237,
+  "dataset": "C:\\Users\\user\\Desktop\\pl_surrogate\\data\\outputs_icp_stage4_plus_v43_vacuum_q3_v45",
+  "dataset_case_count": 957,
+  "checkpoint_sha256": {
+    "dimension": "1de9d859f57981e725a773e0872688e3a0c5e89f072537bc9e64ebc5609f64e3",
+    "e1": "c0b5aca937faad445d9ab1d75f00bd273be457712bcdbec8021fbcc7e7923f3c"
+  },
+  "objective": {
+    "metric": "maximum absolute local deviation of uniform-radius-binned wafer-near Bohm flux",
+    "radial_range_cm": [
+      0.0,
+      20.0
+    ],
+    "radial_bins": 200,
+    "radial_binning": "uniform_radius",
+    "wafer_layers": 10,
+    "density_threshold_m3": 1e+17
+  },
+  "search": {
+    "optimizer": "scrambled Sobol screening plus bounded CMA-ES; no gradient polish",
+    "coil_counts": [
+      2,
+      3,
+      4,
+      5,
+      6
+    ],
+    "sobol_candidates_per_count": 128,
+    "cma_restarts_per_count": 4,
+    "cma_generations_per_restart": 20,
+    "population_size": 16,
+    "evaluations": {
+      "dimension": 7040,
+      "e1": 7040
+    },
+    "equal_budget": true
+  },
+  "layout_contract": {
+    "dimension": "regular spacing, common height, common size encoded by seven scalars",
+    "e1": "ordered unequal spacing plus bounded linear height and size trends",
+    "height_offset_limit_cm": 0.5,
+    "minimum_edge_gap_fraction_of_larger_adjacent_size": 0.5,
+    "all_scalar_and_size_bounds": "inside observed training bounds"
+  },
+  "input_validation": {
+    "case_id": "case_g023_op03",
+    "generated_vs_training_feature_relative_l2_pct": {
+      "vacuum_aphi_unit": 0.00034614013704812273,
+      "vacuum_br_unit": 0.00011594922611894553,
+      "vacuum_bz_unit": 8.187754499485938e-05,
+      "vacuum_bmag_unit": 6.692172172358128e-05,
+      "sdf_coil_01": 0.28862251009342504,
+      "sdf_coil_02": 0.3647151428084713,
+      "sdf_coil_03": 0.3181426783409306
+    },
+    "torch_vs_production_numpy_vacuum_relative_l2_pct": {
+      "vacuum_aphi_unit": 0.00034547659572224725,
+      "vacuum_br_unit": 0.00010382920396070836,
+      "vacuum_bz_unit": 8.731195155140094e-05,
+      "vacuum_bmag_unit": 6.618260287971292e-05
+    },
+    "passed": true
+  },
+  "best": {
+    "dimension": {
+      "representation": "dimension",
+      "nncoil": 4,
+      "rank": 0.1154632568359375,
+      "bohm_max_deviation": 0.1154632568359375,
+      "mean_bohm_flux": 2.1955090404677675e+20,
+      "mean_density": 1.2067372043075584e+17,
+      "density_feasible": true,
+      "geometry_feasible": true,
+      "geometry_margin_cm": 0.0,
+      "spacing_std_cm": 0.0,
+      "height_span_cm": 0.0,
+      "size_span_cm": 0.0,
+      "llcoil": 0.9727064371109009,
+      "rrc": 2.60813045501709,
+      "rrce": 26.246662139892578,
+      "zzc": 4.594999313354492,
+      "pp": 1237.74462890625,
+      "pp0": 0.07553824037313461,
+      "r_center_01": 3.0944836139678955,
+      "z_center_01": 19.08135223388672,
+      "coil_size_01": 0.9727064371109009,
+      "r_center_02": 9.00411605834961,
+      "z_center_02": 19.08135223388672,
+      "coil_size_02": 0.9727064371109009,
+      "r_center_03": 14.913748741149902,
+      "z_center_03": 19.08135223388672,
+      "coil_size_03": 0.9727064371109009,
+      "r_center_04": 20.823381423950195,
+      "z_center_04": 19.08135223388672,
+      "coil_size_04": 0.9727064371109009,
+      "r_center_05": "",
+      "z_center_05": "",
+      "coil_size_05": "",
+      "r_center_06": "",
+      "z_center_06": "",
+      "coil_size_06": "",
+      "stage": "cmaes",
+      "restart": 0,
+      "generation": 18,
+      "evaluation": 3242
+    },
+    "e1": {
+      "representation": "e1",
+      "nncoil": 4,
+      "rank": 0.11177575588226318,
+      "bohm_max_deviation": 0.11177575588226318,
+      "mean_bohm_flux": 2.618570504432255e+20,
+      "mean_density": 1.3431697610427597e+17,
+      "density_feasible": true,
+      "geometry_feasible": true,
+      "geometry_margin_cm": 0.23530852794647217,
+      "spacing_std_cm": 0.28094351291656494,
+      "height_span_cm": 0.7403287887573242,
+      "size_span_cm": 0.013371467590332031,
+      "llcoil": 1.4290311336517334,
+      "rrc": 3.6130356788635254,
+      "rrce": 20.874610900878906,
+      "zzc": 0.5136626958847046,
+      "pp": 2671.80419921875,
+      "pp0": 0.04652919992804527,
+      "r_center_01": 4.891602039337158,
+      "z_center_01": 14.849540710449219,
+      "coil_size_01": 1.4223453998565674,
+      "r_center_02": 10.242157936096191,
+      "z_center_02": 15.113094329833984,
+      "coil_size_02": 1.4268025159835815,
+      "r_center_03": 15.258954048156738,
+      "z_center_03": 15.360207557678223,
+      "coil_size_03": 1.4312597513198853,
+      "r_center_04": 19.921443939208984,
+      "z_center_04": 15.589869499206543,
+      "coil_size_04": 1.4357168674468994,
+      "r_center_05": "",
+      "z_center_05": "",
+      "coil_size_05": "",
+      "r_center_06": "",
+      "z_center_06": "",
+      "coil_size_06": "",
+      "stage": "cmaes",
+      "restart": 3,
+      "generation": 18,
+      "evaluation": 4193
+    }
+  },
+  "predicted_e1_dmax_improvement_pct": 3.1936574930619797,
+  "elapsed_seconds": {
+    "dimension": 49.62450410006568,
+    "e1": 330.37651519989595
+  },
+  "generated_files": [
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/10_optimized_design_comparison.png",
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/10_optimized_design_comparison.svg",
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/11_coil_count_comparison.png",
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/11_coil_count_comparison.svg",
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/12_optimization_convergence.png",
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/12_optimization_convergence.svg",
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/13_e1_dimension_optimization_animation.gif",
+    "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/13_e1_dimension_optimization_animation_final.png"
+  ],
+  "animation": {
+    "gif": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/13_e1_dimension_optimization_animation.gif",
+    "final_png": "reports/icp_conference_materials/icp_uno_e1_dimension_conference_v49/optimization_seed1237/13_e1_dimension_optimization_animation_final.png",
+    "render_steps": 138,
+    "frame_count": 120,
+    "fps": 12.0,
+    "final_hold_frames": 18,
+    "encoded_duration_seconds": 11.09,
+    "final_frame_duration_seconds": 1.57
+  },
+  "validation_status": "surrogate_only_pending_COMSOL_validation",
+  "validation_passed": true
+}
